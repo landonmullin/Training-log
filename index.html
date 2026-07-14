@@ -54,7 +54,8 @@
   .navbar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);display:flex;z-index:10;padding-bottom:env(safe-area-inset-bottom)}
   .navbar button{flex:1;padding:9px 0 10px;background:none;border:none;color:var(--sub);cursor:pointer;font-family:var(--body)}
   .navbar button.on{color:var(--ink)}
-  .navbar .ic{font-size:16px;font-family:var(--mono);line-height:1}
+  .navbar .ic{line-height:1;height:22px}
+  .navbar .ic svg{width:22px;height:22px;display:block;margin:0 auto;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   .navbar .tl{font-size:10px;margin-top:3px}
   .navbar button.on .tl{font-weight:700}
   .navbar .bar{height:3px;width:24px;margin:4px auto 0;border-radius:2px;background:transparent}
@@ -108,7 +109,12 @@ const DEFAULT_EXERCISES = [
  "Tricep Pushdown","Skull Crusher","Overhead Tricep Extension","Dips",
  "Chest Fly","Cable Crossover","Shrug","Ab Wheel","Cable Crunch"
 ];
-const SPLITS = { push:{name:"Push",color:"var(--push)"}, pull:{name:"Pull",color:"var(--pull)"}, legs:{name:"Legs",color:"var(--legs)"} };
+const SPLITS = {
+  push:{name:"Push",color:"var(--push)",soft:"rgba(232,89,12,0.16)"},
+  pull:{name:"Pull",color:"var(--pull)",soft:"rgba(43,138,62,0.16)"},
+  legs:{name:"Legs",color:"var(--legs)",soft:"rgba(112,72,232,0.16)"}
+};
+const UNTAGGED_SOFT = "rgba(102,115,138,0.14)";
 
 let data;
 try { data = JSON.parse(localStorage.getItem(KEY)) || structuredClone(EMPTY); }
@@ -222,6 +228,47 @@ function lineChart(rows, color, opts={}){
     ${g}<polyline points="${ptsAttr}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>${dots}</svg>`;
 }
 
+// simple hand-rolled SVG bar chart (baseline 0)
+function barChart(rows, color, opts={}){
+  const vals = rows.map(r=>r.value??0);
+  if (!rows.length || vals.every(v=>v===0)) return `<div class="muted" style="padding:20px">${esc(opts.emptyMsg||"No data yet.")}</div>`;
+  const W=520, H=250, padL=40, padR=10, padT=14, padB=26;
+  const max = Math.max(...vals)*1.1 || 1;
+  const iw=W-padL-padR, ih=H-padT-padB;
+  const bw = iw/rows.length;
+  const fmt = opts.fmt || (v=>Math.round(v*10)/10);
+  let g="";
+  for (let k=0;k<=4;k++){
+    const v=max*k/4, yy=padT+(1-v/max)*ih;
+    g += `<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="#E3E9F0" stroke-dasharray="3 3"/>`;
+    g += `<text x="${padL-6}" y="${yy+3}" font-size="10" fill="#66738A" text-anchor="end">${fmt(v)}</text>`;
+  }
+  let bars="";
+  rows.forEach((r,i)=>{
+    const v=r.value??0, bh=v/max*ih;
+    const x=padL+i*bw+bw*0.15, y=padT+ih-bh;
+    bars += `<rect x="${x}" y="${y}" width="${bw*0.7}" height="${Math.max(bh,0)}" rx="3" fill="${color}" opacity="${v===0?0.15:0.9}"><title>${esc(r.label)}: ${fmt(v)}</title></rect>`;
+    if (opts.valueLabels && v>0){
+      const cx = padL+i*bw+bw/2;
+      if (bh > 24) bars += `<text x="${cx}" y="${y+14}" font-size="10" font-weight="600" fill="#fff" text-anchor="middle">${fmt(v)}</text>`;
+      else bars += `<text x="${cx}" y="${y-4}" font-size="10" font-weight="600" fill="${color}" text-anchor="middle">${fmt(v)}</text>`;
+    }
+    const step = Math.max(1, Math.ceil(rows.length/6));
+    if (i%step===0||i===rows.length-1)
+      g += `<text x="${padL+i*bw+bw/2}" y="${H-8}" font-size="10" fill="#66738A" text-anchor="middle">${esc(r.label)}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${g}${bars}</svg>`;
+}
+// sunday of the week containing iso date
+function weekStartISO(iso){
+  const [y,m,d]=iso.split("-").map(Number);
+  const dt = new Date(y,m-1,d);
+  dt.setDate(dt.getDate()-dt.getDay());
+  return isoFromDate(dt);
+}
+// Riegel race prediction: t2 = t1 * (d2/d1)^1.06
+const riegel = (t1,d1,d2) => t1*Math.pow(d2/d1,1.06);
+
 // ================= ui state =================
 const now = new Date();
 const ui = {
@@ -234,6 +281,9 @@ const ui = {
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
   foodMetric: "kcal", foodManualOpen: false,
+  expandedLifts: new Set(),
+  confirmKey: null, pendingRestore: null,
+  trendView: null,
 };
 
 // ================= views =================
@@ -243,10 +293,18 @@ function render(){
   $("#view").innerHTML = v();
   afterRender();
 }
+const NAV_ICONS = {
+  calendar: `<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9.5h18M8 3v4M16 3v4"/></svg>`,
+  lift: `<svg viewBox="0 0 24 24"><rect x="4" y="7" width="3" height="10" rx="1"/><rect x="17" y="7" width="3" height="10" rx="1"/><path d="M7 12h10M2 9.5v5M22 9.5v5"/></svg>`,
+  cardio: `<svg viewBox="0 0 24 24"><path d="M3 16.5c0-1 .6-1.9 1.6-2.4l2.6-1.3c1.4-.7 2.4-1.9 2.9-3.4l.6 1.1c.6 1.1 1.6 2 2.8 2.4l4.9 1.6c1.3.4 2.6 1 2.6 2.2v1.3H3z"/><path d="M3 18h18M10.5 12.6l1.1-1.4M13.2 13.8l1.1-1.4"/></svg>`,
+  food: `<svg viewBox="0 0 24 24"><path d="M12 8c-2.6-1.9-6.7-.3-6.7 4.1 0 3.6 2.6 8.2 5 8.2.9 0 1.2-.5 1.7-.5s.8.5 1.7.5c2.4 0 5-4.6 5-8.2 0-4.4-4.1-6-6.7-4.1z"/><path d="M12 8c0-2.1 1.1-3.6 3.1-4.1"/></svg>`,
+  weight: `<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8.2 9.5a3.9 3.9 0 0 1 7.6 0"/><path d="M12 9.5l2.3-1.8"/></svg>`,
+  progress: `<svg viewBox="0 0 24 24"><path d="M4 4v16h16"/><path d="M7 15.5l4-4.5 3 2.5 5-6"/></svg>`,
+};
 function renderNav(){
-  const tabs = [["calendar","Cal","▦"],["lift","Lift","▮▮"],["cardio","Cardio","↝"],["food","Food","◑"],["weight","Weight","⚖"],["progress","Trends","⟋"]];
-  $("#navbar").innerHTML = tabs.map(([id,l,ic]) =>
-    `<button class="${ui.tab===id?"on":""}" onclick="App.tab('${id}')"><div class="ic">${ic}</div><div class="tl">${l}</div><div class="bar"></div></button>`).join("");
+  const tabs = [["calendar","Cal"],["lift","Lift"],["cardio","Cardio"],["food","Food"],["weight","Weight"],["progress","Trends"]];
+  $("#navbar").innerHTML = tabs.map(([id,l]) =>
+    `<button class="${ui.tab===id?"on":""}" onclick="App.tab('${id}')"><div class="ic">${NAV_ICONS[id]}</div><div class="tl">${l}</div><div class="bar"></div></button>`).join("");
 }
 
 // ----- calendar -----
@@ -281,14 +339,15 @@ function renderCalendar(){
   for (let d=1; d<=dim; d++){
     const iso = `${y}-${pad(m+1)}-${pad(d)}`;
     const has = map[iso];
-    let marks = "";
+    let marks = "", bg = "";
     if (has){
       const splits = [...new Set(has.lifts.map(w=>w.split).filter(Boolean))];
-      splits.forEach(s=> marks += `<span class="dot" style="background:${SPLITS[s].color}"></span>`);
-      if (has.lifts.some(w=>!w.split)) marks += `<span class="dot" style="background:#9AA4B5"></span>`;
+      if (splits.length) bg = SPLITS[splits[0]].soft;
+      else if (has.lifts.length) bg = UNTAGGED_SOFT;
+      else bg = "#fff";
       if (has.cardio.length) marks += `<span class="runner">🏃</span>`;
     }
-    cells += `<button class="day ${has?"has":""} ${iso===ui.selected?"sel":""} ${iso===todayISO()?"today":""}" onclick="App.selDay('${iso}')">
+    cells += `<button class="day ${iso===ui.selected?"sel":""} ${iso===todayISO()?"today":""}" ${bg?`style="background:${bg}"`:""} onclick="App.selDay('${iso}')">
       <span class="num">${d}</span><span class="marks">${marks}</span></button>`;
   }
   const sel = map[ui.selected];
@@ -297,22 +356,26 @@ function renderCalendar(){
   else {
     (sel.lifts||[]).forEach(w=>{
       const sp = w.split ? SPLITS[w.split] : null;
-      detail += `<div class="card" style="border-left:4px solid ${sp?sp.color:"#9AA4B5"}">
-        <div style="display:flex;justify-content:space-between;align-items:baseline">
+      const open = ui.expandedLifts.has(w.id);
+      detail += `<div class="card" style="border-left:4px solid ${sp?sp.color:"#9AA4B5"};padding:${open?"14px":"12px 14px"}">
+        <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="App.toggleLift('${w.id}')">
           <div class="h2" style="margin:0">${sp?sp.name.toUpperCase()+" DAY":"LIFTING SESSION"}</div>
-          <button class="del" onclick="App.delLift('${w.id}')">delete</button>
+          <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${open?"▾ hide":`${w.exercises.length} movement${w.exercises.length>1?"s":""} ▸`}</span>
         </div>
+        ${open?`
         ${w.exercises.map(ex=>`<div style="margin-top:10px"><div style="font-weight:700;font-size:14px">${esc(ex.name)}</div>
           ${ex.sets.map(s=>`<div style="font-family:var(--mono);font-size:13px;padding:2px 0 0 10px">${s.weight} lb × ${s.reps}${s.rpe?`<span style="color:var(--sub)"> @ RPE ${s.rpe}</span>`:""}</div>`).join("")}
         </div>`).join("")}
         ${w.notes?`<div style="margin-top:10px;font-size:13px;color:var(--sub);font-style:italic">${esc(w.notes)}</div>`:""}
+        <div style="text-align:right;margin-top:10px">${delBtn(`L${w.id}`, `App.delLift('${w.id}')`, "delete session")}</div>
+        `:""}
       </div>`;
     });
     (sel.cardio||[]).forEach(c=>{
       detail += `<div class="card" style="border-left:4px solid var(--cardio)">
         <div style="display:flex;justify-content:space-between;align-items:baseline">
           <div class="h2" style="margin:0">🏃 ${c.type==="walk"?"WALK":"RUN"}</div>
-          <button class="del" onclick="App.delCardio('${c.id}')">delete</button>
+          ${delBtn(`C${c.id}`, `App.delCardio('${c.id}')`)}
         </div>
         <div style="font-size:13px;color:var(--sub);margin-bottom:8px">${esc(c.name)}</div>
         <div class="stats">
@@ -323,7 +386,7 @@ function renderCalendar(){
     (sel.weights||[]).forEach(w=>{
       detail += `<div class="card" style="border-left:4px solid var(--ink);display:flex;justify-content:space-between;align-items:center">
         <div><div class="h2" style="margin:0">BODYWEIGHT</div><div style="font-family:var(--mono);font-size:15px;font-weight:600">${w.lbs} lb</div></div>
-        <button class="del" onclick="App.delWeight('${w.id}')">delete</button></div>`;
+        ${delBtn(`W${w.id}`, `App.delWeight('${w.id}')`)}</div>`;
     });
     (sel.nutrition||[]).forEach(n=>{
       detail += `<div class="card" style="border-left:4px solid var(--pull)">
@@ -587,7 +650,7 @@ function renderFood(){
           <span style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(d.date)}</span>
           <span style="font-family:var(--mono);font-size:13px;font-weight:700;color:${kcalColor(d.kcal)}">${d.kcal} kcal</span>
           <span style="font-family:var(--mono);font-size:12px;color:var(--sub)">P${d.protein} C${d.carbs} F${d.fat}</span>
-          <button class="del" onclick="App.delFood('${d.id||d.date}')">delete</button>
+          ${delBtn(`F${d.id||d.date}`, `App.delFood('${d.id||d.date}')`)}
         </div>
         ${s.kcalTarget?`<div style="font-size:11px;margin-top:4px;text-align:right">${kcalDelta(d.kcal)}</div>`:""}
       </div>`).join("");
@@ -624,7 +687,7 @@ function renderWeight(){
       <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px">
         <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${prettyDate(w.date)}</span>
         <span style="font-family:var(--mono);font-weight:600">${w.lbs} lb</span>
-        <button class="del" onclick="App.delWeight('${w.id}')">delete</button>
+        ${delBtn(`W${w.id}`, `App.delWeight('${w.id}')`)}
       </div>`).join("");
   }
   return html;
@@ -632,13 +695,94 @@ function renderWeight(){
 
 // ----- progress -----
 function renderProgress(){
-  let html = `<div class="seg">
-    <button class="${ui.progMode==="lift"?"on":""}" onclick="App.progMode('lift')">Lifting</button>
-    <button class="${ui.progMode==="cardio"?"on":""}" onclick="App.progMode('cardio')">Run / Walk</button>
-  </div>`;
-  if (ui.progMode==="lift"){
+  const back = (title) => `<div style="display:flex;align-items:center;gap:10px;margin:2px 0 10px">
+    <button onclick="App.trendView(null)" style="background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:14px;font-weight:700;cursor:pointer;color:var(--ink)">‹ Trends</button>
+    <div class="h2" style="margin:0">${title}</div></div>`;
+
+  // ---------- bodyweight ----------
+  if (ui.trendView==="weight"){
+    let html = back("Bodyweight");
+    const wRows = [...data.weights].sort((a,b)=>a.date<b.date?-1:1);
+    const latestW = wRows[wRows.length-1];
+    if (latestW){
+      const first = wRows[0];
+      const delta = wRows.length>1 ? Math.round((latestW.lbs-first.lbs)*10)/10 : null;
+      html += `<div class="card stats" style="border-left:4px solid var(--ink)">
+        ${stat("latest", latestW.lbs+" lb")}
+        ${delta!=null?stat("change", (delta>0?"+":"")+delta+" lb"):""}
+        ${stat("weigh-ins", wRows.length)}</div>`;
+    }
+    html += `<div class="card">${lineChart(wRows.map(w=>({label:shortDate(w.date), value:w.lbs})), "#182437",
+      {emptyMsg:"Log at least two weigh-ins on the Weight tab to draw your trend."})}</div>`;
+    return html;
+  }
+
+  // ---------- nutrition ----------
+  if (ui.trendView==="food"){
+    let html = back("Nutrition");
+    const nRows = [...data.nutrition].sort((a,b)=>a.date<b.date?-1:1).slice(-30);
+    if (nRows.length && data.settings.kcalTarget){
+      const under = nRows.filter(d=>d.kcal<=data.settings.kcalTarget).length;
+      const avgK = Math.round(nRows.reduce((s,d)=>s+d.kcal,0)/nRows.length);
+      html += `<div class="card" style="border-left:4px solid var(--pull)">
+        <div class="stats">
+          <div class="stat"><div class="k">avg kcal</div><div class="v" style="color:${kcalColor(avgK)}">${avgK}</div></div>
+          ${stat("days at/under goal", under+" / "+nRows.length)}
+          ${stat("goal", data.settings.kcalTarget)}
+        </div>
+        <div style="font-size:12px;margin-top:8px">avg vs goal: ${kcalDelta(avgK)}</div>
+      </div>`;
+    }
+    html += `<div class="card">
+      <div class="lbl">Calories per day — last 30 logged days</div>
+      ${lineChart(nRows.map(d=>({label:shortDate(d.date), value:d.kcal})), "#2B8A3E",
+      {fmt:v=>Math.round(v), refLine:data.settings.kcalTarget||null,
+       emptyMsg:"Import a Cronometer export or log days on the Food tab."})}</div>`;
+    return html;
+  }
+
+  // ---------- runs ----------
+  if (ui.trendView==="runs"){
+    let html = back("Runs");
+    const runs = data.cardio.filter(c=>c.type==="run" && c.distanceMi>0);
+    const wkMiles = {};
+    runs.forEach(r=>{ const wk=weekStartISO(r.date); wkMiles[wk]=(wkMiles[wk]||0)+r.distanceMi; });
+    const thisWk = weekStartISO(todayISO());
+    const weeks = [];
+    { const [wy,wm,wd]=thisWk.split("-").map(Number); const dt=new Date(wy,wm-1,wd);
+      for (let k=11;k>=0;k--){ const w=new Date(dt); w.setDate(dt.getDate()-7*k); weeks.push(isoFromDate(w)); } }
+    const wkRows = weeks.map(w=>({label:shortDate(w), value:Math.round((wkMiles[w]||0)*10)/10}));
+    const timed = runs.filter(r=>r.durationSec && r.distanceMi>=0.5);
+    const cutoff = (()=>{ const d=new Date(); d.setDate(d.getDate()-60); return isoFromDate(d); })();
+    let pool = timed.filter(r=>r.date>=cutoff);
+    if (!pool.length) pool = timed;
+    let mileEst=null, fiveKEst=null, basis=null;
+    pool.forEach(r=>{
+      const m = riegel(r.durationSec, r.distanceMi, 1);
+      if (mileEst==null || m<mileEst){ mileEst=m; basis=r; }
+      const f = riegel(r.durationSec, r.distanceMi, 3.10686);
+      if (fiveKEst==null || f<fiveKEst) fiveKEst=f;
+    });
+    html += `<div class="card stats" style="border-left:4px solid var(--cardio)">
+      ${stat("this week", (Math.round((wkMiles[thisWk]||0)*10)/10)+" mi")}
+      ${stat("last week", (Math.round((wkMiles[weeks[10]]||0)*10)/10)+" mi")}
+      ${stat("est mile", mileEst?fmtDur(Math.round(mileEst)):"—")}
+      ${stat("est 5k", fiveKEst?fmtDur(Math.round(fiveKEst)):"—")}
+    </div>`;
+    html += `<div class="card">
+      <div class="lbl">Weekly mileage — last 12 weeks</div>
+      ${barChart(wkRows, "#1971C2", {valueLabels:true, emptyMsg:"Import a few runs and your weekly mileage will build here."})}
+    </div>`;
+    if (basis) html += `<div class="note">time estimates are based on your fastest recent run (${basis.distanceMi} mi on ${shortDate(basis.date)})</div>`;
+    return html;
+  }
+
+  // ---------- lifts ----------
+  if (ui.trendView==="lifts"){
+    let html = back("Lifts");
     const logged = [...new Set(data.lifts.flatMap(w=>w.exercises.map(e=>e.name)))].sort();
-    if (!logged.length) return html + `<div class="card muted">No lifts logged yet. Log a session in the Lift tab and your progress charts will build here.</div>`;
+    if (!logged.length)
+      return html + `<div class="card muted">No lifts logged yet. Log a session in the Lift tab and your strength charts will build here.</div>`;
     if (!logged.includes(ui.progExercise)) ui.progExercise = logged[0];
     const rows = [];
     [...data.lifts].sort((a,b)=>a.date<b.date?-1:1).forEach(w=>{
@@ -649,49 +793,75 @@ function renderProgress(){
       rows.push({
         label: shortDate(w.date),
         top, reps: Math.max(...ex.sets.filter(s=>s.weight===top).map(s=>s.reps)),
-        e1rm: Math.round(epley(best.weight,best.reps)),
-        volume: ex.sets.reduce((s,x)=>s+x.weight*x.reps,0)
+        e1rm: Math.round(epley(best.weight,best.reps))
       });
     });
     const last = rows[rows.length-1];
-    html += `<div class="card"><div class="lbl">Movement</div>
+    html += `<div class="card"><div class="lbl">Movement (only logged ones shown)</div>
       <select onchange="App.progExercise(this.value)">${logged.map(e=>`<option ${e===ui.progExercise?"selected":""}>${esc(e)}</option>`).join("")}</select></div>`;
     if (last) html += `<div class="card stats" style="border-left:4px solid var(--push)">
       ${stat("last top set", last.top+"×"+last.reps)}
       ${stat("best est 1RM", Math.max(...rows.map(r=>r.e1rm))+" lb")}
       ${stat("sessions", rows.length)}</div>`;
-    html += `<div class="seg">
-      <button class="${ui.progMetric==="top"?"on":""}" onclick="App.progMetric('top')">Top weight</button>
-      <button class="${ui.progMetric==="e1rm"?"on":""}" onclick="App.progMetric('e1rm')">Est. 1RM</button>
-      <button class="${ui.progMetric==="volume"?"on":""}" onclick="App.progMetric('volume')">Volume</button>
-    </div>`;
-    html += `<div class="card">${lineChart(rows.map(r=>({label:r.label, value:r[ui.progMetric]})), "#E8590C",
-      {emptyMsg:`Log ${ui.progExercise} at least twice to draw a trend line.`, fmt:v=>Math.round(v)})}</div>`;
-  } else {
-    html += `<div class="seg">
-      <button class="${ui.cardioType==="run"?"on":""}" onclick="App.cardioType('run')">Runs</button>
-      <button class="${ui.cardioType==="walk"?"on":""}" onclick="App.cardioType('walk')">Walks</button></div>
-    <div class="seg">
-      <button class="${ui.cardioMetric==="pace"?"on":""}" onclick="App.cardioMetric('pace')">Pace</button>
-      <button class="${ui.cardioMetric==="distance"?"on":""}" onclick="App.cardioMetric('distance')">Distance</button></div>`;
-    const rows = data.cardio.filter(c=>c.type===ui.cardioType && c.distanceMi>0)
-      .sort((a,b)=>a.date<b.date?-1:1)
-      .map(c=>({label:shortDate(c.date), value: ui.cardioMetric==="pace" ? (paceOf(c)?paceOf(c)/60:null) : c.distanceMi}));
-    const fmt = ui.cardioMetric==="pace" ? (v=>`${Math.floor(v)}:${pad(Math.round(v%1*60))}`) : (v=>Math.round(v*10)/10);
-    html += `<div class="card">${lineChart(rows, "#1971C2",
-      {invert: ui.cardioMetric==="pace", fmt, emptyMsg:`Import at least two ${ui.cardioType}s to draw a trend line.`})}</div>`;
-    if (ui.cardioMetric==="pace" && rows.filter(r=>r.value!=null).length>=2)
-      html += `<div class="note">axis is flipped — a line moving up means you're getting faster</div>`;
+    html += `<div class="card">
+      <div class="lbl">Estimated 1RM over time</div>
+      ${lineChart(rows.map(r=>({label:r.label, value:r.e1rm})), "#E8590C",
+      {emptyMsg:`Log ${esc(ui.progExercise)} at least twice to draw a trend line.`, fmt:v=>Math.round(v)})}</div>`;
+    return html;
   }
-  // backup
-  html += `<div class="h2" style="margin-top:18px">Data backup</div>
-    <div class="card">
+
+  // ---------- hub ----------
+  const latestW = [...data.weights].sort((a,b)=>a.date<b.date?-1:1).pop();
+  const thisWk = weekStartISO(todayISO());
+  const wkMi = Math.round(data.cardio.filter(c=>c.type==="run"&&weekStartISO(c.date)===thisWk).reduce((s,c)=>s+c.distanceMi,0)*10)/10;
+  const nSorted = [...data.nutrition].sort((a,b)=>a.date<b.date?-1:1);
+  const last7 = nSorted.slice(-7);
+  const avg7 = last7.length ? Math.round(last7.reduce((s,d)=>s+d.kcal,0)/last7.length) : null;
+  const liftCount = data.lifts.length;
+  const hubBtn = (view, title, color, sub) => `
+    <button onclick="App.trendView('${view}')" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:#fff;border:1px solid var(--line);border-left:4px solid ${color};border-radius:12px;padding:16px 14px;margin-bottom:10px;cursor:pointer;text-align:left">
+      <div>
+        <div style="font-family:var(--disp);font-weight:700;font-size:19px;color:var(--ink);text-transform:uppercase;font-stretch:condensed">${title}</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin-top:3px">${sub}</div>
+      </div>
+      <span style="font-size:20px;color:var(--sub)">›</span>
+    </button>`;
+  let html = `<div class="h2" style="margin-top:2px">Trends</div>`;
+  html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
+  html += hubBtn("food","Nutrition","var(--pull)", avg7?`7-day avg <span style="color:${kcalColor(avg7)}">${avg7} kcal</span>`:"no days logged yet");
+  html += hubBtn("runs","Runs","var(--cardio)", `${wkMi} mi this week`);
+  html += hubBtn("lifts","Lifts","var(--push)", liftCount?`${liftCount} session${liftCount>1?"s":""} logged`:"no sessions yet");
+
+  // ----- backup -----
+  html += `<div class="h2" style="margin-top:18px">Data backup</div>`;
+  if (ui.pendingRestore){
+    const p = ui.pendingRestore;
+    html += `<div class="card" style="background:#FFF8E6;border-color:#E0C878">
+      <div style="font-size:13px;line-height:1.5;margin-bottom:10px"><b>Replace your current log with this backup?</b><br>
+      <span style="font-family:var(--mono);font-size:12px;color:var(--sub)">${(p.lifts||[]).length} lifts · ${(p.cardio||[]).length} cardio · ${(p.weights||[]).length} weigh-ins · ${(p.nutrition||[]).length} nutrition days</span></div>
+      <button class="btn" style="background:var(--danger);color:#fff" onclick="App.confirmRestore()">Yes, replace my log</button>
+      <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="App.cancelRestore()">Cancel</button>
+    </div>`;
+  }
+  html += `<div class="card">
       <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">
-        Your log lives in this browser's storage. Export a backup now and then — especially before clearing Safari data.</div>
+        Your log lives on this device. Export a backup now and then and save it to iCloud Drive.</div>
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>`;
   return html;
+}
+
+// two-tap delete: first tap arms the button, second tap within 3s confirms
+function confirmDel(key){
+  if (ui.confirmKey===key){ ui.confirmKey=null; return true; }
+  ui.confirmKey=key; render();
+  setTimeout(()=>{ if(ui.confirmKey===key){ ui.confirmKey=null; render(); } }, 3000);
+  return false;
+}
+function delBtn(key, fnCall, label="delete"){
+  const armed = ui.confirmKey===key;
+  return `<button class="del" style="${armed?"color:#fff;background:var(--danger);padding:4px 10px;border-radius:6px":""}" onclick="${fnCall}">${armed?"tap again to delete":label}</button>`;
 }
 
 function afterRender(){
@@ -701,9 +871,10 @@ function afterRender(){
 
 // ================= actions =================
 window.App = {
-  tab(t){ ui.tab=t; render(); },
+  tab(t){ ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
-  selDay(iso){ ui.selected=iso; render(); },
+  selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
+  toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
 
   // lift
   draftDate(v){ ui.draft.date=v; },
@@ -738,7 +909,7 @@ window.App = {
     ui.draft = {date:todayISO(), split:"", exercises:[], notes:""};
     toast("Workout saved ✓"); render();
   },
-  delLift(id){ if(!confirm("Delete this lifting session?"))return; data.lifts=data.lifts.filter(w=>w.id!==id); save(); toast("Session deleted"); render(); },
+  delLift(id){ if(!confirmDel("L"+id))return; data.lifts=data.lifts.filter(w=>w.id!==id); save(); toast("Session deleted"); render(); },
 
   // cardio
   toggleManual(){ ui.manualOpen=!ui.manualOpen; render(); },
@@ -755,7 +926,7 @@ window.App = {
     data.cardio.push({id:uid(), date:$("#mDate").value, type:$("#mType").value, name:"Manual "+$("#mType").value, distanceMi:Math.round(dist*100)/100, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual"});
     save(); ui.manualOpen=false; toast("Activity saved ✓"); render();
   },
-  delCardio(id){ if(!confirm("Delete this activity?"))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); toast("Activity deleted"); render(); },
+  delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); toast("Activity deleted"); render(); },
 
   // food
   toggleFoodManual(){ ui.foodManualOpen=!ui.foodManualOpen; render(); },
@@ -776,7 +947,7 @@ window.App = {
     save(); toast("Targets saved ✓"); render();
   },
   delFood(key){
-    if(!confirm("Delete this day's nutrition?"))return;
+    if(!confirmDel("F"+key))return;
     data.nutrition = data.nutrition.filter(d=>d.id!==key && d.date!==key);
     save(); toast("Day deleted"); render();
   },
@@ -790,9 +961,10 @@ window.App = {
     data.weights.push({id:uid(), date, lbs:Math.round(lbs*10)/10});
     save(); toast("Weigh-in saved ✓"); render();
   },
-  delWeight(id){ if(!confirm("Delete this weigh-in?"))return; data.weights=data.weights.filter(w=>w.id!==id); save(); toast("Weigh-in deleted"); render(); },
+  delWeight(id){ if(!confirmDel("W"+id))return; data.weights=data.weights.filter(w=>w.id!==id); save(); toast("Weigh-in deleted"); render(); },
 
   // progress
+  trendView(v){ ui.trendView=v; render(); },
   progMode(m){ ui.progMode=m; render(); },
   progExercise(e){ ui.progExercise=e; render(); },
   progMetric(m){ ui.progMetric=m; render(); },
@@ -800,6 +972,15 @@ window.App = {
   cardioMetric(m){ ui.cardioMetric=m; render(); },
 
   // backup
+  confirmRestore(){
+    if (!ui.pendingRestore) return;
+    data = { ...structuredClone(EMPTY), ...ui.pendingRestore };
+    if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
+    for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
+    ui.pendingRestore = null;
+    save(); toast("Backup restored ✓"); render();
+  },
+  cancelRestore(){ ui.pendingRestore = null; render(); },
   exportData(){
     const blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     const a = document.createElement("a");
@@ -838,20 +1019,21 @@ $("#csvFile").addEventListener("change", async e=>{
   } catch(err){ toast(err.message, true); }
   e.target.value = "";
 });
-// backup restore
+// backup restore (confirmed in-app, not via native dialog)
 $("#importFile").addEventListener("change", async e=>{
   const f = e.target.files?.[0]; if(!f) return;
   try {
     const parsed = JSON.parse(await f.text());
     if (!parsed || !Array.isArray(parsed.lifts)) throw new Error("bad format");
-    if (!confirm("Replace your current log with this backup?")) { e.target.value=""; return; }
-    data = { ...structuredClone(EMPTY), ...parsed };
-    save(); toast("Backup restored ✓"); render();
+    ui.pendingRestore = parsed;
+    ui.tab = "progress";
+    render();
   } catch(err){ toast("That file isn't a valid backup", true); }
   e.target.value = "";
 });
 
 render();
+
 </script>
 </body>
 </html>
