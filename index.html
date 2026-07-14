@@ -219,18 +219,28 @@ function zonesFromHist(hist, userMax){
   }
   return z;
 }
+const ZONE_LABELS = ["Z1 Recovery","Z2 Easy","Z3 Aerobic","Z4 Threshold","Z5 Max"];
+const ZONE_RANGES = ["<60%","60–70%","70–80%","80–90%","90%+"];
 function zoneBar(hist){
   const m = data.settings.maxHr;
-  if (!m) return `<div style="font-size:12px;color:var(--sub);margin-top:8px">Set your max HR on this tab to see zone breakdowns.</div>`;
+  if (!m) return `<div style="font-size:12px;color:var(--sub);margin-top:8px">Set your max HR under Weight → Other measurements to see zone breakdowns.</div>`;
   const z = zonesFromHist(hist, m);
   const total = z.reduce((a,b)=>a+b,0);
   if (!total) return "";
   const segs = z.map((s,i)=> s>0?`<div style="width:${(s/total*100).toFixed(1)}%;background:${ZONE_COLORS[i]}"></div>`:"").join("");
-  const legend = z.map((s,i)=> s>0?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub)"><span style="color:${ZONE_COLORS[i]}">●</span> Z${i+1} ${Math.round(s/total*100)}%</span>`:"").filter(Boolean).join(" · ");
-  return `<div style="margin-top:10px">
-    <div class="lbl" style="margin-bottom:5px">Time in heart-rate zones</div>
-    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden">${segs}</div>
-    <div style="margin-top:6px;line-height:1.7">${legend}</div>
+  const rows = z.map((s,i)=>{
+    const pct = Math.round(s/total*100);
+    if (s<=0) return "";
+    return `<div style="display:flex;align-items:center;gap:8px;margin-top:5px">
+      <span style="width:10px;height:10px;border-radius:3px;background:${ZONE_COLORS[i]};flex:none"></span>
+      <span style="font-size:13px;color:var(--ink);flex:1">Zone ${i+1}</span>
+      <span style="font-family:var(--mono);font-size:13px;font-weight:600;color:${ZONE_COLORS[i]}">${pct}%</span>
+    </div>`;
+  }).filter(Boolean).join("");
+  return `<div style="margin-top:12px">
+    <div class="lbl" style="margin-bottom:6px">% of run in each heart-rate zone</div>
+    <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${segs}</div>
+    ${rows}
   </div>`;
 }
 
@@ -324,7 +334,7 @@ const ui = {
   pending: [], manualOpen: false,
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
-  foodMetric: "kcal", foodManualOpen: false,
+  foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -561,22 +571,24 @@ function renderCardio(){
       </div>
       <button class="btn cardio" onclick="App.saveManual()">Save activity</button></div>`;
   }
-  html += `<div class="card">
-    <div class="lbl">Max heart rate (for zone breakdowns)</div>
-    <div style="display:flex;gap:8px">
-      <input class="mono" type="number" inputmode="numeric" id="maxHr" value="${data.settings.maxHr||""}" placeholder="e.g. 219">
-      <button class="btn ink" style="width:auto;padding:10px 18px" onclick="App.saveMaxHr()">Save</button>
-    </div>
-    <div style="font-size:12px;color:var(--sub);margin-top:6px">Zones: Z1 &lt;60% · Z2 60–70% · Z3 70–80% · Z4 80–90% · Z5 90%+ of max</div>
-  </div>`;
-  const recent = [...data.cardio].sort((a,b)=>a.date<b.date?1:-1).slice(0,5);
-  if (recent.length){
-    html += `<div class="h2">Recent</div>` + recent.map(c=>`
-      <div class="card" style="display:flex;justify-content:space-between;align-items:center">
-        <div><div style="font-weight:700;font-size:14px">${esc(c.name)}</div>
-          <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)} · ${c.distanceMi} mi · ${fmtDur(c.durationSec)}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
-        <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${fmtPace(paceOf(c))}</div>
-      </div>`).join("");
+  const all = [...data.cardio].sort((a,b)=>a.date<b.date?1:-1);
+  if (all.length){
+    const cutoff = (()=>{ const d=new Date(); d.setDate(d.getDate()-7); return isoFromDate(d); })();
+    const list = ui.cardioList==="all" ? all : all.filter(c=>c.date>=cutoff);
+    html += `<div class="seg" style="margin-top:6px">
+      <button class="${ui.cardioList!=="all"?"on":""}" onclick="App.cardioList('recent')">Last 7 days</button>
+      <button class="${ui.cardioList==="all"?"on":""}" onclick="App.cardioList('all')">All time (${all.length})</button>
+    </div>`;
+    if (!list.length){
+      html += `<div class="card muted">No activities in the last 7 days. Tap “All time” to see everything.</div>`;
+    } else {
+      html += list.map(c=>`
+        <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+          <div><div style="font-weight:700;font-size:14px">${c.type==="walk"?"🚶":"🏃"} ${esc(c.name)}</div>
+            <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)} · ${c.distanceMi} mi · ${fmtDur(c.durationSec)}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
+          <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${fmtPace(paceOf(c))}</div>
+        </div>`).join("");
+    }
   }
   return html;
 }
@@ -712,16 +724,6 @@ function renderFood(){
         ${s.kcalTarget?`<div style="font-size:11px;margin-top:4px;text-align:right">${kcalDelta(d.kcal)}</div>`:""}
       </div>`).join("");
   }
-  html += `<div class="h2" style="margin-top:18px">Daily goal</div>
-  <div class="card" style="border-left:4px solid var(--ink)">
-    <div class="lbl">Calorie & protein goal — saved until you change it</div>
-    <div style="display:flex;gap:8px;margin-bottom:10px">
-      <input class="mono" type="number" inputmode="numeric" id="tKcal" placeholder="kcal goal" value="${s.kcalTarget||""}">
-      <input class="mono" type="number" inputmode="numeric" id="tProt" placeholder="protein goal (g)" value="${s.proteinTarget||""}">
-    </div>
-    <button class="btn ink" onclick="App.saveTargets()">Save goal</button>
-    ${s.kcalTarget?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">days at or under ${s.kcalTarget} kcal show <span style="color:#2B8A3E">green</span>, days over show <span style="color:var(--danger)">red</span></div>`:""}
-  </div>`;
   return html;
 }
 
@@ -757,6 +759,33 @@ function renderWeight(){
         ${delBtn(`W${w.id}`, `App.delWeight('${w.id}')`)}
       </div>`).join("");
   }
+  // other measurements & targets (max HR, calorie goal) — collapsed by default
+  const st = data.settings;
+  html += `<div class="h2" style="margin-top:18px">Other measurements & targets</div>
+    <div class="card">
+      <button onclick="App.toggleTargets()" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:none;border:none;cursor:pointer;padding:0">
+        <span style="font-size:14px;font-weight:600;color:var(--ink)">Max heart rate & calorie goal</span>
+        <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${ui.targetsOpen?"▾ hide":"edit ▸"}</span>
+      </button>
+      ${ui.targetsOpen?`
+      <div style="margin-top:14px">
+        <div class="lbl">Max heart rate — for run zone breakdowns</div>
+        <div style="display:flex;gap:8px;margin-bottom:6px">
+          <input class="mono" type="number" inputmode="numeric" id="maxHr" value="${st.maxHr||""}" placeholder="e.g. 219">
+          <button class="btn ink" style="width:auto;padding:10px 18px" onclick="App.saveMaxHr()">Save</button>
+        </div>
+        <div style="font-size:12px;color:var(--sub)">Zones: Z1 &lt;60% · Z2 60–70% · Z3 70–80% · Z4 80–90% · Z5 90%+ of max</div>
+      </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--grid)">
+        <div class="lbl">Daily calorie & protein goal</div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input class="mono" type="number" inputmode="numeric" id="tKcal" placeholder="kcal goal" value="${st.kcalTarget||""}">
+          <input class="mono" type="number" inputmode="numeric" id="tProt" placeholder="protein (g)" value="${st.proteinTarget||""}">
+        </div>
+        <button class="btn ink" onclick="App.saveTargets()">Save goal</button>
+        ${st.kcalTarget?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">days at or under ${st.kcalTarget} kcal show <span style="color:#2B8A3E">green</span>, over show <span style="color:var(--danger)">red</span></div>`:""}
+      </div>`:""}
+    </div>`;
   return html;
 }
 
@@ -841,6 +870,43 @@ function renderProgress(){
       ${barChart(wkRows, "#1971C2", {valueLabels:true, emptyMsg:"Import a few runs and your weekly mileage will build here."})}
     </div>`;
     if (basis) html += `<div class="note">time estimates are based on your fastest recent run (${basis.distanceMi} mi on ${shortDate(basis.date)})</div>`;
+
+    // ----- personal bests: best actual pace at/near each standard distance -----
+    // a run counts toward a PB if it's at least the target distance (so the pace is genuine for that far)
+    const PB_DIST = [["Mile",1],["5K",3.10686],["10K",6.21371],["Half",13.1094],["Marathon",26.2188]];
+    const pbCards = PB_DIST.map(([label,d])=>{
+      const eligible = timed.filter(r=>r.distanceMi >= d - 0.03); // small tolerance
+      if (!eligible.length) return null;
+      // best = fastest time to cover exactly d, i.e. min (pace * d) among runs at least that long
+      let best=null, bestRun=null;
+      eligible.forEach(r=>{
+        const t = (r.durationSec / r.distanceMi) * d; // time to cover d at that run's pace
+        if (best==null || t<best){ best=t; bestRun=r; }
+      });
+      return {label, time:best, run:bestRun, exact: Math.abs(bestRun.distanceMi - d) < 0.15};
+    }).filter(Boolean);
+    if (pbCards.length){
+      html += `<div class="card" style="margin-top:12px;border-left:4px solid var(--cardio)">
+        <div class="lbl" style="margin-bottom:8px">Personal bests</div>
+        ${pbCards.map(p=>`<div style="display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--grid)">
+          <span style="font-weight:700;font-size:14px">${p.label}</span>
+          <span style="font-family:var(--mono);font-size:14px;font-weight:600;color:var(--cardio)">${fmtDur(Math.round(p.time))}</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${shortDate(p.run.date)}${p.exact?"":" *"}</span>
+        </div>`).join("")}
+        ${pbCards.some(p=>!p.exact)?`<div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">* extrapolated from a longer run at that pace — run the exact distance for a true PB</div>`:""}
+      </div>`;
+    }
+
+    // ----- total mileage this year -----
+    const yr = new Date().getFullYear();
+    const ytdRun = runs.filter(r=>r.date.startsWith(yr+"-")).reduce((s,r)=>s+r.distanceMi,0);
+    const ytdWalk = data.cardio.filter(c=>c.type==="walk"&&c.date.startsWith(yr+"-")).reduce((s,c)=>s+c.distanceMi,0);
+    html += `<div class="card stats" style="border-left:4px solid var(--cardio)">
+      ${stat(yr+" run miles", (Math.round(ytdRun*10)/10))}
+      ${stat(yr+" walk miles", (Math.round(ytdWalk*10)/10))}
+      ${stat("total runs", runs.length)}
+    </div>`;
+
     const hrRuns = runs.filter(r=>r.avgHr).sort((a,b)=>a.date<b.date?-1:1);
     if (hrRuns.length){
       html += `<div class="card" style="margin-top:12px">
@@ -987,6 +1053,7 @@ window.App = {
   delLift(id){ if(!confirmDel("L"+id))return; data.lifts=data.lifts.filter(w=>w.id!==id); save(); toast("Session deleted"); render(); },
 
   // cardio
+  cardioList(v){ ui.cardioList=v; render(); },
   toggleManual(){ ui.manualOpen=!ui.manualOpen; render(); },
   pend(i,f,v){ ui.pending[i][f]=v; },
   confirmPending(i){
@@ -1001,6 +1068,7 @@ window.App = {
     data.cardio.push({id:uid(), date:$("#mDate").value, type:$("#mType").value, name:"Manual "+$("#mType").value, distanceMi:Math.round(dist*100)/100, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual"});
     save(); ui.manualOpen=false; toast("Activity saved ✓"); render();
   },
+  toggleTargets(){ ui.targetsOpen=!ui.targetsOpen; render(); },
   saveMaxHr(){
     const v = parseInt($("#maxHr").value);
     data.settings.maxHr = (isFinite(v) && v>=120 && v<=230) ? v : null;
