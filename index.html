@@ -552,10 +552,16 @@ function lastPerformance(name, beforeDate){
 function lastPerfHTML(name){
   const lp = lastPerformance(name, ui.draft.date || todayISO());
   if (!lp) return "";
-  const setsTxt = lp.sets.map(s=>`${s.weight}×${s.reps}${s.rpe?`@${s.rpe}`:""}`).join("  ");
+  // group identical sets: "3x5 @ 185 lbs (RPE 8)"
+  const groups = [];
+  lp.sets.forEach(s=>{
+    const g = groups.find(g=>g.weight===s.weight && g.reps===s.reps && g.rpe===s.rpe);
+    if (g) g.n++; else groups.push({n:1, weight:s.weight, reps:s.reps, rpe:s.rpe});
+  });
+  const lines = groups.map(g=>`${g.n}x${g.reps} @ ${g.weight} lbs${g.rpe?` (RPE ${g.rpe})`:""}`);
   return `<div style="background:var(--paper);border:1px solid var(--grid);border-radius:8px;padding:8px 10px;margin-bottom:10px">
     <span style="font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--sub);text-transform:uppercase">Last time · ${shortDate(lp.date)}</span>
-    <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:2px">${setsTxt}</div>
+    <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:2px">${lines.join("<br>")}</div>
   </div>`;
 }
 function renderLift(){
@@ -1132,7 +1138,8 @@ function renderProgress(){
         Your log lives on this device. Export a backup now and then and save it to iCloud Drive.</div>
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
-    </div>`;
+    </div>
+    <div class="note" style="margin-top:10px">Training Log — v18</div>`;
   return html;
 }
 
