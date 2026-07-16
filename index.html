@@ -81,11 +81,27 @@
   .weblink.pull{color:var(--pull)}
   .weblink .ext{font-size:11px;opacity:.7}
   svg text{font-family:var(--mono)}
+  #todoBtn{position:relative;background:#fff;border:1px solid var(--line);border-radius:10px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink)}
+  #todoBtn.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  #todoBtn svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  #todoBtn .badge{position:absolute;top:-6px;right:-7px;background:var(--push);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 5px;font-family:var(--mono)}
+  .todo-row{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;transition:transform .45s ease,opacity .45s ease}
+  .todo-check{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);background:#fff;flex:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;padding:0;transition:background .2s,border-color .2s}
+  .todo-row.done-anim .todo-check{background:#2B8A3E;border-color:#2B8A3E;animation:pop .35s ease}
+  .todo-row.done-anim{transform:translateX(60px);opacity:0}
+  .todo-row.completed .todo-check{background:#2B8A3E;border-color:#2B8A3E}
+  .todo-row.completed .todo-text{color:var(--sub);text-decoration:line-through}
+  .todo-text{flex:1;font-size:15px;color:var(--ink)}
+  .todo-x{background:none;border:none;color:var(--sub);font-size:16px;cursor:pointer;padding:2px 6px}
+  @keyframes pop{0%{transform:scale(1)}50%{transform:scale(1.4)}100%{transform:scale(1)}}
 </style>
 </head>
 <body>
 <header>
-  <h1>TRAINING LOG</h1>
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h1>TRAINING LOG</h1>
+    <button id="todoBtn" onclick="App.tab('todo')" aria-label="To-do list"></button>
+  </div>
 </header>
 <div id="view"></div>
 <nav class="navbar" id="navbar"></nav>
@@ -97,7 +113,16 @@
 "use strict";
 // ================= data =================
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], customExercises:[] };
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], customExercises:[] };
+const TYPE_META = {
+  run:{label:"Run",emoji:"🏃"},
+  walk:{label:"Walk",emoji:"🚶"},
+  treadmill:{label:"Treadmill",emoji:"👟"},
+  cycling:{label:"Cycling",emoji:"🚴"},
+  stairmaster:{label:"Stairmaster",emoji:"🪜"},
+  basketball:{label:"Basketball",emoji:"🏀"},
+};
+const tmeta = t => TYPE_META[t] || TYPE_META.run;
 const DEFAULT_EXERCISES = [
  "Bench Press","Incline Bench Press","Decline Bench Press","Dumbbell Bench Press",
  "Overhead Press","Dumbbell Shoulder Press","Lateral Raise","Face Pull",
@@ -191,7 +216,8 @@ function parseGPX(text){
   const distanceMi = meters/1609.344;
   const pace = durationSec && distanceMi>0 ? durationSec/distanceMi : null;
   let actType = "run";
-  if (typeText.includes("walk")||typeText.includes("hik")) actType="walk";
+  if (typeText.includes("rid")||typeText.includes("cycl")||typeText.includes("bik")) actType="cycling";
+  else if (typeText.includes("walk")||typeText.includes("hik")) actType="walk";
   else if (typeText.includes("run")) actType="run";
   else if (pace && pace > 16*60) actType="walk";
   return {
@@ -219,28 +245,30 @@ function zonesFromHist(hist, userMax){
   }
   return z;
 }
-const ZONE_LABELS = ["Z1 Recovery","Z2 Easy","Z3 Aerobic","Z4 Threshold","Z5 Max"];
-const ZONE_RANGES = ["<60%","60–70%","70–80%","80–90%","90%+"];
+function zoneParts(hist){
+  const m = data.settings.maxHr;
+  if (!m) return null;
+  const z = zonesFromHist(hist, m);
+  const total = z.reduce((a,b)=>a+b,0);
+  if (!total) return null;
+  return z.map((s,i)=> s>0 ? {i, pct:Math.round(s/total*100)} : null).filter(Boolean);
+}
+function zoneInline(hist, size=12){
+  const parts = zoneParts(hist);
+  if (!parts) return "";
+  return parts.map(p=>`<span style="color:${ZONE_COLORS[p.i]};font-weight:700;font-family:var(--mono);font-size:${size}px">${p.pct}% Z${p.i+1}</span>`).join(`<span style="color:var(--sub);font-size:${size}px"> · </span>`);
+}
 function zoneBar(hist){
   const m = data.settings.maxHr;
   if (!m) return `<div style="font-size:12px;color:var(--sub);margin-top:8px">Set your max HR under Weight → Other measurements to see zone breakdowns.</div>`;
+  const parts = zoneParts(hist);
+  if (!parts) return "";
   const z = zonesFromHist(hist, m);
   const total = z.reduce((a,b)=>a+b,0);
-  if (!total) return "";
   const segs = z.map((s,i)=> s>0?`<div style="width:${(s/total*100).toFixed(1)}%;background:${ZONE_COLORS[i]}"></div>`:"").join("");
-  const rows = z.map((s,i)=>{
-    const pct = Math.round(s/total*100);
-    if (s<=0) return "";
-    return `<div style="display:flex;align-items:center;gap:8px;margin-top:5px">
-      <span style="width:10px;height:10px;border-radius:3px;background:${ZONE_COLORS[i]};flex:none"></span>
-      <span style="font-size:13px;color:var(--ink);flex:1">Zone ${i+1}</span>
-      <span style="font-family:var(--mono);font-size:13px;font-weight:600;color:${ZONE_COLORS[i]}">${pct}%</span>
-    </div>`;
-  }).filter(Boolean).join("");
   return `<div style="margin-top:12px">
-    <div class="lbl" style="margin-bottom:6px">% of run in each heart-rate zone</div>
-    <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${segs}</div>
-    ${rows}
+    <div style="display:flex;height:12px;border-radius:6px;overflow:hidden;margin-bottom:6px">${segs}</div>
+    <div>${zoneInline(hist, 13)}</div>
   </div>`;
 }
 
@@ -335,6 +363,7 @@ const ui = {
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
+  todoTab: "open",
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -343,7 +372,7 @@ const ui = {
 // ================= views =================
 function render(){
   renderNav();
-  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress }[ui.tab];
+  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo }[ui.tab];
   $("#view").innerHTML = v();
   afterRender();
 }
@@ -359,6 +388,11 @@ function renderNav(){
   const tabs = [["calendar","Cal"],["lift","Lift"],["cardio","Cardio"],["food","Food"],["weight","Weight"],["progress","Trends"]];
   $("#navbar").innerHTML = tabs.map(([id,l]) =>
     `<button class="${ui.tab===id?"on":""}" onclick="App.tab('${id}')"><div class="ic">${NAV_ICONS[id]}</div><div class="tl">${l}</div><div class="bar"></div></button>`).join("");
+  const open = data.todos.filter(t=>!t.done).length;
+  const btn = $("#todoBtn");
+  btn.className = ui.tab==="todo" ? "on" : "";
+  btn.id = "todoBtn";
+  btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 6.5l1.5 1.5L8 5.5"/><path d="M11 7h10"/><path d="M4 12.5l1.5 1.5L8 11.5"/><path d="M11 13h10"/><path d="M4 18.5l1.5 1.5L8 17.5"/><path d="M11 19h10"/></svg>${open?`<span class="badge">${open}</span>`:""}`;
 }
 
 // ----- calendar -----
@@ -408,7 +442,7 @@ function renderCalendar(){
       if (splits.length) bg = SPLITS[splits[0]].soft;
       else if (has.lifts.length) bg = UNTAGGED_SOFT;
       else bg = "#fff";
-      if (has.cardio.length) marks += `<span class="runner">🏃</span>`;
+      [...new Set(has.cardio.map(c=>c.type))].forEach(t=> marks += `<span class="runner">${tmeta(t).emoji}</span>`);
     }
     cells += `<button class="day ${iso===ui.selected?"sel":""} ${iso===todayISO()?"today":""}" ${bg?`style="background:${bg}"`:""} onclick="App.selDay('${iso}')">
       <span class="num">${d}</span><span class="marks">${marks}</span></button>`;
@@ -437,12 +471,12 @@ function renderCalendar(){
     (sel.cardio||[]).forEach(c=>{
       detail += `<div class="card" style="border-left:4px solid var(--cardio)">
         <div style="display:flex;justify-content:space-between;align-items:baseline">
-          <div class="h2" style="margin:0">🏃 ${c.type==="walk"?"WALK":"RUN"}</div>
+          <div class="h2" style="margin:0">${tmeta(c.type).emoji} ${tmeta(c.type).label.toUpperCase()}</div>
           ${delBtn(`C${c.id}`, `App.delCardio('${c.id}')`)}
         </div>
         <div style="font-size:13px;color:var(--sub);margin-bottom:8px">${esc(c.name)}</div>
         <div class="stats">
-          ${stat("dist", c.distanceMi+" mi")}${stat("time", fmtDur(c.durationSec))}${stat("pace", fmtPace(paceOf(c)))}
+          ${c.distanceMi>0?stat("dist", c.distanceMi+" mi"):""}${stat("time", fmtDur(c.durationSec))}${cardioPaceStat(c)}
           ${c.avgHr?stat("avg hr", c.avgHr):""}${c.maxHr?stat("max hr", c.maxHr):""}
         </div>
         ${c.hrHist?zoneBar(c.hrHist):""}</div>`;
@@ -475,6 +509,19 @@ function renderCalendar(){
     <div class="h2">${prettyDate(ui.selected)}</div>${detail}`;
 }
 const stat = (k,v)=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+function cardioPaceStat(c){
+  if (!(c.distanceMi>0) || !c.durationSec) return "";
+  if (c.type==="cycling") return stat("speed", (c.distanceMi/(c.durationSec/3600)).toFixed(1)+" mph");
+  if (["run","walk","treadmill"].includes(c.type)) return stat("pace", fmtPace(paceOf(c)));
+  return "";
+}
+function cardioRight(c){
+  if (c.distanceMi>0 && c.durationSec){
+    if (c.type==="cycling") return (c.distanceMi/(c.durationSec/3600)).toFixed(1)+" mph";
+    if (["run","walk","treadmill"].includes(c.type)) return fmtPace(paceOf(c));
+  }
+  return fmtDur(c.durationSec);
+}
 
 // ----- lift -----
 function allExercises(){ return [...DEFAULT_EXERCISES, ...data.customExercises].sort(); }
@@ -545,9 +592,7 @@ function renderCardio(){
       <div class="lbl">Review import — ${esc(p.fileName)}</div>
       <input value="${esc(p.name)}" oninput="App.pend(${i},'name',this.value)" style="margin-bottom:8px">
       <div style="display:flex;gap:8px;margin-bottom:10px">
-        <select onchange="App.pend(${i},'type',this.value)">
-          <option value="run" ${p.type==="run"?"selected":""}>Run</option>
-          <option value="walk" ${p.type==="walk"?"selected":""}>Walk</option></select>
+        <select onchange="App.pend(${i},'type',this.value)">${Object.entries(TYPE_META).map(([k,v])=>`<option value="${k}" ${p.type===k?"selected":""}>${v.emoji} ${v.label}</option>`).join("")}</select>
         <input type="date" value="${p.date}" onchange="App.pend(${i},'date',this.value)">
       </div>
       <div class="stats" style="margin-bottom:12px">
@@ -558,10 +603,10 @@ function renderCardio(){
   if (ui.manualOpen){
     html += `<div class="card">
       <div style="display:flex;gap:8px;margin-bottom:8px">
-        <select id="mType"><option value="run">Run</option><option value="walk">Walk</option></select>
+        <select id="mType">${Object.entries(TYPE_META).map(([k,v])=>`<option value="${k}">${v.emoji} ${v.label}</option>`).join("")}</select>
         <input type="date" id="mDate" value="${todayISO()}">
       </div>
-      <div class="lbl">Distance (miles)</div>
+      <div class="lbl">Distance (miles — optional for gym cardio)</div>
       <input class="mono" type="number" inputmode="decimal" id="mDist" placeholder="3.1" style="margin-bottom:8px">
       <div class="lbl">Time (h / m / s)</div>
       <div style="display:flex;gap:8px;margin-bottom:12px">
@@ -582,12 +627,17 @@ function renderCardio(){
     if (!list.length){
       html += `<div class="card muted">No activities in the last 7 days. Tap “All time” to see everything.</div>`;
     } else {
-      html += list.map(c=>`
-        <div class="card" style="display:flex;justify-content:space-between;align-items:center">
-          <div><div style="font-weight:700;font-size:14px">${c.type==="walk"?"🚶":"🏃"} ${esc(c.name)}</div>
-            <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)} · ${c.distanceMi} mi · ${fmtDur(c.durationSec)}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
-          <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${fmtPace(paceOf(c))}</div>
-        </div>`).join("");
+      html += list.map(c=>{
+        const zi = c.hrHist ? zoneInline(c.hrHist, 11) : "";
+        return `
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div><div style="font-weight:700;font-size:14px">${tmeta(c.type).emoji} ${esc(c.name)}</div>
+              <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)}${c.distanceMi>0?` · ${c.distanceMi} mi`:""} · ${fmtDur(c.durationSec)}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
+            <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${cardioRight(c)}</div>
+          </div>
+          ${zi?`<div style="margin-top:5px">${zi}</div>`:""}
+        </div>`;}).join("");
     }
   }
   return html;
@@ -787,6 +837,59 @@ function renderWeight(){
       </div>`:""}
     </div>`;
   return html;
+}
+
+// ----- to-do -----
+function todoRowHTML(t){
+  if (!t.done) return `<div class="todo-row" id="todo-${t.id}">
+    <button class="todo-check" onclick="App.completeTodo('${t.id}')"></button>
+    <span class="todo-text">${esc(t.text)}</span>
+    <button class="todo-x" onclick="App.delTodo('${t.id}')">✕</button>
+  </div>`;
+  return `<div class="todo-row completed" id="todo-${t.id}">
+    <button class="todo-check" onclick="App.uncompleteTodo('${t.id}')">✓</button>
+    <span class="todo-text">${esc(t.text)}</span>
+    <button class="todo-x" onclick="App.delTodo('${t.id}')">✕</button>
+  </div>`;
+}
+function renderTodo(){
+  const open = data.todos.filter(t=>!t.done);
+  const done = data.todos.filter(t=>t.done).sort((a,b)=>(b.doneAt||0)-(a.doneAt||0));
+  let html = `<div class="card" style="border-left:4px solid var(--ink)">
+    <div class="lbl">Add tasks — press return to add and keep typing</div>
+    <input id="todoInput" placeholder="What do you need to do?" enterkeyhint="done"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();App.addTodo(this);}">
+  </div>
+  <div class="seg">
+    <button class="${ui.todoTab!=="done"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
+    <button class="${ui.todoTab==="done"?"on":""}" onclick="App.todoTab('done')">Completed${done.length?` (${done.length})`:""}</button>
+  </div>`;
+  if (ui.todoTab!=="done"){
+    html += `<div id="todoList">${open.map(todoRowHTML).join("")}</div>`;
+    if (!open.length) html += `<div class="card muted">Nothing to do. Add a task above — or enjoy the rest day.</div>`;
+  } else {
+    html += `<div>${done.map(todoRowHTML).join("")}</div>`;
+    if (!done.length) html += `<div class="card muted">Nothing completed yet. Get after it.</div>`;
+    else html += `<div style="text-align:center;margin-top:6px">${delBtn("todos-clear", "App.clearDoneTodos()", "clear completed")}</div>`;
+  }
+  return html;
+}
+// satisfying two-tone chirp on task completion
+function ding(){
+  try {
+    const ctx = ding._ctx || (ding._ctx = new (window.AudioContext||window.webkitAudioContext)());
+    if (ctx.state === "suspended") ctx.resume();
+    const t = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = "sine";
+    o.frequency.setValueAtTime(880, t);
+    o.frequency.setValueAtTime(1318.5, t+0.09);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+0.4);
+    o.start(t); o.stop(t+0.45);
+  } catch(e){}
 }
 
 // ----- progress -----
@@ -1063,9 +1166,10 @@ window.App = {
   },
   saveManual(){
     const dist = parseFloat($("#mDist").value);
-    if (!dist || dist<=0){ toast("Enter a distance", true); return; }
     const dur = (+$("#mH").value||0)*3600 + (+$("#mM").value||0)*60 + (+$("#mS").value||0);
-    data.cardio.push({id:uid(), date:$("#mDate").value, type:$("#mType").value, name:"Manual "+$("#mType").value, distanceMi:Math.round(dist*100)/100, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual"});
+    if (!(dist>0) && !(dur>0)){ toast("Enter a time or a distance", true); return; }
+    const type = $("#mType").value;
+    data.cardio.push({id:uid(), date:$("#mDate").value, type, name:tmeta(type).label+" (manual)", distanceMi:dist>0?Math.round(dist*100)/100:0, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual"});
     save(); ui.manualOpen=false; toast("Activity saved ✓"); render();
   },
   toggleTargets(){ ui.targetsOpen=!ui.targetsOpen; render(); },
@@ -1118,6 +1222,44 @@ window.App = {
   progMetric(m){ ui.progMetric=m; render(); },
   cardioType(t){ ui.cardioType=t; render(); },
   cardioMetric(m){ ui.cardioMetric=m; render(); },
+
+  // to-do
+  todoTab(t){ ui.todoTab=t; render(); },
+  addTodo(inputEl){
+    const text = inputEl.value.trim();
+    if (!text) return;
+    const t = {id:uid(), text, created:Date.now(), done:false};
+    data.todos.unshift(t);
+    save();
+    // insert without re-render so the keyboard stays open for rapid entry
+    const list = $("#todoList");
+    if (list) list.insertAdjacentHTML("afterbegin", todoRowHTML(t));
+    inputEl.value = "";
+    inputEl.focus();
+    renderNav(); // update badge + tab count lives in seg, cheap to skip; badge matters most
+  },
+  completeTodo(id){
+    const el = document.getElementById("todo-"+id);
+    ding();
+    if (el){
+      el.classList.add("done-anim");
+      el.querySelector(".todo-check").textContent = "✓";
+    }
+    setTimeout(()=>{
+      const t = data.todos.find(x=>x.id===id);
+      if (t){ t.done = true; t.doneAt = Date.now(); save(); }
+      render();
+    }, 550);
+  },
+  uncompleteTodo(id){
+    const t = data.todos.find(x=>x.id===id);
+    if (t){ t.done = false; delete t.doneAt; save(); render(); }
+  },
+  delTodo(id){ data.todos = data.todos.filter(x=>x.id!==id); save(); render(); },
+  clearDoneTodos(){
+    if (!confirmDel("todos-clear")) return;
+    data.todos = data.todos.filter(t=>!t.done); save(); toast("Completed tasks cleared"); render();
+  },
 
   // backup
   confirmRestore(){
