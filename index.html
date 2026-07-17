@@ -224,40 +224,57 @@ function parseGPX(text){
       hr:hrEl?parseInt(hrEl.textContent):null
     };
   });
-  let meters=0, gainM=0;
+  // smooth elevation (7-pt moving average) to stop GPS noise from inflating gain
+  const eleSm = pts.map((p,i)=>{
+    if (p.ele==null) return null;
+    let s=0,n=0;
+    for (let j=Math.max(0,i-3); j<=Math.min(pts.length-1,i+3); j++){
+      if (pts[j].ele!=null){ s+=pts[j].ele; n++; }
+    }
+    return n? s/n : null;
+  });
+  let meters=0, gainM=0, movingSec=0;
   let hrTime=0, hrWeighted=0, hrMax=null; const hrHist={};
+  let valley=null; // hysteresis for elevation gain: only count climbs of 2m+
   // real split times: elapsed seconds when cumulative distance first reaches each mark
   const SPLIT_MARKS = {mile:1609.344, fivek:5000, tenk:10000, half:21097.5, marathon:42195};
   const splits = {};
   const startT = pts.find(p=>p.t)?.t || null;
   for (let i=1;i<pts.length;i++){
     const prevMeters = meters;
-    const seg = haversineMeters(pts[i-1],pts[i]);
+    let seg = haversineMeters(pts[i-1],pts[i]);
+    const dt = (pts[i].t && pts[i-1].t) ? (pts[i].t - pts[i-1].t)/1000 : null;
+    // GPS teleport filter: ignore impossible jumps (>15 m/s for foot travel)
+    if (dt!=null && dt>0 && seg/dt > 15) seg = 0;
     meters += seg;
+    // moving time: count only segments where actually moving (>0.5 m/s), like Strava does
+    const moving = dt!=null && dt>0 && dt<60 && seg/dt > 0.5;
+    if (moving) movingSec += dt;
     if (startT && pts[i].t && pts[i-1].t){
       for (const [k,mk] of Object.entries(SPLIT_MARKS)){
         if (splits[k]==null && prevMeters < mk && meters >= mk && seg > 0){
-          // interpolate within the segment for the exact moment the mark was crossed
           const frac = (mk - prevMeters) / seg;
           const tAt = pts[i-1].t.getTime() + frac * (pts[i].t.getTime() - pts[i-1].t.getTime());
           splits[k] = Math.round((tAt - startT.getTime())/1000);
         }
       }
     }
-    if (pts[i].ele!=null && pts[i-1].ele!=null){ const d=pts[i].ele-pts[i-1].ele; if(d>0) gainM+=d; }
+    // elevation gain with 2m hysteresis on the smoothed series
+    if (eleSm[i]!=null){
+      if (valley==null || eleSm[i] < valley) valley = Math.min(valley??eleSm[i], eleSm[i]);
+      else if (eleSm[i] - valley >= 2){ gainM += eleSm[i]-valley; valley = eleSm[i]; }
+    }
     const hr = pts[i].hr ?? pts[i-1].hr;
-    if (hr && pts[i].t && pts[i-1].t){
-      const dt = (pts[i].t - pts[i-1].t)/1000;
-      if (dt>0 && dt<60){
-        hrTime += dt; hrWeighted += hr*dt;
-        if (hrMax==null || hr>hrMax) hrMax = hr;
-        const bin = Math.round(hr/5)*5;
-        hrHist[bin] = (hrHist[bin]||0) + dt;
-      }
+    if (hr && moving){
+      hrTime += dt; hrWeighted += hr*dt;
+      if (hrMax==null || hr>hrMax) hrMax = hr;
+      const bin = Math.round(hr/5)*5;
+      hrHist[bin] = (hrHist[bin]||0) + dt;
     }
   }
   const t0 = pts.find(p=>p.t)?.t, t1 = [...pts].reverse().find(p=>p.t)?.t;
-  const durationSec = (t0&&t1) ? Math.max(0,(t1-t0)/1000) : null;
+  const elapsedSec = (t0&&t1) ? Math.max(0,(t1-t0)/1000) : null;
+  const durationSec = movingSec > 0 ? movingSec : elapsedSec; // display moving time, like Strava
   const typeText = (doc.getElementsByTagName("type")[0]?.textContent||"").toLowerCase();
   const distanceMi = meters/1609.344;
   const pace = durationSec && distanceMi>0 ? durationSec/distanceMi : null;
@@ -1213,7 +1230,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v20</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v21</div>`;
   return html;
 }
 
