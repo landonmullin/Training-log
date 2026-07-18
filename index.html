@@ -137,6 +137,7 @@ const TYPE_META = {
   cycling:{label:"Cycling",emoji:"🚴"},
   stairmaster:{label:"Stairmaster",emoji:"🪜"},
   basketball:{label:"Basketball",emoji:"🏀"},
+  volleyball:{label:"Volleyball",emoji:"🏐"},
 };
 const tmeta = t => TYPE_META[t] || TYPE_META.run;
 const DEFAULT_EXERCISES = [
@@ -1230,7 +1231,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v21</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v22</div>`;
   return html;
 }
 
