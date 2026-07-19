@@ -30,7 +30,8 @@
   #view{padding:14px;max-width:560px;margin:0 auto}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
   .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--sub);text-transform:uppercase;margin-bottom:4px}
-  input,select{width:100%;padding:10px 12px;font-size:16px;font-family:var(--body);border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);outline:none;-webkit-appearance:none;appearance:none}
+  input,select,textarea{width:100%;padding:10px 12px;font-size:16px;font-family:var(--body);border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);outline:none;-webkit-appearance:none;appearance:none}
+  textarea{min-height:90px;font-family:var(--mono);font-size:13px;resize:vertical}
   input.mono{font-family:var(--mono)}
   .btn{display:block;width:100%;padding:12px 16px;font-size:15px;font-weight:700;border:none;border-radius:10px;cursor:pointer;font-family:var(--body)}
   .btn.ink{background:var(--ink);color:#fff}
@@ -446,6 +447,83 @@ function weekStartISO(iso){
 // Riegel race prediction: t2 = t1 * (d2/d1)^1.06
 const riegel = (t1,d1,d2) => t1*Math.pow(d2/d1,1.06);
 
+
+// ================= crew sync (Firebase) =================
+let fb = null;          // {auth, db, uid}
+let fbLoadPromise = null;
+function parseFirebaseConfig(text){
+  const grab = k => { const m = text.match(new RegExp(k + "\\s*:\\s*[\"']([^\"']+)[\"']")); return m ? m[1] : null; };
+  const cfg = { apiKey:grab("apiKey"), authDomain:grab("authDomain"), projectId:grab("projectId"),
+    storageBucket:grab("storageBucket"), messagingSenderId:grab("messagingSenderId"), appId:grab("appId") };
+  return (cfg.apiKey && cfg.projectId && cfg.appId) ? cfg : null;
+}
+function loadFirebaseSdk(){
+  if (fbLoadPromise) return fbLoadPromise;
+  fbLoadPromise = new Promise((res, rej)=>{
+    const urls = [
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js",
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js",
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"
+    ];
+    let i = 0;
+    const next = ()=>{
+      if (i>=urls.length) return res();
+      const s = document.createElement("script");
+      s.src = urls[i++]; s.onload = next; s.onerror = ()=>rej(new Error("couldn't load sync library"));
+      document.head.appendChild(s);
+    };
+    next();
+  });
+  return fbLoadPromise;
+}
+async function fbInit(){
+  if (fb) return fb;
+  const cfg = data.crew?.config;
+  if (!cfg) throw new Error("not configured");
+  await loadFirebaseSdk();
+  if (!firebase.apps.length) firebase.initializeApp(cfg);
+  const auth = firebase.auth();
+  if (!auth.currentUser) await auth.signInAnonymously();
+  fb = { auth, db: firebase.firestore(), uid: auth.currentUser.uid };
+  return fb;
+}
+function myWeekStats(){
+  const wk = weekStartISO(todayISO());
+  const miles = data.cardio.filter(c=>c.type==="run" && weekStartISO(c.date)===wk)
+    .reduce((s,c)=>s+c.distanceMi,0);
+  const weekLifts = data.lifts.filter(w=>weekStartISO(w.date)===wk);
+  const volume = weekLifts.reduce((s,w)=>s+w.exercises.reduce((a,ex)=>a+ex.sets.reduce((b,st)=>b+st.weight*st.reps,0),0),0);
+  return { weekKey:wk, miles:Math.round(miles*10)/10, lifts:weekLifts.length, volume:Math.round(volume) };
+}
+async function crewPushStats(){
+  if (!data.crew?.code) return;
+  const {db, uid} = await fbInit();
+  await db.collection("crews").doc(data.crew.code).collection("stats").doc(uid)
+    .set({ name:data.crew.name, ...myWeekStats(), updatedAt:Date.now() });
+}
+async function crewFetchStats(){
+  const {db} = await fbInit();
+  const snap = await db.collection("crews").doc(data.crew.code).collection("stats").get();
+  ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
+  ui.crewStatsAt = Date.now();
+}
+async function crewFetchTodos(){
+  const {db} = await fbInit();
+  const snap = await db.collection("crews").doc(data.crew.code).collection("todos")
+    .orderBy("createdAt","desc").limit(50).get();
+  ui.crewTodos = snap.docs.map(d=>({id:d.id, ...d.data()}));
+}
+async function crewSync(manual){
+  if (!data.crew?.code) return;
+  try {
+    await crewPushStats();
+    await crewFetchStats();
+    if (ui.tab==="todo") await crewFetchTodos();
+    if (manual) toast("Crew synced ✓");
+    render();
+  } catch(e){ if (manual) toast("Crew sync failed — check connection", true); }
+}
+
 // ================= ui state =================
 const now = new Date();
 const ui = {
@@ -460,6 +538,7 @@ const ui = {
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
   todoTab: "open",
   openMaps: new Set(),
+  crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewBusy: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -987,6 +1066,25 @@ function renderSettings(){
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
   </div>
   <div class="card">
+    <div class="lbl" style="margin-bottom:8px">Crew sync — leaderboard & shared tasks with friends</div>
+    ${!data.crew?.config ? `
+      <div style="font-size:13px;color:var(--sub);line-height:1.5;margin-bottom:10px">One-time setup: create a free Firebase project (I'll walk you through it), then paste the config snippet here.</div>
+      <textarea id="fbConfig" placeholder='Paste the firebaseConfig = { apiKey: "...", ... } snippet'></textarea>
+      <button class="btn ink" style="margin-top:10px" onclick="App.crewSaveConfig()">Save sync config</button>
+    ` : !data.crew.code ? `
+      <div class="lbl">Your display name</div>
+      <input id="crewMyName" placeholder="Landon" style="margin-bottom:10px">
+      <button class="btn ink" onclick="App.crewCreate()">Create a new crew</button>
+      <div style="text-align:center;font-family:var(--mono);font-size:11px;color:var(--sub);margin:10px 0">— or join one —</div>
+      <input class="mono" id="crewCode" placeholder="crew code, e.g. K3XR7P" style="margin-bottom:8px;text-transform:uppercase">
+      <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.crewJoin()">Join crew</button>
+    ` : `
+      <div style="font-size:14px"><b>${esc(data.crew.name)}</b> · crew code <span style="font-family:var(--mono);font-weight:700;letter-spacing:.1em">${data.crew.code}</span></div>
+      <div style="font-size:12px;color:var(--sub);margin:4px 0 10px">Share the code with friends so they can join. Leaderboard lives in Trends; shared tasks in the to-do list.</div>
+      ${delBtn("crew-leave","App.crewLeave()","leave crew")}
+    `}
+  </div>
+  <div class="card">
     <div class="lbl" style="margin-bottom:8px">Cardio methods — shown when logging</div>
     ${Object.entries(TYPE_META).map(([k,v])=>setRow(`${v.emoji} ${v.label}`, "", !!s.cardioTypes[k], `App.toggleCardioType('${k}')`)).join("")}
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
@@ -1010,15 +1108,45 @@ function todoRowHTML(t){
 function renderTodo(){
   const open = data.todos.filter(t=>!t.done);
   const done = data.todos.filter(t=>t.done).sort((a,b)=>(b.doneAt||0)-(a.doneAt||0));
-  let html = `<div class="card" style="border-left:4px solid var(--ink)">
+  const inCrew = !!data.crew?.code;
+  let html = ui.todoTab!=="crew" ? `<div class="card" style="border-left:4px solid var(--ink)">
     <div class="lbl">Add tasks — press return to add and keep typing</div>
     <input id="todoInput" placeholder="What do you need to do?" enterkeyhint="done"
       onkeydown="if(event.key==='Enter'){event.preventDefault();App.addTodo(this);}">
-  </div>
-  <div class="seg">
-    <button class="${ui.todoTab!=="done"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
+  </div>` : "";
+  html += `<div class="seg">
+    <button class="${ui.todoTab!=="done"&&ui.todoTab!=="crew"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
     <button class="${ui.todoTab==="done"?"on":""}" onclick="App.todoTab('done')">Completed${done.length?` (${done.length})`:""}</button>
+    ${inCrew?`<button class="${ui.todoTab==="crew"?"on":""}" onclick="App.todoTab('crew')">Crew</button>`:""}
   </div>`;
+  if (ui.todoTab==="crew"){
+    if (!ui.crewTodos){ crewFetchTodos().then(()=>render()).catch(()=>{ ui.crewTodos=[]; render(); }); }
+    const members = (ui.crewStats||[]).filter(s=>s.uid!==(fb?.uid));
+    html += `<div class="card" style="border-left:4px solid #B08D2F">
+      <div class="lbl">Assign a task</div>
+      <input id="crewTodoInput" placeholder="What needs doing?" enterkeyhint="done" style="margin-bottom:8px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();App.crewAddTodo(this);}">
+      <select id="crewAssign">
+        <option value="all">Everyone</option>
+        ${fb?`<option value="${fb.uid}">Me (${esc(data.crew.name)})</option>`:""}
+        ${members.map(m=>`<option value="${m.uid}">${esc(m.name||"?")}</option>`).join("")}
+      </select>
+    </div>`;
+    const ct = ui.crewTodos || [];
+    const openC = ct.filter(t=>!t.done), doneC = ct.filter(t=>t.done).slice(0,10);
+    html += openC.map(t=>`<div class="todo-row" id="ctodo-${t.id}">
+      <button class="todo-check" onclick="App.crewToggleTodo('${t.id}', true)"></button>
+      <span class="todo-text">${esc(t.text)}<div style="font-size:11px;color:var(--sub);font-family:var(--mono)">${esc(t.createdByName||"?")} → ${esc(t.assignedToName||"Everyone")}</div></span>
+    </div>`).join("");
+    if (ui.crewTodos && !openC.length) html += `<div class="card muted">No open crew tasks.</div>`;
+    if (!ui.crewTodos) html += `<div class="card muted">Loading crew tasks…</div>`;
+    html += doneC.map(t=>`<div class="todo-row completed">
+      <button class="todo-check" onclick="App.crewToggleTodo('${t.id}', false)">✓</button>
+      <span class="todo-text">${esc(t.text)}<div style="font-size:11px;color:var(--sub);font-family:var(--mono);text-decoration:none">done by ${esc(t.doneBy||"?")}</div></span>
+    </div>`).join("");
+    html += `<button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="App.crewSyncNow()">Refresh</button>`;
+    return html;
+  }
   if (ui.todoTab!=="done"){
     html += `<div id="todoList">${open.map(todoRowHTML).join("")}</div>`;
     if (!open.length) html += `<div class="card muted">Nothing to do. Add a task above — or enjoy the rest day.</div>`;
@@ -1211,6 +1339,39 @@ function renderProgress(){
     return html;
   }
 
+  // ---------- crew leaderboard ----------
+  if (ui.trendView==="crew"){
+    let html = back("Crew");
+    if (!ui.crewStats){
+      crewSync(false);
+      html += `<div class="card muted">Loading leaderboard…</div>`;
+      return html;
+    }
+    const wk = weekStartISO(todayISO());
+    const rows = ui.crewStats.filter(s=>s.weekKey===wk);
+    const stale = ui.crewStats.filter(s=>s.weekKey!==wk);
+    const metric = ui.crewMetric;
+    const fmtV = v => metric==="miles" ? (Math.round((v||0)*10)/10)+" mi" : metric==="volume" ? (v||0).toLocaleString()+" lb" : (v||0);
+    rows.sort((a,b)=>(b[metric]||0)-(a[metric]||0));
+    html += `<div class="seg">
+      <button class="${metric==="miles"?"on":""}" onclick="App.crewMetric('miles')">Miles</button>
+      <button class="${metric==="lifts"?"on":""}" onclick="App.crewMetric('lifts')">Lifts</button>
+      <button class="${metric==="volume"?"on":""}" onclick="App.crewMetric('volume')">Volume</button>
+    </div>`;
+    html += `<div class="card" style="border-left:4px solid #B08D2F">
+      <div class="lbl" style="margin-bottom:8px">This week — ${shortDate(wk)}</div>
+      ${rows.length ? rows.map((s,i)=>`<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
+        <span style="font-family:var(--mono);font-size:13px;color:${i===0?"#B08D2F":"var(--sub)"};font-weight:700;width:22px">${i===0?"🏆":"#"+(i+1)}</span>
+        <span style="flex:1;font-weight:700;font-size:14px">${esc(s.name||"?")}</span>
+        <span style="font-family:var(--mono);font-size:14px;font-weight:600">${fmtV(s[metric])}</span>
+      </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced this week yet.</div>`}
+      ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — no data this week yet</div>`:""}
+    </div>`;
+    html += `<button class="btn ink" onclick="App.crewSyncNow()">Refresh</button>
+      <div class="note" style="margin-top:8px">stats sync automatically each time anyone opens their app · invite code: ${data.crew.code}</div>`;
+    return html;
+  }
+
   // ---------- hub ----------
   const latestW = [...data.weights].sort((a,b)=>a.date<b.date?-1:1).pop();
   const thisWk = weekStartISO(todayISO());
@@ -1232,6 +1393,7 @@ function renderProgress(){
   html += hubBtn("food","Nutrition","var(--pull)", avg7?`7-day avg <span style="color:${kcalColor(avg7)}">${avg7} kcal</span>`:"no days logged yet");
   html += hubBtn("runs","Runs","var(--cardio)", `${wkMi} mi this week`);
   html += hubBtn("lifts","Lifts","var(--push)", liftCount?`${liftCount} session${liftCount>1?"s":""} logged`:"no sessions yet");
+  if (data.crew?.code) html += hubBtn("crew","Crew","#B08D2F", `leaderboard · code ${data.crew.code}`);
 
   // ----- backup -----
   html += `<div class="h2" style="margin-top:18px">Data backup</div>`;
@@ -1250,7 +1412,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v23</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v24</div>`;
   return html;
 }
 
@@ -1435,6 +1597,75 @@ window.App = {
   cardioType(t){ ui.cardioType=t; render(); },
   cardioMetric(m){ ui.cardioMetric=m; render(); },
 
+  // crew
+  async crewSaveConfig(){
+    const cfg = parseFirebaseConfig($("#fbConfig").value);
+    if (!cfg){ toast("That doesn't look like a Firebase config — paste the whole snippet", true); return; }
+    data.crew = { config: cfg };
+    save(); toast("Sync configured ✓"); render();
+  },
+  async crewCreate(){
+    const name = $("#crewMyName").value.trim();
+    if (!name){ toast("Enter your display name", true); return; }
+    if (ui.crewBusy) return; ui.crewBusy = true;
+    try {
+      const {db} = await fbInit();
+      const code = Array.from({length:6},()=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random()*32)]).join("");
+      await db.collection("crews").doc(code).set({createdAt:Date.now()});
+      data.crew.code = code; data.crew.name = name;
+      save(); await crewPushStats(); await crewFetchStats();
+      toast("Crew created ✓ — share code "+code); render();
+    } catch(e){ toast("Couldn't create crew — check the setup steps", true); }
+    ui.crewBusy = false;
+  },
+  async crewJoin(){
+    const name = $("#crewMyName").value.trim();
+    const code = $("#crewCode").value.trim().toUpperCase();
+    if (!name || !code){ toast("Enter your name and the crew code", true); return; }
+    if (ui.crewBusy) return; ui.crewBusy = true;
+    try {
+      const {db} = await fbInit();
+      const doc = await db.collection("crews").doc(code).get();
+      if (!doc.exists){ toast("No crew found with that code", true); ui.crewBusy=false; return; }
+      data.crew.code = code; data.crew.name = name;
+      save(); await crewPushStats(); await crewFetchStats();
+      toast("Joined crew ✓"); render();
+    } catch(e){ toast("Couldn't join — check the setup steps", true); }
+    ui.crewBusy = false;
+  },
+  crewLeave(){
+    if (!confirmDel("crew-leave")) return;
+    delete data.crew.code; ui.crewStats = null; ui.crewTodos = null;
+    save(); toast("Left crew"); render();
+  },
+  crewSyncNow(){ crewSync(true); },
+  crewMetric(m){ ui.crewMetric = m; render(); },
+  async crewAddTodo(inputEl){
+    const text = inputEl.value.trim();
+    if (!text) return;
+    const assignedTo = $("#crewAssign").value;
+    try {
+      const {db, uid} = await fbInit();
+      await db.collection("crews").doc(data.crew.code).collection("todos").add({
+        text, createdBy: uid, createdByName: data.crew.name,
+        assignedTo, assignedToName: assignedTo==="all" ? "Everyone" : (ui.crewStats?.find(s=>s.uid===assignedTo)?.name || "?"),
+        done:false, createdAt: Date.now()
+      });
+      inputEl.value = ""; inputEl.focus();
+      await crewFetchTodos(); render();
+      setTimeout(()=>{ const el=$("#crewTodoInput"); if(el) el.focus(); }, 50);
+    } catch(e){ toast("Couldn't add — check connection", true); }
+  },
+  async crewToggleTodo(id, done){
+    try {
+      const {db} = await fbInit();
+      if (done) ding();
+      await db.collection("crews").doc(data.crew.code).collection("todos").doc(id)
+        .update({ done, doneBy: done ? data.crew.name : null, doneAt: done ? Date.now() : null });
+      await crewFetchTodos(); render();
+    } catch(e){ toast("Couldn't update — check connection", true); }
+  },
+
   // settings
   setDark(){
     data.settings.darkMode = !data.settings.darkMode;
@@ -1553,6 +1784,7 @@ $("#importFile").addEventListener("change", async e=>{
 
 applyTheme();
 render();
+if (data.crew?.code) crewSync(false);
 
 </script>
 </body>
