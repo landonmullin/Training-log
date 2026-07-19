@@ -218,6 +218,223 @@ function haversineMeters(a,b){
   const s=Math.sin(dLat/2)**2 + Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLon/2)**2;
   return 2*R*Math.asin(Math.sqrt(s));
 }
+
+// ================= FIT parser (watch files) =================
+const FIT_EPOCH = 631065600; // 1989-12-31T00:00:00Z
+const FIT_BASE_SIZE = {0:1,1:1,2:1,3:2,4:2,5:4,6:4,7:1,8:4,9:8,10:1,11:2,12:4,13:1,14:8,15:8,16:8};
+function fitReadValue(dv, off, base, le){
+  switch (base & 0x1F){
+    case 0: case 2: { const v=dv.getUint8(off); return v===0xFF?null:v; }
+    case 1: { const v=dv.getInt8(off); return v===0x7F?null:v; }
+    case 3: { const v=dv.getInt16(off,le); return v===0x7FFF?null:v; }
+    case 4: { const v=dv.getUint16(off,le); return v===0xFFFF?null:v; }
+    case 5: { const v=dv.getInt32(off,le); return v===0x7FFFFFFF?null:v; }
+    case 6: { const v=dv.getUint32(off,le); return (v>>>0)===0xFFFFFFFF?null:v; }
+    case 10:{ const v=dv.getUint8(off); return v===0?null:v; }
+    case 11:{ const v=dv.getUint16(off,le); return v===0?null:v; }
+    case 12:{ const v=dv.getUint32(off,le); return v===0?null:v; }
+    case 8: return dv.getFloat32(off,le);
+    case 9: return dv.getFloat64(off,le);
+    default: return null;
+  }
+}
+function parseFIT(buf){
+  const dv = new DataView(buf);
+  if (buf.byteLength < 14) throw new Error("Not a FIT file");
+  const headerSize = dv.getUint8(0);
+  const dataSize = dv.getUint32(4, true);
+  const sig = String.fromCharCode(dv.getUint8(8), dv.getUint8(9), dv.getUint8(10), dv.getUint8(11));
+  if (sig !== ".FIT") throw new Error("Not a FIT file");
+  let off = headerSize;
+  const end = Math.min(headerSize + dataSize, buf.byteLength);
+  const defs = {};
+  const recs = []; const sess = {}; let sportMsg = null;
+  let lastTs = null;
+  const readMsg = (def, start, tsOverride)=>{
+    const msg = {};
+    let o = start;
+    for (const f of def.fields){
+      const bs = FIT_BASE_SIZE[f.base & 0x1F] || 1;
+      if (f.size === bs) msg[f.num] = fitReadValue(dv, o, f.base, def.le);
+      o += f.size;
+    }
+    if (tsOverride != null && msg[253] == null) msg[253] = tsOverride;
+    return msg;
+  };
+  const handle = (global, msg)=>{
+    if (global === 20){
+      recs.push({
+        t: msg[253], lat: msg[0], lon: msg[1], hr: msg[3],
+        ele: msg[78]!=null ? msg[78]/5-500 : (msg[2]!=null ? msg[2]/5-500 : null),
+        dist: msg[5]!=null ? msg[5]/100 : null
+      });
+    } else if (global === 18){
+      if (msg[5]!=null) sess.sport = msg[5];
+      if (msg[6]!=null) sess.subSport = msg[6];
+      if (msg[9]!=null) sess.totalDist = msg[9]/100;
+      if (msg[8]!=null) sess.timer = msg[8]/1000;
+      if (msg[7]!=null) sess.elapsed = msg[7]/1000;
+      if (msg[2]!=null) sess.start = msg[2];
+      if (msg[16]!=null) sess.avgHr = msg[16];
+      if (msg[17]!=null) sess.maxHr = msg[17];
+      if (msg[22]!=null) sess.ascent = msg[22];
+    } else if (global === 12 && sportMsg==null){
+      sportMsg = msg[0];
+    }
+  };
+  while (off < end){
+    const hdr = dv.getUint8(off); off += 1;
+    if (hdr & 0x80){ // compressed-timestamp data message
+      const local = (hdr >> 5) & 0x3;
+      const def = defs[local];
+      if (!def) throw new Error("Corrupt FIT file");
+      const off5 = hdr & 0x1F;
+      if (lastTs != null){
+        const prev5 = lastTs & 0x1F;
+        lastTs = (lastTs & ~0x1F) | off5;
+        if (off5 < prev5) lastTs += 0x20;
+      }
+      const msg = readMsg(def, off, lastTs);
+      off += def.totalSize;
+      handle(def.global, msg);
+    } else if (hdr & 0x40){ // definition message
+      const hasDev = !!(hdr & 0x20);
+      const local = hdr & 0xF;
+      off += 1; // reserved
+      const le = dv.getUint8(off) === 0; off += 1;
+      const global = le ? dv.getUint16(off, true) : dv.getUint16(off, false); off += 2;
+      const n = dv.getUint8(off); off += 1;
+      const fields = []; let total = 0;
+      for (let i=0;i<n;i++){
+        const num = dv.getUint8(off), size = dv.getUint8(off+1), base = dv.getUint8(off+2);
+        off += 3; fields.push({num, size, base}); total += size;
+      }
+      if (hasDev){
+        const dn = dv.getUint8(off); off += 1;
+        for (let i=0;i<dn;i++){ total += dv.getUint8(off+1); off += 3; }
+      }
+      defs[local] = { le, global, fields, totalSize: total };
+    } else { // normal data message
+      const local = hdr & 0xF;
+      const def = defs[local];
+      if (!def) throw new Error("Corrupt FIT file");
+      const msg = readMsg(def, off);
+      off += def.totalSize;
+      if (msg[253] != null) lastTs = msg[253];
+      handle(def.global, msg);
+    }
+  }
+  // ---- assemble into the same shape parseGPX returns ----
+  const toDate = s => new Date((FIT_EPOCH + s) * 1000);
+  const semi = v => v * (180 / 2147483648);
+  const pts = recs.filter(r=>r.t!=null).map(r=>({
+    t: toDate(r.t),
+    lat: r.lat!=null ? semi(r.lat) : null,
+    lon: r.lon!=null ? semi(r.lon) : null,
+    ele: r.ele, hr: r.hr, dist: r.dist
+  }));
+  if (!pts.length) throw new Error("No activity data in FIT file");
+  const gps = pts.filter(p=>p.lat!=null && p.lon!=null);
+  // distance: device's own cumulative stream first, then GPS math
+  const lastDist = [...pts].reverse().find(p=>p.dist!=null)?.dist ?? null;
+  let meters = sess.totalDist ?? lastDist;
+  if (meters == null){
+    meters = 0;
+    for (let i=1;i<gps.length;i++) meters += haversineMeters(gps[i-1], gps[i]);
+  }
+  // splits from the cumulative distance stream (device-accurate)
+  const SPLIT_MARKS = {mile:1609.344, fivek:5000, tenk:10000, half:21097.5, marathon:42195};
+  const splits = {};
+  const t0 = pts[0].t;
+  let prevD = null, prevT = null;
+  for (const p of pts){
+    if (p.dist==null) continue;
+    if (prevD != null){
+      for (const [k,mk] of Object.entries(SPLIT_MARKS)){
+        if (splits[k]==null && prevD < mk && p.dist >= mk && p.dist > prevD){
+          const frac = (mk - prevD) / (p.dist - prevD);
+          const tAt = prevT.getTime() + frac * (p.t.getTime() - prevT.getTime());
+          splits[k] = Math.round((tAt - t0.getTime())/1000);
+        }
+      }
+    }
+    prevD = p.dist; prevT = p.t;
+  }
+  // moving time: trust the device's timer, else compute from distance stream
+  let movingSec = sess.timer ?? null;
+  if (movingSec == null){
+    movingSec = 0;
+    for (let i=1;i<pts.length;i++){
+      const dt = (pts[i].t - pts[i-1].t)/1000;
+      const dd = (pts[i].dist!=null && pts[i-1].dist!=null) ? pts[i].dist - pts[i-1].dist : null;
+      if (dt>0 && dt<60 && dd!=null && dd/dt > 0.5) movingSec += dt;
+    }
+    if (!movingSec) movingSec = (pts[pts.length-1].t - t0)/1000;
+  }
+  // HR: time-weighted over samples
+  let hrTime=0, hrWeighted=0, hrMax=null; const hrHist={};
+  for (let i=1;i<pts.length;i++){
+    const hr = pts[i].hr ?? pts[i-1].hr;
+    const dt = (pts[i].t - pts[i-1].t)/1000;
+    if (hr && dt>0 && dt<60){
+      hrTime += dt; hrWeighted += hr*dt;
+      if (hrMax==null || hr>hrMax) hrMax = hr;
+      const bin = Math.round(hr/5)*5;
+      hrHist[bin] = (hrHist[bin]||0) + dt;
+    }
+  }
+  // elevation: device total first, else smoothed climb sum
+  let gainM = sess.ascent ?? null;
+  if (gainM == null && gps.some(p=>p.ele!=null)){
+    const es = gps.map((p,i)=>{
+      let s=0,n=0;
+      for (let j=Math.max(0,i-3); j<=Math.min(gps.length-1,i+3); j++){
+        if (gps[j].ele!=null){ s+=gps[j].ele; n++; }
+      }
+      return n? s/n : null;
+    });
+    gainM = 0; let valley=null;
+    for (const e of es){
+      if (e==null) continue;
+      if (valley==null || e<valley) valley = Math.min(valley??e, e);
+      else if (e-valley >= 2){ gainM += e-valley; valley = e; }
+    }
+  }
+  // route
+  let route = null;
+  if (gps.length > 1){
+    const step = Math.max(1, Math.ceil(gps.length/200));
+    route = [];
+    for (let i=0;i<gps.length;i+=step) route.push([+gps[i].lat.toFixed(5), +gps[i].lon.toFixed(5)]);
+    const lp = gps[gps.length-1];
+    const lr = [+lp.lat.toFixed(5), +lp.lon.toFixed(5)];
+    if (route[route.length-1][0]!==lr[0] || route[route.length-1][1]!==lr[1]) route.push(lr);
+  }
+  // activity type from the device's sport field
+  const sport = sess.sport ?? sportMsg;
+  const distanceMi = (meters||0)/1609.344;
+  const pace = movingSec && distanceMi>0 ? movingSec/distanceMi : null;
+  let type;
+  if (sport === 2) type = "cycling";
+  else if (sport === 11 || sport === 17) type = "walk";
+  else if (sport === 1) type = gps.length>1 ? "run" : "treadmill";
+  else type = (pace && pace > 16*60) ? "walk" : "run";
+  const startDate = sess.start!=null ? toDate(sess.start) : t0;
+  return {
+    name: tmeta(type).label + " (watch)",
+    date: isoFromDate(startDate),
+    type,
+    distanceMi: Math.round(distanceMi*100)/100,
+    durationSec: movingSec ? Math.round(movingSec) : null,
+    elevGainFt: gainM!=null ? Math.round(gainM*3.28084) : null,
+    avgHr: hrTime>0 ? Math.round(hrWeighted/hrTime) : (sess.avgHr ?? null),
+    maxHr: hrMax ?? sess.maxHr ?? null,
+    hrHist: hrTime>0 ? Object.fromEntries(Object.entries(hrHist).map(([k,v])=>[k,Math.round(v)])) : null,
+    splits: Object.keys(splits).length ? splits : null,
+    route
+  };
+}
+
 function parseGPX(text){
   const doc = new DOMParser().parseFromString(text,"application/xml");
   if (doc.querySelector("parsererror")) throw new Error("Not a valid GPX file");
@@ -786,7 +1003,7 @@ function renderCardio(){
   let html = `<div class="card" style="border-left:4px solid var(--cardio)">
     <div class="h2" style="margin:0 0 4px">Import from Strava</div>
     <div style="font-size:13px;color:var(--sub);margin-bottom:12px;line-height:1.45">
-      GPX export must be done from the Strava <b>website</b>, not the app: sign in, open an activity, then <b>⋯ → Export GPX</b> and upload the file here. Heart-rate data comes through automatically. You can select several at once.</div>
+      Export from the Strava <b>website</b>: open an activity → <b>⋯ → Export GPX</b> (or Export Original for watch recordings — .fit files work too). Bulk-archive files (.gpx, .fit, .gz) all import. Heart rate comes through automatically; select several at once.</div>
     <button class="btn cardio" onclick="document.getElementById('gpxFile').click()">Upload GPX file(s)</button>
     <button class="btn ghost" style="margin-top:8px" onclick="App.toggleManual()">${ui.manualOpen?"Hide manual entry":"Or enter manually"}</button>
     <div><a class="weblink" href="https://www.strava.com/login" target="_blank" rel="noopener">Open Strava website <span class="ext">↗</span></a></div>
@@ -1415,7 +1632,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v26</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v27</div>`;
   return html;
 }
 
@@ -1778,17 +1995,19 @@ $("#gpxFile").addEventListener("change", async e=>{
   for (const f of files){
     try {
       const lower = f.name.toLowerCase();
-      let text;
+      const gz = lower.endsWith(".gz");
+      if (gz && typeof DecompressionStream === "undefined") throw new Error("can't unzip on this device — extract the .gz first");
       if (lower.endsWith(".fit") || lower.endsWith(".fit.gz")){
-        throw new Error("FIT files aren't supported — this run came from a watch/device, not the Strava app");
-      } else if (lower.endsWith(".gz")){
-        if (typeof DecompressionStream === "undefined") throw new Error("can't unzip on this device — extract the .gz first");
-        const ds = new DecompressionStream("gzip");
-        text = await new Response(f.stream().pipeThrough(ds)).text();
+        const buf = gz
+          ? await new Response(f.stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()
+          : await f.arrayBuffer();
+        ui.pending.push({...parseFIT(buf), fileName:f.name});
       } else {
-        text = await f.text();
+        const text = gz
+          ? await new Response(f.stream().pipeThrough(new DecompressionStream("gzip"))).text()
+          : await f.text();
+        ui.pending.push({...parseGPX(text), fileName:f.name});
       }
-      ui.pending.push({...parseGPX(text), fileName:f.name});
     }
     catch(err){ if (errShown++ < 2) toast(`${f.name}: ${err.message}`, true); }
   }
