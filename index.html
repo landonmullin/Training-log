@@ -128,9 +128,9 @@
 </header>
 <div id="view"></div>
 <nav class="navbar" id="navbar"></nav>
-<input type="file" id="gpxFile" accept=".gpx,.gz,application/gpx+xml,application/gzip" multiple style="display:none">
+<input type="file" id="gpxFile" multiple style="display:none">
 <input type="file" id="importFile" accept=".json,application/json" style="display:none">
-<input type="file" id="csvFile" accept=".csv,text/csv" style="display:none">
+<input type="file" id="csvFile" style="display:none">
 
 <script>
 "use strict";
@@ -1415,7 +1415,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v25</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v26</div>`;
   return html;
 }
 
