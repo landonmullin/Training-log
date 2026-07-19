@@ -7,6 +7,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F7F9FB">
 <link rel="apple-touch-icon" sizes="180x180" href="icon.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <title>Training Log</title>
 <style>
   :root{
@@ -107,6 +109,10 @@
   body.dark .seg button.on{color:#12171F}
   body.dark .toast{color:#12171F}
   body.dark .toast.bad{color:#fff}
+  .routemap{height:220px;border-radius:10px;overflow:hidden;margin-top:10px;border:1px solid var(--line);background:var(--paper)}
+  .routebtn{background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:var(--body)}
+  body.dark .leaflet-tile{filter:invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.7)}
+  body.dark .leaflet-container{background:#1B2330}
 </style>
 </head>
 <body>
@@ -273,6 +279,13 @@ function parseGPX(text){
       hrHist[bin] = (hrHist[bin]||0) + dt;
     }
   }
+  // downsampled route for the map (~200 points, ~1m precision)
+  const step = Math.max(1, Math.ceil(pts.length/200));
+  const route = [];
+  for (let i=0;i<pts.length;i+=step) route.push([+pts[i].lat.toFixed(5), +pts[i].lon.toFixed(5)]);
+  const lastPt = pts[pts.length-1];
+  const lastRp = [+lastPt.lat.toFixed(5), +lastPt.lon.toFixed(5)];
+  if (route.length && (route[route.length-1][0]!==lastRp[0] || route[route.length-1][1]!==lastRp[1])) route.push(lastRp);
   const t0 = pts.find(p=>p.t)?.t, t1 = [...pts].reverse().find(p=>p.t)?.t;
   const elapsedSec = (t0&&t1) ? Math.max(0,(t1-t0)/1000) : null;
   const durationSec = movingSec > 0 ? movingSec : elapsedSec; // display moving time, like Strava
@@ -294,7 +307,8 @@ function parseGPX(text){
     avgHr: hrTime>0 ? Math.round(hrWeighted/hrTime) : null,
     maxHr: hrMax,
     hrHist: hrTime>0 ? Object.fromEntries(Object.entries(hrHist).map(([k,v])=>[k,Math.round(v)])) : null,
-    splits: Object.keys(splits).length ? splits : null
+    splits: Object.keys(splits).length ? splits : null,
+    route: route.length>1 ? route : null
   };
 }
 
@@ -445,6 +459,7 @@ const ui = {
   cardioType: "run", cardioMetric: "pace",
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
   todoTab: "open",
+  openMaps: new Set(),
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -563,7 +578,9 @@ function renderCalendar(){
           ${c.distanceMi>0?stat("dist", c.distanceMi+" mi"):""}${stat("time", fmtDur(c.durationSec))}${cardioPaceStat(c)}
           ${c.avgHr?stat("avg hr", c.avgHr):""}${c.maxHr?stat("max hr", c.maxHr):""}
         </div>
-        ${c.hrHist?zoneBar(c.hrHist):""}</div>`;
+        ${c.hrHist?zoneBar(c.hrHist):""}
+        ${c.route ? `<button class="routebtn" onclick="App.toggleMap('${c.id}')">${ui.openMaps.has(c.id)?"Hide route ▾":"View route ▸"}</button>` : ""}
+        ${c.route && ui.openMaps.has(c.id) ? `<div class="routemap" data-route-map="${c.id}"></div>` : ""}</div>`;
     });
     (sel.weights||[]).forEach(w=>{
       detail += `<div class="card" style="border-left:4px solid var(--ink);display:flex;justify-content:space-between;align-items:center">
@@ -743,6 +760,8 @@ function renderCardio(){
             <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${cardioRight(c)}</div>
           </div>
           ${c.hrHist && data.settings.maxHr ? zoneBar(c.hrHist) : ""}
+          ${c.route ? `<button class="routebtn" onclick="App.toggleMap('${c.id}')">${ui.openMaps.has(c.id)?"Hide route ▾":"View route ▸"}</button>` : ""}
+          ${c.route && ui.openMaps.has(c.id) ? `<div class="routemap" data-route-map="${c.id}"></div>` : ""}
         </div>`).join("");
     }
   }
@@ -1231,7 +1250,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v22</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v23</div>`;
   return html;
 }
 
@@ -1247,9 +1266,47 @@ function delBtn(key, fnCall, label="delete"){
   return `<button class="del" style="${armed?"color:#fff;background:var(--danger);padding:4px 10px;border-radius:6px":""}" onclick="${fnCall}">${armed?"tap again to delete":label}</button>`;
 }
 
+function svgRouteFallback(route){
+  const lats = route.map(p=>p[0]), lons = route.map(p=>p[1]);
+  const minLa=Math.min(...lats), maxLa=Math.max(...lats), minLo=Math.min(...lons), maxLo=Math.max(...lons);
+  const W=400, H=220, pad=20;
+  // approximate aspect correction for longitude at this latitude
+  const latMid = (minLa+maxLa)/2, lonScale = Math.cos(latMid*Math.PI/180);
+  const spanLa = Math.max(maxLa-minLa, 1e-5), spanLo = Math.max((maxLo-minLo)*lonScale, 1e-5);
+  const sc = Math.min((W-2*pad)/spanLo, (H-2*pad)/spanLa);
+  const x = lo => pad + ((lo-minLo)*lonScale)*sc + ((W-2*pad)-spanLo*sc)/2;
+  const y = la => H - (pad + (la-minLa)*sc + ((H-2*pad)-spanLa*sc)/2);
+  const ptsAttr = route.map(p=>`${x(p[1]).toFixed(1)},${y(p[0]).toFixed(1)}`).join(" ");
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;display:block">
+    <polyline points="${ptsAttr}" fill="none" stroke="#E8590C" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${x(route[0][1])}" cy="${y(route[0][0])}" r="5" fill="#2B8A3E"/>
+    <circle cx="${x(route[route.length-1][1])}" cy="${y(route[route.length-1][0])}" r="5" fill="#C92A2A"/>
+    <text x="${W/2}" y="${H-6}" font-size="10" fill="#66738A" text-anchor="middle">offline — route shape only</text>
+  </svg>`;
+}
+function initMaps(){
+  document.querySelectorAll("[data-route-map]").forEach(el=>{
+    if (el.dataset.done) return;
+    el.dataset.done = "1";
+    const c = data.cardio.find(x=>x.id===el.dataset.routeMap);
+    if (!c?.route) return;
+    if (typeof L === "undefined"){ el.innerHTML = svgRouteFallback(c.route); return; }
+    try {
+      const map = L.map(el, {zoomControl:false, scrollWheelZoom:false});
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(map);
+      const line = L.polyline(c.route, {color:"#E8590C", weight:4, opacity:0.9});
+      line.addTo(map);
+      map.fitBounds(line.getBounds(), {padding:[18,18]});
+      L.circleMarker(c.route[0], {radius:6, color:"#fff", weight:2, fillColor:"#2B8A3E", fillOpacity:1}).addTo(map);
+      L.circleMarker(c.route[c.route.length-1], {radius:6, color:"#fff", weight:2, fillColor:"#C92A2A", fillOpacity:1}).addTo(map);
+      setTimeout(()=>map.invalidateSize(), 50);
+    } catch(e){ el.innerHTML = svgRouteFallback(c.route); }
+  });
+}
 function afterRender(){
   const s = $("#exSearch");
   if (s && ui.focusSearch){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); ui.focusSearch=false; }
+  initMaps();
 }
 
 // ================= actions =================
@@ -1296,6 +1353,7 @@ window.App = {
 
   // cardio
   cardioList(v){ ui.cardioList=v; render(); },
+  toggleMap(id){ ui.openMaps.has(id) ? ui.openMaps.delete(id) : ui.openMaps.add(id); render(); },
   toggleManual(){ ui.manualOpen=!ui.manualOpen; render(); },
   pend(i,f,v){ ui.pending[i][f]=v; },
   confirmPending(i){
@@ -1310,11 +1368,12 @@ window.App = {
         maxHr: p.maxHr || dup.maxHr || null,
         hrHist: p.hrHist || dup.hrHist || null,
         splits: p.splits || dup.splits || null,
+        route: p.route || dup.route || null,
       });
       save(); ui.pending.splice(i,1); toast("Updated existing activity with new data ✓"); render();
       return;
     }
-    data.cardio.push({id:uid(), date:p.date, type:p.type, name:p.name, distanceMi:p.distanceMi, durationSec:p.durationSec, elevGainFt:p.elevGainFt, avgHr:p.avgHr||null, maxHr:p.maxHr||null, hrHist:p.hrHist||null, splits:p.splits||null, source:"strava-gpx"});
+    data.cardio.push({id:uid(), date:p.date, type:p.type, name:p.name, distanceMi:p.distanceMi, durationSec:p.durationSec, elevGainFt:p.elevGainFt, avgHr:p.avgHr||null, maxHr:p.maxHr||null, hrHist:p.hrHist||null, splits:p.splits||null, route:p.route||null, source:"strava-gpx"});
     save(); ui.pending.splice(i,1); toast("Activity saved ✓"); render();
   },
   saveManual(){
