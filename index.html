@@ -128,7 +128,7 @@
 </header>
 <div id="view"></div>
 <nav class="navbar" id="navbar"></nav>
-<input type="file" id="gpxFile" accept=".gpx,application/gpx+xml" multiple style="display:none">
+<input type="file" id="gpxFile" accept=".gpx,.gz,application/gpx+xml,application/gzip" multiple style="display:none">
 <input type="file" id="importFile" accept=".json,application/json" style="display:none">
 <input type="file" id="csvFile" accept=".csv,text/csv" style="display:none">
 
@@ -791,6 +791,9 @@ function renderCardio(){
     <button class="btn ghost" style="margin-top:8px" onclick="App.toggleManual()">${ui.manualOpen?"Hide manual entry":"Or enter manually"}</button>
     <div><a class="weblink" href="https://www.strava.com/login" target="_blank" rel="noopener">Open Strava website <span class="ext">↗</span></a></div>
   </div>`;
+  if (ui.pending.length > 1){
+    html += `<button class="btn cardio" style="margin-bottom:12px" onclick="App.confirmAllPending()">Save all ${ui.pending.length} activities</button>`;
+  }
   ui.pending.forEach((p,i)=>{
     html += `<div class="card" style="background:var(--cardioSoft);border-color:var(--cardio)">
       <div class="lbl">Review import — ${esc(p.fileName)}</div>
@@ -1412,7 +1415,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v24</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v25</div>`;
   return html;
 }
 
@@ -1518,6 +1521,31 @@ window.App = {
   toggleMap(id){ ui.openMaps.has(id) ? ui.openMaps.delete(id) : ui.openMaps.add(id); render(); },
   toggleManual(){ ui.manualOpen=!ui.manualOpen; render(); },
   pend(i,f,v){ ui.pending[i][f]=v; },
+  confirmAllPending(){
+    let added=0, updated=0;
+    for (const p of ui.pending){
+      const dup = data.cardio.find(c=>c.date===p.date && Math.abs(c.distanceMi-p.distanceMi)<0.05);
+      if (dup){
+        Object.assign(dup, {
+          durationSec: p.durationSec || dup.durationSec,
+          elevGainFt: p.elevGainFt ?? dup.elevGainFt,
+          avgHr: p.avgHr || dup.avgHr || null,
+          maxHr: p.maxHr || dup.maxHr || null,
+          hrHist: p.hrHist || dup.hrHist || null,
+          splits: p.splits || dup.splits || null,
+          route: p.route || dup.route || null,
+        });
+        updated++;
+      } else {
+        data.cardio.push({id:uid(), date:p.date, type:p.type, name:p.name, distanceMi:p.distanceMi, durationSec:p.durationSec, elevGainFt:p.elevGainFt, avgHr:p.avgHr||null, maxHr:p.maxHr||null, hrHist:p.hrHist||null, splits:p.splits||null, route:p.route||null, source:"strava-gpx"});
+        added++;
+      }
+    }
+    ui.pending = [];
+    save();
+    toast(`Imported ${added} new${updated?`, updated ${updated}`:""} ✓`);
+    render();
+  },
   confirmPending(i){
     const p = ui.pending[i];
     const dup = data.cardio.find(c=>c.date===p.date && Math.abs(c.distanceMi-p.distanceMi)<0.05);
@@ -1746,9 +1774,23 @@ window.App = {
 // gpx upload
 $("#gpxFile").addEventListener("change", async e=>{
   const files = Array.from(e.target.files||[]);
+  let errShown = 0;
   for (const f of files){
-    try { ui.pending.push({...parseGPX(await f.text()), fileName:f.name}); }
-    catch(err){ toast(`${f.name}: ${err.message}`, true); }
+    try {
+      const lower = f.name.toLowerCase();
+      let text;
+      if (lower.endsWith(".fit") || lower.endsWith(".fit.gz")){
+        throw new Error("FIT files aren't supported — this run came from a watch/device, not the Strava app");
+      } else if (lower.endsWith(".gz")){
+        if (typeof DecompressionStream === "undefined") throw new Error("can't unzip on this device — extract the .gz first");
+        const ds = new DecompressionStream("gzip");
+        text = await new Response(f.stream().pipeThrough(ds)).text();
+      } else {
+        text = await f.text();
+      }
+      ui.pending.push({...parseGPX(text), fileName:f.name});
+    }
+    catch(err){ if (errShown++ < 2) toast(`${f.name}: ${err.message}`, true); }
   }
   e.target.value = "";
   render();
