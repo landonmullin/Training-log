@@ -121,6 +121,7 @@
   <div style="display:flex;justify-content:space-between;align-items:center">
     <h1>TRAINING LOG</h1>
     <div style="display:flex;gap:8px">
+      <button id="lbBtn" class="hdrbtn" onclick="App.openLeaderboard()" aria-label="Leaderboard"></button>
       <button id="todoBtn" class="hdrbtn" onclick="App.tab('todo')" aria-label="To-do list"></button>
       <button id="settingsBtn" class="hdrbtn" onclick="App.tab('settings')" aria-label="Settings"></button>
     </div>
@@ -665,6 +666,84 @@ function weekStartISO(iso){
 const riegel = (t1,d1,d2) => t1*Math.pow(d2/d1,1.06);
 
 
+
+// ================= strava auto-sync (optional, per-user; requires the user's own Strava API app) =================
+const STRAVA_REDIRECT = () => location.origin + location.pathname;
+async function stravaEnsureToken(){
+  const s = data.stravaApi;
+  if (!s?.refreshToken) throw new Error("not connected");
+  if (s.expiresAt && s.expiresAt*1000 > Date.now()+60000) return s.accessToken;
+  const body = new URLSearchParams({
+    client_id: s.clientId, client_secret: s.clientSecret,
+    grant_type: "refresh_token", refresh_token: s.refreshToken
+  });
+  const r = await fetch("https://www.strava.com/oauth/token", {method:"POST", body});
+  const j = await r.json();
+  if (!j.access_token) throw new Error("token refresh failed");
+  s.accessToken = j.access_token; s.refreshToken = j.refresh_token; s.expiresAt = j.expires_at;
+  save();
+  return s.accessToken;
+}
+function stravaMapActivity(a){
+  const t = (a.sport_type || a.type || "").toLowerCase();
+  let type = null;
+  if (t.includes("run")) type = "run";
+  else if (t === "walk" || t === "hike") type = "walk";
+  else if (t.includes("ride") || t.includes("velomobile")) type = "cycling";
+  if (!type) return null;
+  return {
+    stravaId: a.id, type,
+    name: a.name || "Strava activity",
+    date: (a.start_date_local || a.start_date || "").slice(0,10),
+    distanceMi: Math.round((a.distance/1609.344)*100)/100,
+    durationSec: a.moving_time || a.elapsed_time || null,
+    elevGainFt: a.total_elevation_gain!=null ? Math.round(a.total_elevation_gain*3.28084) : null,
+    avgHr: a.average_heartrate!=null ? Math.round(a.average_heartrate) : null,
+    maxHr: a.max_heartrate!=null ? Math.round(a.max_heartrate) : null,
+    source: "strava-api"
+  };
+}
+let stravaSyncing = false;
+async function stravaSync(manual){
+  if (stravaSyncing || !data.stravaApi?.refreshToken) return;
+  stravaSyncing = true;
+  try {
+    const token = await stravaEnsureToken();
+    const s = data.stravaApi;
+    const after = s.lastSyncEpoch ? s.lastSyncEpoch - 7*86400 : Math.floor(Date.now()/1000) - 365*86400;
+    let page = 1, added = 0;
+    while (page <= 3){
+      const res = await fetch(`https://www.strava.com/api/v3/athlete/activities?after=${after}&per_page=100&page=${page}`,
+        {headers:{Authorization:"Bearer "+token}});
+      if (!res.ok) throw new Error("api error "+res.status);
+      const acts = await res.json();
+      if (!Array.isArray(acts)) throw new Error("bad response");
+      for (const a of acts){
+        const m = stravaMapActivity(a);
+        if (!m || !m.date || !(m.distanceMi >= 0)) continue;
+        const dup = data.cardio.find(c =>
+          c.stravaId === m.stravaId ||
+          (c.date === m.date && Math.abs(c.distanceMi - m.distanceMi) < 0.05));
+        if (dup){
+          if (!dup.stravaId) dup.stravaId = m.stravaId;
+          dup.avgHr = dup.avgHr || m.avgHr; dup.maxHr = dup.maxHr || m.maxHr;
+          continue;
+        }
+        data.cardio.push({id:uid(), ...m});
+        added++;
+      }
+      if (acts.length < 100) break;
+      page++;
+    }
+    s.lastSyncEpoch = Math.floor(Date.now()/1000);
+    save();
+    if (added){ toast(`Synced ${added} new activit${added>1?"ies":"y"} from Strava ✓`); render(); }
+    else if (manual){ toast("Strava: up to date ✓"); render(); }
+  } catch(e){
+    if (manual) toast("Strava sync failed — check connection or reconnect", true);
+  } finally { stravaSyncing = false; }
+}
+
 // ================= crew sync (Firebase) =================
 let fb = null;          // {auth, db, uid}
 let fbLoadPromise = null;
@@ -704,19 +783,41 @@ async function fbInit(){
   fb = { auth, db: firebase.firestore(), uid: auth.currentUser.uid };
   return fb;
 }
-function myWeekStats(){
-  const wk = weekStartISO(todayISO());
-  const miles = data.cardio.filter(c=>c.type==="run" && weekStartISO(c.date)===wk)
-    .reduce((s,c)=>s+c.distanceMi,0);
-  const weekLifts = data.lifts.filter(w=>weekStartISO(w.date)===wk);
-  const volume = weekLifts.reduce((s,w)=>s+w.exercises.reduce((a,ex)=>a+ex.sets.reduce((b,st)=>b+st.weight*st.reps,0),0),0);
-  return { weekKey:wk, miles:Math.round(miles*10)/10, lifts:weekLifts.length, volume:Math.round(volume) };
+function statsTotals(dateFilter){
+  const miles = data.cardio.filter(c=>c.type==="run" && dateFilter(c.date)).reduce((s,c)=>s+c.distanceMi,0);
+  const lifts = data.lifts.filter(w=>dateFilter(w.date));
+  const volume = lifts.reduce((s,w)=>s+w.exercises.reduce((a,ex)=>a+ex.sets.reduce((b,st)=>b+st.weight*st.reps,0),0),0);
+  return { miles:Math.round(miles*10)/10, lifts:lifts.length, volume:Math.round(volume) };
+}
+function myStats(){
+  const today = todayISO();
+  const wk = weekStartISO(today);
+  const mo = today.slice(0,7);
+  return {
+    dayKey: today,   day:   statsTotals(d=>d===today),
+    weekKey: wk,     week:  statsTotals(d=>weekStartISO(d)===wk),
+    monthKey: mo,    month: statsTotals(d=>d.slice(0,7)===mo),
+    all: statsTotals(()=>true)
+  };
 }
 async function crewPushStats(){
   if (!data.crew?.code) return;
   const {db, uid} = await fbInit();
   await db.collection("crews").doc(data.crew.code).collection("stats").doc(uid)
-    .set({ name:data.crew.name, ...myWeekStats(), updatedAt:Date.now() });
+    .set({ name:data.crew.name, ...myStats(), updatedAt:Date.now() });
+}
+// read a member's value for a period; null = no data pushed for the current period yet
+function crewValueFor(s, period, metric){
+  if (s.all || s.week){ // current stats format
+    if (period==="all") return s.all?.[metric] ?? 0;
+    const today = todayISO();
+    const cur = { day: today, week: weekStartISO(today), month: today.slice(0,7) }[period];
+    const key = { day:"dayKey", week:"weekKey", month:"monthKey" }[period];
+    return s[key]===cur ? (s[period]?.[metric] ?? 0) : null;
+  }
+  // legacy format from older app versions: week-only flat fields
+  if (period==="week" && s.weekKey===weekStartISO(todayISO())) return s[metric] ?? 0;
+  return null;
 }
 async function crewFetchStats(){
   const {db} = await fbInit();
@@ -755,7 +856,7 @@ const ui = {
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
   todoTab: "open",
   openMaps: new Set(),
-  crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewBusy: false,
+  crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -785,6 +886,10 @@ function renderNav(){
   tb.style.display = data.settings.todoEnabled ? "flex" : "none";
   tb.className = "hdrbtn" + (ui.tab==="todo" ? " on" : "");
   tb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 6.5l1.5 1.5L8 5.5"/><path d="M11 7h10"/><path d="M4 12.5l1.5 1.5L8 11.5"/><path d="M11 13h10"/><path d="M4 18.5l1.5 1.5L8 17.5"/><path d="M11 19h10"/></svg>${open?`<span class="badge">${open}</span>`:""}`;
+  const lb = $("#lbBtn");
+  lb.style.display = data.crew?.code ? "flex" : "none";
+  lb.className = "hdrbtn" + (ui.tab==="progress" && ui.trendView==="crew" ? " on" : "");
+  lb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 5H4v2a3 3 0 0 0 3 3M17 5h3v2a3 3 0 0 1-3 3"/></svg>`;
   const sb = $("#settingsBtn");
   sb.className = "hdrbtn" + (ui.tab==="settings" ? " on" : "");
   sb.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34 1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87 1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>`;
@@ -1000,7 +1105,15 @@ function matchesHTML(){
 
 // ----- cardio -----
 function renderCardio(){
-  let html = `<div class="card" style="border-left:4px solid var(--cardio)">
+  let html = "";
+  if (data.stravaApi?.refreshToken){
+    html += `<div class="card" style="border-left:4px solid var(--cardio);display:flex;justify-content:space-between;align-items:center">
+      <div><div style="font-weight:700;font-size:14px">Strava auto-sync on</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${data.stravaApi.lastSyncEpoch?`last sync ${new Date(data.stravaApi.lastSyncEpoch*1000).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}`:"syncing…"}</div></div>
+      <button class="btn cardio" style="width:auto;padding:10px 16px" onclick="App.stravaSyncNow()">Sync now</button>
+    </div>`;
+  }
+  html += `<div class="card" style="border-left:4px solid var(--cardio)">
     <div class="h2" style="margin:0 0 4px">Import from Strava</div>
     <div style="font-size:13px;color:var(--sub);margin-bottom:12px;line-height:1.45">
       Export from the Strava <b>website</b>: open an activity → <b>⋯ → Export GPX</b> (or Export Original for watch recordings — .fit files work too). Bulk-archive files (.gpx, .fit, .gz) all import. Heart rate comes through automatically; select several at once.</div>
@@ -1305,6 +1418,27 @@ function renderSettings(){
     `}
   </div>
   <div class="card">
+    <div class="lbl" style="margin-bottom:8px">Strava auto-sync — optional, needs a Strava subscription</div>
+    ${data.stravaApi?.refreshToken ? `
+      <div style="font-size:14px"><b>Connected</b>${data.stravaApi.athleteName?" as "+esc(data.stravaApi.athleteName):""}</div>
+      <div style="font-size:12px;color:var(--sub);margin:4px 0 10px">New runs pull in automatically each time you open the app.</div>
+      ${delBtn("strava-disc","App.stravaDisconnect()","disconnect strava")}
+    ` : ui.stravaSetupOpen ? `
+      <div style="font-size:13px;color:var(--sub);line-height:1.5;margin-bottom:10px">
+        Strava requires a paid subscription for API access. If you have one: create an API app at <b>strava.com/settings/api</b>
+        (set Authorization Callback Domain to <b>${esc(location.hostname||"this app's domain")}</b>), then enter its keys here.</div>
+      <div class="lbl">Client ID</div>
+      <input class="mono" inputmode="numeric" id="stravaId" value="${esc(data.stravaApi?.clientId||"")}" placeholder="12345" style="margin-bottom:8px">
+      <div class="lbl">Client Secret</div>
+      <input class="mono" id="stravaSecret" value="${esc(data.stravaApi?.clientSecret||"")}" placeholder="abc123…" style="margin-bottom:12px">
+      <button class="btn ink" onclick="App.stravaSaveAndConnect()">Save & connect Strava</button>
+      <button style="background:none;border:none;color:var(--sub);font-size:13px;margin-top:8px;cursor:pointer" onclick="App.stravaEditKeys()">cancel</button>
+    ` : `
+      <div style="font-size:13px;color:var(--sub);margin-bottom:10px">Have a Strava subscription? Connect your own API keys and runs upload themselves.</div>
+      <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.stravaEditKeys()">Set up Strava auto-sync</button>
+    `}
+  </div>
+  <div class="card">
     <div class="lbl" style="margin-bottom:8px">Cardio methods — shown when logging</div>
     ${Object.entries(TYPE_META).map(([k,v])=>setRow(`${v.emoji} ${v.label}`, "", !!s.cardioTypes[k], `App.toggleCardioType('${k}')`)).join("")}
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
@@ -1567,25 +1701,39 @@ function renderProgress(){
       html += `<div class="card muted">Loading leaderboard…</div>`;
       return html;
     }
-    const wk = weekStartISO(todayISO());
-    const rows = ui.crewStats.filter(s=>s.weekKey===wk);
-    const stale = ui.crewStats.filter(s=>s.weekKey!==wk);
-    const metric = ui.crewMetric;
+    const period = ui.crewPeriod, metric = ui.crewMetric;
+    const today = todayISO();
+    const periodLabel = {
+      day: "Today", week: `This week — ${shortDate(weekStartISO(today))}`,
+      month: new Date(today+"T12:00").toLocaleDateString(undefined,{month:"long",year:"numeric"}),
+      all: "All time"
+    }[period];
+    const rows = [], stale = [];
+    ui.crewStats.forEach(s=>{
+      const v = crewValueFor(s, period, metric);
+      if (v==null) stale.push(s); else rows.push({...s, v});
+    });
+    rows.sort((a,b)=>b.v-a.v);
     const fmtV = v => metric==="miles" ? (Math.round((v||0)*10)/10)+" mi" : metric==="volume" ? (v||0).toLocaleString()+" lb" : (v||0);
-    rows.sort((a,b)=>(b[metric]||0)-(a[metric]||0));
     html += `<div class="seg">
+      <button class="${period==="day"?"on":""}" onclick="App.crewPeriod('day')">Daily</button>
+      <button class="${period==="week"?"on":""}" onclick="App.crewPeriod('week')">Weekly</button>
+      <button class="${period==="month"?"on":""}" onclick="App.crewPeriod('month')">Monthly</button>
+      <button class="${period==="all"?"on":""}" onclick="App.crewPeriod('all')">All time</button>
+    </div>
+    <div class="seg">
       <button class="${metric==="miles"?"on":""}" onclick="App.crewMetric('miles')">Miles</button>
       <button class="${metric==="lifts"?"on":""}" onclick="App.crewMetric('lifts')">Lifts</button>
       <button class="${metric==="volume"?"on":""}" onclick="App.crewMetric('volume')">Volume</button>
     </div>`;
     html += `<div class="card" style="border-left:4px solid #B08D2F">
-      <div class="lbl" style="margin-bottom:8px">This week — ${shortDate(wk)}</div>
+      <div class="lbl" style="margin-bottom:8px">${periodLabel}</div>
       ${rows.length ? rows.map((s,i)=>`<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
         <span style="font-family:var(--mono);font-size:13px;color:${i===0?"#B08D2F":"var(--sub)"};font-weight:700;width:22px">${i===0?"🏆":"#"+(i+1)}</span>
         <span style="flex:1;font-weight:700;font-size:14px">${esc(s.name||"?")}</span>
-        <span style="font-family:var(--mono);font-size:14px;font-weight:600">${fmtV(s[metric])}</span>
-      </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced this week yet.</div>`}
-      ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — no data this week yet</div>`:""}
+        <span style="font-family:var(--mono);font-size:14px;font-weight:600">${fmtV(s.v)}</span>
+      </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced for this period yet.</div>`}
+      ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — hasn't synced this ${period==="all"?"yet":period==="day"?"today":period==="week"?"week":"month"}</div>`:""}
     </div>`;
     html += `<button class="btn ink" onclick="App.crewSyncNow()">Refresh</button>
       <div class="note" style="margin-top:8px">stats sync automatically each time anyone opens their app · invite code: ${data.crew.code}</div>`;
@@ -1632,7 +1780,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v27</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v29</div>`;
   return html;
 }
 
@@ -1836,11 +1984,32 @@ window.App = {
 
   // progress
   trendView(v){ ui.trendView=v; render(); },
+  openLeaderboard(){ ui.tab="progress"; ui.trendView="crew"; ui.confirmKey=null; render(); },
   progMode(m){ ui.progMode=m; render(); },
   progExercise(e){ ui.progExercise=e; render(); },
   progMetric(m){ ui.progMetric=m; render(); },
   cardioType(t){ ui.cardioType=t; render(); },
   cardioMetric(m){ ui.cardioMetric=m; render(); },
+
+  // strava (optional per-user)
+  stravaEditKeys(){ ui.stravaSetupOpen = !ui.stravaSetupOpen; render(); },
+  stravaSaveAndConnect(){
+    const id = $("#stravaId").value.trim(), secret = $("#stravaSecret").value.trim();
+    if (!id || !secret){ toast("Enter both the Client ID and Secret", true); return; }
+    data.stravaApi = { ...(data.stravaApi||{}), clientId:id, clientSecret:secret };
+    save(); ui.stravaSetupOpen = false;
+    const url = "https://www.strava.com/oauth/authorize" +
+      "?client_id=" + encodeURIComponent(id) +
+      "&redirect_uri=" + encodeURIComponent(STRAVA_REDIRECT()) +
+      "&response_type=code&approval_prompt=auto&scope=activity:read_all";
+    location.href = url;
+  },
+  stravaSyncNow(){ toast("Syncing with Strava…"); stravaSync(true); },
+  stravaDisconnect(){
+    if (!confirmDel("strava-disc")) return;
+    if (data.stravaApi){ delete data.stravaApi.accessToken; delete data.stravaApi.refreshToken; delete data.stravaApi.expiresAt; delete data.stravaApi.athleteName; }
+    save(); toast("Strava disconnected"); render();
+  },
 
   // crew
   async crewSaveConfig(){
@@ -1885,6 +2054,7 @@ window.App = {
   },
   crewSyncNow(){ crewSync(true); },
   crewMetric(m){ ui.crewMetric = m; render(); },
+  crewPeriod(p){ ui.crewPeriod = p; render(); },
   async crewAddTodo(inputEl){
     const text = inputEl.value.trim();
     if (!text) return;
@@ -2046,6 +2216,33 @@ $("#importFile").addEventListener("change", async e=>{
 applyTheme();
 render();
 if (data.crew?.code) crewSync(false);
+// handle Strava OAuth redirect + auto-sync (only for users who configured it)
+(async function stravaBoot(){
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code");
+  if (code && data.stravaApi?.clientId){
+    history.replaceState({}, "", location.pathname);
+    toast("Finishing Strava connection…");
+    try {
+      const body = new URLSearchParams({
+        client_id: data.stravaApi.clientId, client_secret: data.stravaApi.clientSecret,
+        code, grant_type: "authorization_code"
+      });
+      const r = await fetch("https://www.strava.com/oauth/token", {method:"POST", body});
+      const j = await r.json();
+      if (!j.access_token) throw new Error("no token");
+      Object.assign(data.stravaApi, {
+        accessToken: j.access_token, refreshToken: j.refresh_token, expiresAt: j.expires_at,
+        athleteName: j.athlete ? `${j.athlete.firstname||""} ${(j.athlete.lastname||"").slice(0,1)}`.trim() : ""
+      });
+      save(); ui.tab = "cardio"; render();
+      toast("Strava connected ✓");
+      stravaSync(true);
+    } catch(e){ toast("Strava connection failed — try again", true); }
+  } else if (data.stravaApi?.refreshToken){
+    stravaSync(false);
+  }
+})();
 
 </script>
 </body>
