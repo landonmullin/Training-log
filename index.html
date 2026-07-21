@@ -146,6 +146,7 @@ const TYPE_META = {
   stairmaster:{label:"Stairmaster",emoji:"🪜"},
   basketball:{label:"Basketball",emoji:"🏀"},
   volleyball:{label:"Volleyball",emoji:"🏐"},
+  pickleball:{label:"Pickleball",emoji:"🥒"},
 };
 const tmeta = t => TYPE_META[t] || TYPE_META.run;
 const DEFAULT_EXERCISES = [
@@ -821,6 +822,8 @@ function crewValueFor(s, period, metric){
 }
 async function crewFetchStats(){
   const {db} = await fbInit();
+  const crewDoc = await db.collection("crews").doc(data.crew.code).get();
+  ui.crewOwner = crewDoc.exists ? (crewDoc.data().owner || null) : null;
   const snap = await db.collection("crews").doc(data.crew.code).collection("stats").get();
   ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
   ui.crewStatsAt = Date.now();
@@ -1735,6 +1738,25 @@ function renderProgress(){
       </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced for this period yet.</div>`}
       ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — hasn't synced this ${period==="all"?"yet":period==="day"?"today":period==="week"?"week":"month"}</div>`:""}
     </div>`;
+    const myUid = fb?.uid || null;
+    const isOwner = myUid && ui.crewOwner === myUid;
+    if (isOwner){
+      const members = [...ui.crewStats].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+      html += `<div class="card" style="border-left:4px solid var(--danger)">
+        <div class="lbl" style="margin-bottom:8px">Members — leader tools</div>
+        ${members.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
+          <span style="flex:1;font-weight:700;font-size:14px">${esc(m.name||"?")}${m.uid===myUid?' <span style="font-size:10px;color:var(--sub);font-weight:400">(you)</span>':""}</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${m.updatedAt?"synced "+shortDate(isoFromDate(new Date(m.updatedAt))):"never synced"}</span>
+          ${m.uid!==myUid ? delBtn("rm-"+m.uid, "App.crewRemoveMember('"+m.uid+"','"+esc(m.name||"").replace(/'/g,"")+"')", "remove") : ""}
+        </div>`).join("")}
+        <div style="font-size:12px;color:var(--sub);margin-top:8px">Removing someone clears them from the leaderboard. If they open their app again they'll re-sync back in — duplicates from an old bookmark won't, since that copy is abandoned.</div>
+      </div>`;
+    } else if (ui.crewOwner == null && myUid){
+      html += `<div class="card">
+        <div style="font-size:13px;color:var(--sub);margin-bottom:10px">This crew has no leader yet. The leader can see all members and remove them.</div>
+        <button class="btn ink" onclick="App.crewClaim()">Claim crew leadership</button>
+      </div>`;
+    }
     html += `<button class="btn ink" onclick="App.crewSyncNow()">Refresh</button>
       <div class="note" style="margin-top:8px">stats sync automatically each time anyone opens their app · invite code: ${data.crew.code}</div>`;
     return html;
@@ -1780,7 +1802,7 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v29</div>`;
+    <div class="note" style="margin-top:10px">Training Log — v32</div>`;
   return html;
 }
 
@@ -2025,7 +2047,7 @@ window.App = {
     try {
       const {db} = await fbInit();
       const code = Array.from({length:6},()=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random()*32)]).join("");
-      await db.collection("crews").doc(code).set({createdAt:Date.now()});
+      await db.collection("crews").doc(code).set({createdAt:Date.now(), owner: fb.uid});
       data.crew.code = code; data.crew.name = name;
       save(); await crewPushStats(); await crewFetchStats();
       toast("Crew created ✓ — share code "+code); render();
@@ -2041,7 +2063,7 @@ window.App = {
       const {db} = await fbInit();
       const doc = await db.collection("crews").doc(code).get();
       if (!doc.exists){ toast("No crew found with that code", true); ui.crewBusy=false; return; }
-      data.crew.code = code; data.crew.name = name;
+      data.crew.code = code; data.crew.name = name; data.crew.owner = doc.data().owner || null;
       save(); await crewPushStats(); await crewFetchStats();
       toast("Joined crew ✓"); render();
     } catch(e){ toast("Couldn't join — check the setup steps", true); }
@@ -2053,6 +2075,26 @@ window.App = {
     save(); toast("Left crew"); render();
   },
   crewSyncNow(){ crewSync(true); },
+  async crewClaim(){
+    try {
+      const {db, uid} = await fbInit();
+      const ref = db.collection("crews").doc(data.crew.code);
+      const doc = await ref.get();
+      if (doc.exists && doc.data().owner){ ui.crewOwner = doc.data().owner; toast("This crew already has a leader", true); render(); return; }
+      await ref.update({owner: uid});
+      ui.crewOwner = uid;
+      toast("You're the crew leader ✓"); render();
+    } catch(e){ toast("Couldn't claim — check connection", true); }
+  },
+  async crewRemoveMember(uid, name){
+    if (!confirmDel("rm-"+uid)) return;
+    try {
+      const {db} = await fbInit();
+      await db.collection("crews").doc(data.crew.code).collection("stats").doc(uid).delete();
+      ui.crewStats = (ui.crewStats||[]).filter(s=>s.uid!==uid);
+      toast(`Removed ${name||"member"}`); render();
+    } catch(e){ toast("Couldn't remove — check connection", true); }
+  },
   crewMetric(m){ ui.crewMetric = m; render(); },
   crewPeriod(p){ ui.crewPeriod = p; render(); },
   async crewAddTodo(inputEl){
