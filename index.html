@@ -136,6 +136,7 @@
 <script>
 "use strict";
 // ================= data =================
+const APP_VERSION = 32;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], customExercises:[] };
 const TYPE_META = {
@@ -860,6 +861,7 @@ const ui = {
   todoTab: "open",
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
+  updateMsg: null,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -1802,7 +1804,10 @@ function renderProgress(){
       <button class="btn ink" onclick="App.exportData()">Export backup (.json)</button>
       <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="document.getElementById('importFile').click()">Restore from backup</button>
     </div>
-    <div class="note" style="margin-top:10px">Training Log — v32</div>`;
+    <div style="text-align:center;margin-top:14px">
+      <button id="updBtn" class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub);font-size:13px;padding:9px" onclick="App.checkUpdate()">Check for update</button>
+      <div class="note" style="margin-top:8px">${ui.updateMsg || ("Training Log — v"+APP_VERSION)}</div>
+    </div>`;
   return html;
 }
 
@@ -2176,6 +2181,27 @@ window.App = {
   clearDoneTodos(){
     if (!confirmDel("todos-clear")) return;
     data.todos = data.todos.filter(t=>!t.done); save(); toast("Completed tasks cleared"); render();
+  },
+
+  // update check
+  async checkUpdate(){
+    ui.updateMsg = "Checking…"; render();
+    try {
+      const url = location.pathname + "?v=" + Date.now();
+      const res = await fetch(url, {cache:"no-store"});
+      const text = await res.text();
+      const m = text.match(/APP_VERSION\s*=\s*(\d+)/);
+      const latest = m ? +m[1] : null;
+      if (latest == null){ ui.updateMsg = "Couldn't read latest version"; render(); return; }
+      if (latest > APP_VERSION){
+        ui.updateMsg = `Update available: v${latest} (you're on v${APP_VERSION}). Force-close and reopen the app; if it sticks, delete the home-screen icon and re-add it.`;
+      } else {
+        ui.updateMsg = `You're up to date — v${APP_VERSION} ✓`;
+      }
+      render();
+    } catch(e){
+      ui.updateMsg = "Check failed — need an internet connection"; render();
+    }
   },
 
   // backup
