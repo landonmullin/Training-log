@@ -137,7 +137,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 35;
+const APP_VERSION = 36;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], customExercises:[] };
 const TYPE_META = {
@@ -682,17 +682,18 @@ const PAY_ANCHOR = "2026-02-20"; // a known pay-period START (Friday)
 function payPeriodStart(iso){
   const [ay,am,ad] = PAY_ANCHOR.split("-").map(Number);
   const [y,m,d] = iso.split("-").map(Number);
-  const anchor = Date.UTC(ay,am-1,ad), day = Date.UTC(y,m-1,d);
-  const diff = Math.floor((day-anchor)/86400000);
+  const anchor = new Date(ay, am-1, ad);           // local midnight
+  const day = new Date(y, m-1, d);                 // local midnight
+  const diff = Math.round((day - anchor)/86400000); // round handles DST hour shifts
   const off = ((diff % 14) + 14) % 14;
-  const start = new Date(day - off*86400000);
-  return isoFromDate(new Date(start.getTime()));
+  return isoFromDate(new Date(y, m-1, d - off));   // JS Date rolls months/years correctly
 }
 function payPeriodRange(startIso){
   const [y,m,d] = startIso.split("-").map(Number);
-  const end = new Date(Date.UTC(y,m-1,d) + 13*86400000);     // Thursday, 14th day
-  const payday = new Date(Date.UTC(y,m-1,d) + 21*86400000);  // following Friday (1-week lag after period ends)
-  return { end:isoFromDate(new Date(end.getTime())), payday:isoFromDate(new Date(payday.getTime())) };
+  return {
+    end: isoFromDate(new Date(y, m-1, d + 13)),    // Thursday, 14th day of the period
+    payday: isoFromDate(new Date(y, m-1, d + 21))  // following Friday (1-week lag)
+  };
 }
 function computeShift(s){
   const rate = s.role==="supervisor" ? 15.0 : 2.13;
@@ -1484,13 +1485,13 @@ function renderPay(){
   const {end, payday} = payPeriodRange(startIso);
   // default the shift-date input to today if today falls in this period, else the period's start day
   const defaultShiftDate = (payPeriodStart(todayISO())===startIso) ? todayISO() : startIso;
-  const shifts = data.shifts.filter(s=>s.periodStart===startIso).sort((a,b)=>a.date<b.date?-1:1);
+  const shifts = data.shifts.filter(s=>payPeriodStart(s.date)===startIso).sort((a,b)=>a.date<b.date?-1:1);
   const tot = shifts.reduce((t,s)=>{ const c=computeShift(s);
     t.hours+=c.hours; t.hourly+=c.hourly; t.finalTips+=c.finalTips; t.gross+=c.gross; t.taxes+=c.taxes; t.net+=c.net; return t;
   }, {hours:0,hourly:0,finalTips:0,gross:0,taxes:0,net:0});
   const [sy,sm,sd] = startIso.split("-").map(Number);
-  const prev = isoFromDate(new Date(Date.UTC(sy,sm-1,sd) - 14*86400000));
-  const nextStart = isoFromDate(new Date(Date.UTC(sy,sm-1,sd) + 14*86400000));
+  const prev = isoFromDate(new Date(sy, sm-1, sd - 14));
+  const nextStart = isoFromDate(new Date(sy, sm-1, sd + 14));
 
   // year-to-date totals across all shifts in the current calendar year
   const yr = new Date().getFullYear();
@@ -2347,7 +2348,7 @@ window.App = {
   },
 
   // pay
-  payNav(startIso){ ui.payPeriod = startIso; render(); },
+  payNav(startIso){ ui.payPeriod = payPeriodStart(startIso); render(); },
   payHoursMode(m){ ui.payHoursMode = m; render(); },
   payToggleYtd(){ ui.payYtdOpen = !ui.payYtdOpen; render(); },
   payFormOpen(){ ui.payFormOpen = true; render(); },
