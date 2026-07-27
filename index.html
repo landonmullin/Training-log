@@ -137,7 +137,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 36;
+const APP_VERSION = 37;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], customExercises:[] };
 const TYPE_META = {
@@ -1099,7 +1099,17 @@ function renderCalendar(){
         </div>`;
     });
   }
-  return `${banner}${calendarLegend()}<div class="card">
+  const xp = activityXP();
+  const {rank, next} = rankFor(xp);
+  const prog = next ? Math.min(100, Math.round((xp-rank.min)/(next.min-rank.min)*100)) : 100;
+  const rankStrip = `<button onclick="App.tab('progress')" style="display:flex;align-items:center;gap:10px;width:100%;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:9px 12px;margin-bottom:12px;cursor:pointer;text-align:left">
+    <span style="font-size:20px">${rank.icon}</span>
+    <span style="font-family:var(--disp);font-weight:700;font-size:15px;text-transform:uppercase;color:var(--ink)">${rank.name}</span>
+    <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${xp.toLocaleString()} XP</span>
+    <span style="flex:1;height:6px;border-radius:3px;background:var(--grid);overflow:hidden;display:block"><span style="display:block;height:100%;width:${prog}%;background:#B08D2F"></span></span>
+    ${next?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub)">${(next.min-xp).toLocaleString()} to ${next.icon}</span>`:""}
+  </button>`;
+  return `${banner}${rankStrip}${calendarLegend()}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
