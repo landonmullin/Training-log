@@ -121,6 +121,7 @@
   <div style="display:flex;justify-content:space-between;align-items:center">
     <h1>TRAINING LOG</h1>
     <div style="display:flex;gap:8px">
+      <button id="payBtn" class="hdrbtn" onclick="App.tab('pay')" aria-label="Pay tracker" style="display:none"></button>
       <button id="lbBtn" class="hdrbtn" onclick="App.openLeaderboard()" aria-label="Leaderboard"></button>
       <button id="todoBtn" class="hdrbtn" onclick="App.tab('todo')" aria-label="To-do list"></button>
       <button id="settingsBtn" class="hdrbtn" onclick="App.tab('settings')" aria-label="Settings"></button>
@@ -136,9 +137,9 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 32;
+const APP_VERSION = 34;
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], customExercises:[] };
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], customExercises:[] };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
   walk:{label:"Walk",emoji:"🚶"},
@@ -184,6 +185,7 @@ catch(e){ data = structuredClone(EMPTY); }
 for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
 if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
+if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (!data.settings.cardioTypes) data.settings.cardioTypes = Object.fromEntries(Object.keys(TYPE_META).map(k=>[k,true]));
 for (const k of Object.keys(TYPE_META)) if (typeof data.settings.cardioTypes[k]==="undefined") data.settings.cardioTypes[k]=true;
 
@@ -669,6 +671,83 @@ const riegel = (t1,d1,d2) => t1*Math.pow(d2/d1,1.06);
 
 
 
+
+
+// ================= pay tracking (single-user, off by default) =================
+const PAY_ANCHOR = "2026-02-20"; // a known pay-period START (Friday)
+function payPeriodStart(iso){
+  const [ay,am,ad] = PAY_ANCHOR.split("-").map(Number);
+  const [y,m,d] = iso.split("-").map(Number);
+  const anchor = Date.UTC(ay,am-1,ad), day = Date.UTC(y,m-1,d);
+  const diff = Math.floor((day-anchor)/86400000);
+  const off = ((diff % 14) + 14) % 14;
+  const start = new Date(day - off*86400000);
+  return isoFromDate(new Date(start.getTime()));
+}
+function payPeriodRange(startIso){
+  const [y,m,d] = startIso.split("-").map(Number);
+  const end = new Date(Date.UTC(y,m-1,d) + 13*86400000);     // Thursday, 14th day
+  const payday = new Date(Date.UTC(y,m-1,d) + 21*86400000);  // following Friday (1-week lag after period ends)
+  return { end:isoFromDate(new Date(end.getTime())), payday:isoFromDate(new Date(payday.getTime())) };
+}
+function computeShift(s){
+  const rate = s.role==="supervisor" ? 15.0 : 2.13;
+  const hours = +s.hours || 0;
+  const sales = +s.sales || 0;
+  const tips = +s.tips || 0;
+  const hourly = Math.round(hours*rate*100)/100;
+  const tipout = Math.round(sales*0.02*100)/100;
+  const finalTips = Math.round((tips - tipout)*100)/100;
+  const gross = Math.round((hourly + finalTips)*100)/100;
+  const taxes = Math.round(gross*0.20*100)/100;
+  const net = Math.round((gross - taxes)*100)/100;
+  return { rate, hours, sales, tips, hourly, tipout, finalTips, gross, taxes, net };
+}
+function hoursBetween(inT, outT){
+  if (!inT || !outT) return null;
+  const [ih,im] = inT.split(":").map(Number), [oh,om] = outT.split(":").map(Number);
+  let mins = (oh*60+om) - (ih*60+im);
+  if (mins < 0) mins += 24*60;
+  return Math.round(mins/60*100)/100;
+}
+const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+
+// ================= XP & ranks =================
+const RANKS = [
+  {min:0,      name:"Rookie",   icon:"\u{1F195}"},
+  {min:2500,   name:"Bronze",   icon:"\u{1F949}"},
+  {min:6000,   name:"Silver",   icon:"\u{1F948}"},
+  {min:12000,  name:"Gold",     icon:"\u{1F947}"},
+  {min:20000,  name:"Platinum", icon:"\u{1F48E}"},
+  {min:32000,  name:"Diamond",  icon:"\u{1F4A0}"},
+  {min:50000,  name:"Elite",    icon:"\u2B50"},
+  {min:75000,  name:"Master",   icon:"\u{1F525}"},
+  {min:110000, name:"Legend",   icon:"\u{1F451}"},
+];
+function activityXP(){
+  let xp = 0;
+  data.cardio.forEach(c=>{
+    if (c.type==="run" || c.type==="walk" || c.type==="treadmill"){
+      xp += (c.distanceMi||0) * 100;
+    } else if (c.durationSec){
+      xp += (c.durationSec/60) * 5;
+    }
+  });
+  xp += data.lifts.length * 250;
+  return Math.round(xp);
+}
+function rankFor(xp){
+  let r = RANKS[0], next = null;
+  for (let i=0;i<RANKS.length;i++){
+    if (xp >= RANKS[i].min){ r = RANKS[i]; next = RANKS[i+1] || null; }
+  }
+  return { rank:r, next };
+}
+function rankBadge(xp, size=14){
+  const {rank} = rankFor(xp);
+  return `<span title="${rank.name}" style="font-size:${size}px">${rank.icon}</span>`;
+}
+
 // ================= strava auto-sync (optional, per-user; requires the user's own Strava API app) =================
 const STRAVA_REDIRECT = () => location.origin + location.pathname;
 async function stravaEnsureToken(){
@@ -799,7 +878,8 @@ function myStats(){
     dayKey: today,   day:   statsTotals(d=>d===today),
     weekKey: wk,     week:  statsTotals(d=>weekStartISO(d)===wk),
     monthKey: mo,    month: statsTotals(d=>d.slice(0,7)===mo),
-    all: statsTotals(()=>true)
+    all: statsTotals(()=>true),
+    xp: activityXP()
   };
 }
 async function crewPushStats(){
@@ -862,6 +942,7 @@ const ui = {
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   updateMsg: null,
+  payPeriod: null, payHoursMode: "direct",
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -870,7 +951,7 @@ const ui = {
 // ================= views =================
 function render(){
   renderNav();
-  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings }[ui.tab];
+  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay }[ui.tab];
   $("#view").innerHTML = v();
   afterRender();
 }
@@ -895,6 +976,12 @@ function renderNav(){
   lb.style.display = data.crew?.code ? "flex" : "none";
   lb.className = "hdrbtn" + (ui.tab==="progress" && ui.trendView==="crew" ? " on" : "");
   lb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 5H4v2a3 3 0 0 0 3 3M17 5h3v2a3 3 0 0 1-3 3"/></svg>`;
+  const pb = $("#payBtn");
+  if (pb){
+    pb.style.display = data.settings.payEnabled ? "flex" : "none";
+    pb.className = "hdrbtn" + (ui.tab==="pay" ? " on" : "");
+    pb.innerHTML = `<svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 9v6M18 9v6"/></svg>`;
+  }
   const sb = $("#settingsBtn");
   sb.className = "hdrbtn" + (ui.tab==="settings" ? " on" : "");
   sb.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34 1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87 1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>`;
@@ -1385,6 +1472,104 @@ function renderWeight(){
   return html;
 }
 
+// ----- pay tracker -----
+function renderPay(){
+  const startIso = ui.payPeriod || payPeriodStart(todayISO());
+  const {end, payday} = payPeriodRange(startIso);
+  const shifts = data.shifts.filter(s=>s.periodStart===startIso).sort((a,b)=>a.date<b.date?-1:1);
+  const tot = shifts.reduce((t,s)=>{ const c=computeShift(s);
+    t.hours+=c.hours; t.hourly+=c.hourly; t.finalTips+=c.finalTips; t.gross+=c.gross; t.taxes+=c.taxes; t.net+=c.net; return t;
+  }, {hours:0,hourly:0,finalTips:0,gross:0,taxes:0,net:0});
+  const [sy,sm,sd] = startIso.split("-").map(Number);
+  const prev = isoFromDate(new Date(Date.UTC(sy,sm-1,sd) - 14*86400000));
+  const nextStart = isoFromDate(new Date(Date.UTC(sy,sm-1,sd) + 14*86400000));
+
+  // year-to-date totals across all shifts in the current calendar year
+  const yr = new Date().getFullYear();
+  const ytd = data.shifts.filter(s=>s.date.startsWith(yr+"-")).reduce((t,s)=>{
+    const c=computeShift(s); t.net+=c.net; t.gross+=c.gross; t.hours+=c.hours; t.finalTips+=c.finalTips; t.taxes+=c.taxes; t.shifts++; return t;
+  }, {net:0,gross:0,hours:0,finalTips:0,taxes:0,shifts:0});
+  let html = `<div class="card" style="border-left:4px solid #B08D2F">
+    <div class="lbl" style="margin-bottom:8px">${yr} year to date — ${ytd.shifts} shift${ytd.shifts!==1?"s":""}</div>
+    <div class="stats" style="flex-wrap:wrap;gap:14px">
+      ${stat("net", money(ytd.net))}
+      ${stat("gross", money(ytd.gross))}
+      ${stat("tips", money(ytd.finalTips))}
+      ${stat("hours", Math.round(ytd.hours*10)/10)}
+      ${stat("taxes", money(ytd.taxes))}
+    </div>
+    ${ytd.hours>0?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">effective ${money(ytd.net/ytd.hours)}/hr take-home</div>`:""}
+  </div>
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <button onclick="App.payNav('${prev}')" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px;color:var(--ink)">‹</button>
+      <div style="text-align:center">
+        <div class="h2" style="margin:0">${prettyDate(startIso).replace(/, \d{4}/,"")} – ${prettyDate(end).replace(/, \d{4}/,"")}</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">payday ${prettyDate(payday)}</div>
+      </div>
+      <button onclick="App.payNav('${nextStart}')" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px;color:var(--ink)">›</button>
+    </div>
+  </div>`;
+
+  // period totals
+  html += `<div class="card" style="border-left:4px solid var(--pull)">
+    <div class="lbl" style="margin-bottom:8px">Period totals — ${shifts.length} shift${shifts.length!==1?"s":""}</div>
+    <div class="stats" style="flex-wrap:wrap;gap:14px">
+      ${stat("net pay", money(tot.net))}
+      ${stat("gross", money(tot.gross))}
+      ${stat("hours", (Math.round(tot.hours*10)/10))}
+      ${stat("tips", money(tot.finalTips))}
+      ${stat("taxes", money(tot.taxes))}
+    </div>
+  </div>`;
+
+  // add-shift form
+  html += `<div class="card" style="border-left:4px solid var(--ink)">
+    <div class="lbl">Log a shift</div>
+    <div style="display:flex;gap:8px;margin:6px 0 8px">
+      <select id="pRole"><option value="server">Server ($2.13/hr)</option><option value="supervisor">Supervisor ($15/hr)</option></select>
+      <input type="date" id="pDate" value="${todayISO()}">
+    </div>
+    <div class="seg" style="margin-bottom:8px">
+      <button class="${ui.payHoursMode!=="time"?"on":""}" onclick="App.payHoursMode('direct')">Enter hours</button>
+      <button class="${ui.payHoursMode==="time"?"on":""}" onclick="App.payHoursMode('time')">Enter in/out</button>
+    </div>
+    ${ui.payHoursMode==="time" ? `
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1"><div class="lbl">Clock in</div><input type="time" id="pIn"></div>
+        <div style="flex:1"><div class="lbl">Clock out</div><input type="time" id="pOut"></div>
+      </div>` : `
+      <div class="lbl">Hours worked</div>
+      <input class="mono" type="number" inputmode="decimal" id="pHours" placeholder="8" style="margin-bottom:8px">`}
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <div style="flex:1"><div class="lbl">Sales ($)</div><input class="mono" type="number" inputmode="decimal" id="pSales" placeholder="1200"></div>
+      <div style="flex:1"><div class="lbl">Tips ($)</div><input class="mono" type="number" inputmode="decimal" id="pTips" placeholder="300"></div>
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">auto: tip-out 2% of sales · taxes 20% of gross</div>
+    <button class="btn ink" onclick="App.addShift()">Add shift</button>
+  </div>`;
+
+  // shift list
+  shifts.forEach(s=>{
+    const c = computeShift(s);
+    html += `<div class="card" style="padding:12px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><span style="font-weight:700">${s.role==="supervisor"?"Supervisor":"Server"}</span>
+          <span style="font-family:var(--mono);font-size:12px;color:var(--sub)"> · ${shortDate(s.date)} · ${c.hours}h</span></div>
+        <span style="font-family:var(--mono);font-weight:700;color:var(--pull)">${money(c.net)}</span>
+      </div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:6px;line-height:1.7">
+        hourly ${money(c.hourly)} · sales ${money(c.sales)} · tips ${money(c.tips)} − tip-out ${money(c.tipout)} = ${money(c.finalTips)}<br>
+        gross ${money(c.gross)} − tax ${money(c.taxes)} = <b style="color:var(--ink)">net ${money(c.net)}</b>
+      </div>
+      <div style="text-align:right;margin-top:6px">${delBtn("shift-"+s.id, `App.delShift('${s.id}')`)}</div>
+    </div>`;
+  });
+  if (!shifts.length) html += `<div class="card muted">No shifts logged for this period yet.</div>`;
+  return html;
+}
+
+// ----- pay tracker -----
 // ----- settings -----
 function setRow(title, desc, on, fn){
   return `<div class="setrow">
@@ -1402,6 +1587,7 @@ function renderSettings(){
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Features</div>
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
+    ${setRow("Pay tracker", "Log restaurant shifts & pay periods", !!s.payEnabled, "App.togglePayFeature()")}
   </div>
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Crew sync — leaderboard & shared tasks with friends</div>
@@ -1735,7 +1921,7 @@ function renderProgress(){
       <div class="lbl" style="margin-bottom:8px">${periodLabel}</div>
       ${rows.length ? rows.map((s,i)=>`<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
         <span style="font-family:var(--mono);font-size:13px;color:${i===0?"#B08D2F":"var(--sub)"};font-weight:700;width:22px">${i===0?"🏆":"#"+(i+1)}</span>
-        <span style="flex:1;font-weight:700;font-size:14px">${esc(s.name||"?")}</span>
+        <span style="flex:1;font-weight:700;font-size:14px">${s.xp!=null?rankBadge(s.xp)+" ":""}${esc(s.name||"?")}</span>
         <span style="font-family:var(--mono);font-size:14px;font-weight:600">${fmtV(s.v)}</span>
       </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced for this period yet.</div>`}
       ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — hasn't synced this ${period==="all"?"yet":period==="day"?"today":period==="week"?"week":"month"}</div>`:""}
@@ -1780,7 +1966,21 @@ function renderProgress(){
       </div>
       <span style="font-size:20px;color:var(--sub)">›</span>
     </button>`;
-  let html = `<div class="h2" style="margin-top:2px">Trends</div>`;
+  const xp = activityXP();
+  const {rank, next} = rankFor(xp);
+  const prog = next ? Math.round((xp-rank.min)/(next.min-rank.min)*100) : 100;
+  let html = `<div class="card" style="border-left:4px solid #B08D2F">
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:34px">${rank.icon}</span>
+      <div style="flex:1">
+        <div style="font-family:var(--disp);font-weight:700;font-size:22px;text-transform:uppercase;font-stretch:condensed">${rank.name}</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${xp.toLocaleString()} XP${next?` · ${(next.min-xp).toLocaleString()} to ${next.name}`:" · max rank"}</div>
+      </div>
+    </div>
+    ${next?`<div style="height:8px;border-radius:4px;background:var(--grid);margin-top:10px;overflow:hidden"><div style="height:100%;width:${prog}%;background:#B08D2F"></div></div>`:""}
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout</div>
+  </div>`;
+  html += `<div class="h2" style="margin-top:2px">Trends</div>`;
   html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
   html += hubBtn("food","Nutrition","var(--pull)", avg7?`7-day avg <span style="color:${kcalColor(avg7)}">${avg7} kcal</span>`:"no days logged yet");
   html += hubBtn("runs","Runs","var(--cardio)", `${wkMi} mi this week`);
@@ -1868,7 +2068,7 @@ function afterRender(){
 
 // ================= actions =================
 window.App = {
-  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
+  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
   selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
@@ -2126,6 +2326,34 @@ window.App = {
         .update({ done, doneBy: done ? data.crew.name : null, doneAt: done ? Date.now() : null });
       await crewFetchTodos(); render();
     } catch(e){ toast("Couldn't update — check connection", true); }
+  },
+
+  // pay
+  payNav(startIso){ ui.payPeriod = startIso; render(); },
+  payHoursMode(m){ ui.payHoursMode = m; render(); },
+  addShift(){
+    const role = $("#pRole").value;
+    let hours;
+    if (ui.payHoursMode==="time"){
+      hours = hoursBetween($("#pIn").value, $("#pOut").value);
+      if (hours==null){ toast("Enter both clock in and clock out", true); return; }
+    } else {
+      hours = parseFloat($("#pHours").value);
+      if (!(hours>0)){ toast("Enter hours worked", true); return; }
+    }
+    const date = $("#pDate").value;
+    const shift = {
+      id: uid(), date, periodStart: payPeriodStart(date), role,
+      hours, sales: parseFloat($("#pSales").value)||0, tips: parseFloat($("#pTips").value)||0
+    };
+    data.shifts.push(shift);
+    save(); toast("Shift added \u2713"); render();
+  },
+  delShift(id){ if(!confirmDel("shift-"+id))return; data.shifts=data.shifts.filter(s=>s.id!==id); save(); toast("Shift deleted"); render(); },
+  togglePayFeature(){
+    data.settings.payEnabled = !data.settings.payEnabled;
+    if (!data.settings.payEnabled && ui.tab==="pay") ui.tab="settings";
+    save(); render();
   },
 
   // settings
