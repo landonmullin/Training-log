@@ -137,7 +137,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 34;
+const APP_VERSION = 35;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], customExercises:[] };
 const TYPE_META = {
@@ -186,6 +186,10 @@ for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
 if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
+if (!data.settings.xpStart){ // XP counts only from the first run of this version onward
+  const _d = new Date();
+  data.settings.xpStart = `${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,"0")}-${String(_d.getDate()).padStart(2,"0")}`;
+}
 if (!data.settings.cardioTypes) data.settings.cardioTypes = Object.fromEntries(Object.keys(TYPE_META).map(k=>[k,true]));
 for (const k of Object.keys(TYPE_META)) if (typeof data.settings.cardioTypes[k]==="undefined") data.settings.cardioTypes[k]=true;
 
@@ -725,15 +729,17 @@ const RANKS = [
   {min:110000, name:"Legend",   icon:"\u{1F451}"},
 ];
 function activityXP(){
+  const since = data.settings.xpStart || todayISO();
   let xp = 0;
   data.cardio.forEach(c=>{
+    if (c.date < since) return;
     if (c.type==="run" || c.type==="walk" || c.type==="treadmill"){
       xp += (c.distanceMi||0) * 100;
     } else if (c.durationSec){
       xp += (c.durationSec/60) * 5;
     }
   });
-  xp += data.lifts.length * 250;
+  data.lifts.forEach(w=>{ if (w.date >= since) xp += 250; });
   return Math.round(xp);
 }
 function rankFor(xp){
@@ -942,7 +948,7 @@ const ui = {
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   updateMsg: null,
-  payPeriod: null, payHoursMode: "direct",
+  payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
@@ -1476,6 +1482,8 @@ function renderWeight(){
 function renderPay(){
   const startIso = ui.payPeriod || payPeriodStart(todayISO());
   const {end, payday} = payPeriodRange(startIso);
+  // default the shift-date input to today if today falls in this period, else the period's start day
+  const defaultShiftDate = (payPeriodStart(todayISO())===startIso) ? todayISO() : startIso;
   const shifts = data.shifts.filter(s=>s.periodStart===startIso).sort((a,b)=>a.date<b.date?-1:1);
   const tot = shifts.reduce((t,s)=>{ const c=computeShift(s);
     t.hours+=c.hours; t.hourly+=c.hourly; t.finalTips+=c.finalTips; t.gross+=c.gross; t.taxes+=c.taxes; t.net+=c.net; return t;
@@ -1489,16 +1497,19 @@ function renderPay(){
   const ytd = data.shifts.filter(s=>s.date.startsWith(yr+"-")).reduce((t,s)=>{
     const c=computeShift(s); t.net+=c.net; t.gross+=c.gross; t.hours+=c.hours; t.finalTips+=c.finalTips; t.taxes+=c.taxes; t.shifts++; return t;
   }, {net:0,gross:0,hours:0,finalTips:0,taxes:0,shifts:0});
-  let html = `<div class="card" style="border-left:4px solid #B08D2F">
-    <div class="lbl" style="margin-bottom:8px">${yr} year to date — ${ytd.shifts} shift${ytd.shifts!==1?"s":""}</div>
-    <div class="stats" style="flex-wrap:wrap;gap:14px">
+  let html = `<div class="card">
+    <button onclick="App.payToggleYtd()" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:none;border:none;cursor:pointer;padding:0">
+      <span style="font-size:14px;font-weight:600;color:var(--ink)">${yr} year to date</span>
+      <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${ui.payYtdOpen?"▾ hide":money(ytd.net)+" net ▸"}</span>
+    </button>
+    ${ui.payYtdOpen?`<div class="stats" style="flex-wrap:wrap;gap:14px;margin-top:12px">
       ${stat("net", money(ytd.net))}
       ${stat("gross", money(ytd.gross))}
       ${stat("tips", money(ytd.finalTips))}
       ${stat("hours", Math.round(ytd.hours*10)/10)}
       ${stat("taxes", money(ytd.taxes))}
     </div>
-    ${ytd.hours>0?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">effective ${money(ytd.net/ytd.hours)}/hr take-home</div>`:""}
+    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${ytd.shifts} shift${ytd.shifts!==1?"s":""}${ytd.hours>0?` · effective ${money(ytd.net/ytd.hours)}/hr take-home`:""}</div>`:""}
   </div>
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -1523,12 +1534,18 @@ function renderPay(){
     </div>
   </div>`;
 
-  // add-shift form
+  // add-shift form (collapsed by default)
+  if (!ui.payFormOpen){
+    html += `<button class="btn ink" style="margin-bottom:12px" onclick="App.payFormOpen()">+ Log a shift</button>`;
+  } else {
   html += `<div class="card" style="border-left:4px solid var(--ink)">
-    <div class="lbl">Log a shift</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span class="lbl" style="margin:0">Log a shift</span>
+      <button onclick="App.payFormClose()" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
+    </div>
     <div style="display:flex;gap:8px;margin:6px 0 8px">
       <select id="pRole"><option value="server">Server ($2.13/hr)</option><option value="supervisor">Supervisor ($15/hr)</option></select>
-      <input type="date" id="pDate" value="${todayISO()}">
+      <input type="date" id="pDate" value="${defaultShiftDate}" min="${startIso}" max="${end}">
     </div>
     <div class="seg" style="margin-bottom:8px">
       <button class="${ui.payHoursMode!=="time"?"on":""}" onclick="App.payHoursMode('direct')">Enter hours</button>
@@ -1548,6 +1565,7 @@ function renderPay(){
     <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">auto: tip-out 2% of sales · taxes 20% of gross</div>
     <button class="btn ink" onclick="App.addShift()">Add shift</button>
   </div>`;
+  }
 
   // shift list
   shifts.forEach(s=>{
@@ -2331,6 +2349,9 @@ window.App = {
   // pay
   payNav(startIso){ ui.payPeriod = startIso; render(); },
   payHoursMode(m){ ui.payHoursMode = m; render(); },
+  payToggleYtd(){ ui.payYtdOpen = !ui.payYtdOpen; render(); },
+  payFormOpen(){ ui.payFormOpen = true; render(); },
+  payFormClose(){ ui.payFormOpen = false; render(); },
   addShift(){
     const role = $("#pRole").value;
     let hours;
@@ -2342,11 +2363,15 @@ window.App = {
       if (!(hours>0)){ toast("Enter hours worked", true); return; }
     }
     const date = $("#pDate").value;
+    if (!date){ toast("Pick a date", true); return; }
     const shift = {
       id: uid(), date, periodStart: payPeriodStart(date), role,
       hours, sales: parseFloat($("#pSales").value)||0, tips: parseFloat($("#pTips").value)||0
     };
     data.shifts.push(shift);
+    // jump the view to the period the shift actually lands in, so it's always visible after saving
+    ui.payPeriod = shift.periodStart;
+    ui.payFormOpen = false;
     save(); toast("Shift added \u2713"); render();
   },
   delShift(id){ if(!confirmDel("shift-"+id))return; data.shifts=data.shifts.filter(s=>s.id!==id); save(); toast("Shift deleted"); render(); },
