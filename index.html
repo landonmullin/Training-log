@@ -24,9 +24,9 @@
   body{background:var(--paper);color:var(--ink);font-family:var(--body);padding-bottom:calc(84px + env(safe-area-inset-bottom))}
   header{padding:calc(14px + env(safe-area-inset-top)) 16px 10px;border-bottom:1px solid var(--grid);position:sticky;top:0;background:var(--paper);z-index:5}
   h1{font-family:var(--disp);font-size:28px;font-weight:700;letter-spacing:.01em;font-stretch:condensed}
-  .legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-  .legend .chip{display:flex;align-items:center;gap:7px;font-family:var(--body);font-size:13px;font-weight:600;color:var(--ink);padding:7px 12px;border:1px solid var(--line);border-radius:20px;background:var(--card)}
-  .legend .sw{width:16px;height:16px;border-radius:5px;border:1px solid rgba(0,0,0,0.08)}
+  .legend{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+  .legend .chip{display:flex;align-items:center;gap:5px;font-family:var(--body);font-size:11px;font-weight:600;color:var(--sub);padding:4px 8px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+  .legend .sw{width:10px;height:10px;border-radius:3px;border:1px solid rgba(0,0,0,0.08)}
   #view{padding:14px;max-width:560px;margin:0 auto}
   .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
   .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--sub);text-transform:uppercase;margin-bottom:4px}
@@ -137,9 +137,9 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 37;
+const APP_VERSION = 39;
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], customExercises:[] };
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
   walk:{label:"Walk",emoji:"🚶"},
@@ -207,6 +207,14 @@ const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${pad(d.
 const isoFromDate = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const prettyDate = iso => { const [y,m,d]=iso.split("-").map(Number); return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric",year:"numeric"}); };
 const shortDate = iso => { const [,m,d]=iso.split("-").map(Number); return `${m}/${d}`; };
+const shortDateY = iso => { const [y,m,d]=iso.split("-").map(Number); return `${m}/${d}/${String(y).slice(2)}`; };
+// weekday + date; year shown only when it isn't the current year
+const eventDate = iso => {
+  const [y,m,d] = iso.split("-").map(Number);
+  const wd = new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:"short"});
+  return y === new Date().getFullYear() ? `${wd} ${m}/${d}` : `${wd} ${m}/${d}/${String(y).slice(2)}`;
+};
+const durWords = s => { const h=Math.floor(s/3600), m=Math.round((s%3600)/60); return h ? `${h}h ${m}m` : `${m}m`; };
 const epley = (w,r) => r<=1 ? w : w*(1+r/30);
 const fmtDur = sec => { if(sec==null) return "—"; const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=Math.round(sec%60); return h>0?`${h}:${pad(m)}:${pad(s)}`:`${m}:${pad(s)}`; };
 const fmtPace = spm => { if(!spm||!isFinite(spm)) return "—"; const m=Math.floor(spm/60),s=Math.round(spm%60); return `${m}:${pad(s)}/mi`; };
@@ -717,6 +725,99 @@ function hoursBetween(inT, outT){
 }
 const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
 
+
+// ================= streak & activity events =================
+function yesterdayOf(iso){
+  const [y,m,d] = iso.split("-").map(Number);
+  return isoFromDate(new Date(y, m-1, d-1));
+}
+// called once per app open: advance the login streak
+function touchStreak(){
+  const today = todayISO();
+  const s = data.settings.streak || {count:0, lastDay:null, best:0};
+  if (s.lastDay === today) { data.settings.streak = s; return s; }
+  if (s.lastDay === yesterdayOf(today)) s.count = (s.count||0) + 1;
+  else s.count = 1;
+  s.lastDay = today;
+  s.best = Math.max(s.best||0, s.count);
+  data.settings.streak = s;
+  save();
+  return s;
+}
+function eventTextFor(item, kind, who){
+  if (kind === "lift"){
+    const sp = item.split && SPLITS[item.split] ? SPLITS[item.split].name + " " : "";
+    return { icon:"\u{1F3CB}\u{FE0F}", text:`${who} logged a ${sp}workout!` };
+  }
+  const t = item.type, mi = item.distanceMi, dur = item.durationSec;
+  const miTxt = mi ? `${mi} ${mi === 1 ? "mile" : "miles"}` : null;
+  const icon = tmeta(t).emoji;
+  if (t === "run" && miTxt) return { icon, text:`${who} ran ${miTxt}!` };
+  if (t === "walk" && miTxt) return { icon, text:`${who} walked ${miTxt}!` };
+  if (t === "treadmill" && miTxt) return { icon, text:`${who} ran ${miTxt} on the treadmill!` };
+  if (t === "cycling" && miTxt) return { icon, text:`${who} biked ${miTxt}!` };
+  if (t === "stairmaster" && dur) return { icon, text:`${who} did ${durWords(dur)} on the stairmaster!` };
+  if (dur) return { icon, text:`${who} played ${durWords(dur)} of ${tmeta(t).label.toLowerCase()}!` };
+  if (miTxt) return { icon, text:`${who} logged ${miTxt} of ${tmeta(t).label.toLowerCase()}!` };
+  return null;
+}
+// own events + crew events, newest first, deduped by eid
+function mergedEvents(limit=6){
+  const out = new Map();
+  (data.events || []).forEach(e => out.set(e.eid, e));
+  (ui.crewEvents || []).forEach(e => { if (!out.has(e.eid)) out.set(e.eid, e); });
+  return [...out.values()].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0, limit);
+}
+function pushLocalEvent(ev){
+  if (!Array.isArray(data.events)) data.events = [];
+  if (data.events.some(e => e.eid === ev.eid)) return false;
+  data.events.unshift(ev);
+  data.events = data.events.slice(0, 40);
+  return true;
+}
+// scan for activities that haven't been announced yet and turn them into events
+function collectNewEvents(){
+  const who = data.crew?.name || "You";
+  const today = todayISO();
+  const [ty,tm,td] = today.split("-").map(Number);
+  const cutoff = isoFromDate(new Date(ty, tm-1, td-3)); // only announce the last few days
+  if (!Array.isArray(data.announcedIds)){
+    // first run: mark everything existing as already announced so the feed doesn't flood
+    data.announcedIds = [...data.cardio.map(c=>c.id), ...data.lifts.map(w=>w.id)].slice(-800);
+    save();
+    return [];
+  }
+  const seen = new Set(data.announcedIds);
+  const fresh = [];
+  const consider = [
+    ...data.cardio.filter(c => c.date >= cutoff).map(c => ({item:c, kind:"cardio"})),
+    ...data.lifts.filter(w => w.date >= cutoff).map(w => ({item:w, kind:"lift"})),
+  ];
+  for (const {item, kind} of consider){
+    if (seen.has(item.id)) continue;
+    const built = eventTextFor(item, kind, who);
+    seen.add(item.id);
+    if (!built) continue;
+    fresh.push({ eid:item.id, icon:built.icon, text:built.text, date:item.date, createdAt:Date.now() });
+  }
+  // weekly streak milestones
+  const st = data.settings.streak;
+  if (st && st.count > 0 && st.count % 7 === 0){
+    const weeks = st.count / 7;
+    const eid = `streak-${st.count}-${st.lastDay}`;
+    if (!seen.has(eid)){
+      seen.add(eid);
+      fresh.push({ eid, icon:"\u{1F525}", text:`${who} logged in for ${weeks} week${weeks>1?"s":""} straight!`, date:st.lastDay, createdAt:Date.now() });
+    }
+  }
+  if (fresh.length){
+    data.announcedIds = [...seen].slice(-800);
+    fresh.forEach(pushLocalEvent);
+    save();
+  }
+  return fresh;
+}
+
 // ================= XP & ranks =================
 const RANKS = [
   {min:0,      name:"Rookie",   icon:"\u{1F195}"},
@@ -916,6 +1017,24 @@ async function crewFetchStats(){
   ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
   ui.crewStatsAt = Date.now();
 }
+async function crewPushEvents(){
+  if (!data.crew?.code) return;
+  const pending = (data.events || []).filter(e => !e.pushed);
+  if (!pending.length) return;
+  const {db, uid} = await fbInit();
+  const col = db.collection("crews").doc(data.crew.code).collection("events");
+  for (const ev of pending.slice(0, 10)){
+    await col.add({ eid:ev.eid, icon:ev.icon, text:ev.text, date:ev.date, uid, name:data.crew.name, createdAt:ev.createdAt || Date.now() });
+    ev.pushed = true;
+  }
+  save();
+}
+async function crewFetchEvents(){
+  const {db} = await fbInit();
+  const snap = await db.collection("crews").doc(data.crew.code).collection("events")
+    .orderBy("createdAt","desc").limit(25).get();
+  ui.crewEvents = snap.docs.map(d=>({id:d.id, ...d.data()}));
+}
 async function crewFetchTodos(){
   const {db} = await fbInit();
   const snap = await db.collection("crews").doc(data.crew.code).collection("todos")
@@ -926,11 +1045,97 @@ async function crewSync(manual){
   if (!data.crew?.code) return;
   try {
     await crewPushStats();
+    collectNewEvents();
+    await crewPushEvents();
     await crewFetchStats();
+    await crewFetchEvents();
     if (ui.tab==="todo") await crewFetchTodos();
+    const lastBk = data.settings.cloudBackup?.at || 0;
+    if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
     if (manual) toast("Crew synced ✓");
     render();
   } catch(e){ if (manual) toast("Crew sync failed — check connection", true); }
+}
+
+
+// ================= cloud backup (uses the crew's Firebase project) =================
+const BK_CHUNK_BYTES = 350000; // well under Firestore's 1MB per-document ceiling
+function nameKey(name){
+  const k = (name||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return k || "user";
+}
+function hashStr(s){ // cheap content hash so unchanged chunks aren't re-uploaded
+  let h = 5381;
+  for (let i=0;i<s.length;i++) h = ((h<<5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36) + ":" + s.length;
+}
+// everything except GPS routes — small, and the part that actually matters
+function backupCore(){
+  const core = {};
+  for (const k of Object.keys(data)) core[k] = data[k];
+  core.cardio = data.cardio.map(c => { const {route, ...rest} = c; return rest; });
+  return JSON.stringify(core);
+}
+function backupRouteChunks(){
+  const routes = data.cardio.filter(c=>c.route).map(c=>({id:c.id, route:c.route}));
+  const chunks = []; let cur = [], size = 0;
+  for (const r of routes){
+    const s = JSON.stringify(r).length + 2;
+    if (size + s > BK_CHUNK_BYTES && cur.length){ chunks.push(JSON.stringify(cur)); cur = []; size = 0; }
+    cur.push(r); size += s;
+  }
+  if (cur.length) chunks.push(JSON.stringify(cur));
+  return chunks;
+}
+async function cloudBackup(manual){
+  if (!data.crew?.code || !data.crew?.name){ if (manual) toast("Join a crew first — backups live in the crew's project", true); return; }
+  try {
+    const {db} = await fbInit();
+    const key = nameKey(data.crew.name);
+    const col = db.collection("crews").doc(data.crew.code).collection("backups");
+    const core = backupCore();
+    const chunks = backupRouteChunks();
+    const prev = data.settings.cloudBackup || {};
+    const prevHashes = prev.chunkHashes || [];
+    const hashes = chunks.map(hashStr);
+    await col.doc(key).set({
+      name: data.crew.name, core, chunkCount: chunks.length,
+      updatedAt: Date.now(), version: APP_VERSION
+    });
+    for (let i=0;i<chunks.length;i++){
+      if (prevHashes[i] === hashes[i]) continue; // unchanged, skip the upload
+      await col.doc(`${key}__r${i}`).set({ owner:key, idx:i, data:chunks[i], updatedAt:Date.now() });
+    }
+    for (let i=chunks.length; i<(prev.chunkCount||0); i++){
+      try { await col.doc(`${key}__r${i}`).delete(); } catch(e){}
+    }
+    data.settings.cloudBackup = { at: Date.now(), chunkCount: chunks.length, chunkHashes: hashes };
+    save();
+    if (manual){ toast("Backed up to the cloud \u2713"); render(); }
+  } catch(e){ if (manual) toast("Backup failed — check connection", true); }
+}
+async function cloudListBackups(code){
+  const {db} = await fbInit();
+  const snap = await db.collection("crews").doc(code).collection("backups").get();
+  return snap.docs
+    .filter(d => !d.id.includes("__r"))
+    .map(d => ({ key:d.id, name:d.data().name || d.id, updatedAt:d.data().updatedAt || 0 }))
+    .sort((a,b)=>b.updatedAt-a.updatedAt);
+}
+async function cloudFetchBackup(code, key){
+  const {db} = await fbInit();
+  const col = db.collection("crews").doc(code).collection("backups");
+  const doc = await col.doc(key).get();
+  if (!doc.exists) throw new Error("not found");
+  const d = doc.data();
+  const restored = JSON.parse(d.core);
+  const routeMap = {};
+  for (let i=0;i<(d.chunkCount||0);i++){
+    const c = await col.doc(`${key}__r${i}`).get();
+    if (c.exists) JSON.parse(c.data().data).forEach(r => { routeMap[r.id] = r.route; });
+  }
+  restored.cardio = (restored.cardio||[]).map(c => routeMap[c.id] ? {...c, route:routeMap[c.id]} : c);
+  return restored;
 }
 
 // ================= ui state =================
@@ -948,6 +1153,8 @@ const ui = {
   todoTab: "open",
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
+  crewEvents: null,
+  bkList: null, bkBusy: false,
   updateMsg: null,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
@@ -1010,10 +1217,11 @@ function calendarLegend(){
     <span class="chip"><span class="sw" style="background:${softSplit("pull")}"></span>Pull</span>
     <span class="chip"><span class="sw" style="background:${softSplit("legs")}"></span>Legs</span>
     <span class="chip"><span class="sw" style="background:${untaggedSoft()}"></span>Untagged</span>
-    <span class="chip"><span style="font-size:14px">🏃</span>Cardio</span>
+    <span class="chip"><span style="font-size:11px">🏃</span>Cardio</span>
   </div>`;
 }
 function renderCalendar(){
+  collectNewEvents();
   const map = byDate();
   let banner = "";
   const hasData = data.lifts.length + data.cardio.length + data.weights.length + data.nutrition.length > 0;
@@ -1109,7 +1317,21 @@ function renderCalendar(){
     <span style="flex:1;height:6px;border-radius:3px;background:var(--grid);overflow:hidden;display:block"><span style="display:block;height:100%;width:${prog}%;background:#B08D2F"></span></span>
     ${next?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub)">${(next.min-xp).toLocaleString()} to ${next.icon}</span>`:""}
   </button>`;
-  return `${banner}${rankStrip}${calendarLegend()}<div class="card">
+  const evs = mergedEvents(6);
+  const stk = data.settings.streak || {count:0};
+  const eventsCard = `<div class="card" style="padding:12px 14px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span class="lbl" style="margin:0">Recent events</span>
+      ${stk.count>0?`<span style="font-family:var(--mono);font-size:11px;color:var(--sub)">\u{1F525} ${stk.count} day streak</span>`:""}
+    </div>
+    ${evs.length ? `<div style="margin-top:8px">` + evs.map(e=>`<div style="display:flex;align-items:baseline;gap:8px;padding:4px 0">
+      <span style="font-size:13px">${e.icon||"\u2022"}</span>
+      <span style="flex:1;font-size:13px;color:var(--ink);line-height:1.35">${esc(e.text)}</span>
+      <span style="font-family:var(--mono);font-size:10px;color:var(--sub);white-space:nowrap">${eventDate(e.date)}</span>
+    </div>`).join("") + `</div>`
+    : `<div style="font-size:12px;color:var(--sub);margin-top:6px">Log a workout and it'll show up here${data.crew?.code?" for the whole crew":""}.</div>`}
+  </div>`;
+  return `${banner}${rankStrip}${eventsCard}${calendarLegend()}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
@@ -1637,6 +1859,25 @@ function renderSettings(){
       ${delBtn("crew-leave","App.crewLeave()","leave crew")}
     `}
   </div>
+  ${data.crew?.config ? `<div class="card">
+    <div class="lbl" style="margin-bottom:8px">Cloud backup</div>
+    ${data.crew?.code ? `
+      <div style="font-size:13px;color:var(--sub);line-height:1.5;margin-bottom:10px">
+        Your log backs up automatically once a day to the crew's project. If you lose your phone or delete the app, restore below using the crew code and your name.</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">last backup: ${data.settings.cloudBackup?.at ? new Date(data.settings.cloudBackup.at).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "never"}</div>
+      <button class="btn ink" onclick="App.cloudBackupNow()">Back up now</button>
+    ` : `<div style="font-size:13px;color:var(--sub);margin-bottom:10px">Join a crew to enable automatic cloud backups — or restore an existing backup below.</div>`}
+    <div style="border-top:1px solid var(--grid);margin:14px 0 10px"></div>
+    <div class="lbl">Restore from cloud</div>
+    <input class="mono" id="bkCode" placeholder="crew code" value="${esc(data.crew?.code||"")}" style="text-transform:uppercase;margin:6px 0 8px">
+    <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.cloudFindBackups()">${ui.bkBusy?"Looking…":"Find backups"}</button>
+    ${ui.bkList ? (ui.bkList.length ? `<div style="margin-top:10px">${ui.bkList.map(b=>`
+      <button onclick="App.cloudRestorePick('${b.key}')" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:6px;cursor:pointer;text-align:left">
+        <span style="font-weight:700;font-size:14px;color:var(--ink)">${esc(b.name)}</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${b.updatedAt?new Date(b.updatedAt).toLocaleDateString(undefined,{month:"short",day:"numeric"}):""}</span>
+      </button>`).join("")}</div>`
+      : `<div style="font-size:12px;color:var(--sub);margin-top:10px">No backups found for that crew code.</div>`) : ""}
+  </div>` : ""}
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Strava auto-sync — optional, needs a Strava subscription</div>
     ${data.stravaApi?.refreshToken ? `
@@ -1853,7 +2094,7 @@ function renderProgress(){
         ${pbCards.map(p=>`<div style="display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--grid)">
           <span style="font-weight:700;font-size:14px">${p.label}</span>
           <span style="font-family:var(--mono);font-size:14px;font-weight:600;color:var(--cardio)">${fmtDur(p.time)}</span>
-          <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${shortDate(p.run.date)}</span>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${shortDateY(p.run.date)}</span>
         </div>`).join("")}
         <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">times are when you actually crossed each mark mid-run — re-upload old GPX files to add splits to past runs</div>
       </div>`;
@@ -2247,6 +2488,31 @@ window.App = {
   cardioType(t){ ui.cardioType=t; render(); },
   cardioMetric(m){ ui.cardioMetric=m; render(); },
 
+  // cloud backup
+  cloudBackupNow(){ toast("Backing up…"); cloudBackup(true); },
+  async cloudFindBackups(){
+    const code = ($("#bkCode").value||"").trim().toUpperCase();
+    if (!code){ toast("Enter the crew code", true); return; }
+    if (!data.crew) data.crew = {};
+    ui.bkBusy = true; render();
+    try {
+      ui.bkList = await cloudListBackups(code);
+      ui.bkCode = code;
+    } catch(e){ ui.bkList = []; toast("Couldn't reach the backup — check the config and code", true); }
+    ui.bkBusy = false; render();
+  },
+  async cloudRestorePick(key){
+    ui.bkBusy = true; render();
+    try {
+      const parsed = await cloudFetchBackup(ui.bkCode || data.crew?.code, key);
+      if (!parsed || !Array.isArray(parsed.lifts)) throw new Error("bad backup");
+      ui.pendingRestore = parsed;
+      ui.bkBusy = false;
+      ui.tab = "progress";
+      render();
+    } catch(e){ ui.bkBusy = false; toast("Couldn't load that backup", true); render(); }
+  },
+
   // strava (optional per-user)
   stravaEditKeys(){ ui.stravaSetupOpen = !ui.stravaSetupOpen; render(); },
   stravaSaveAndConnect(){
@@ -2545,6 +2811,7 @@ $("#importFile").addEventListener("change", async e=>{
   e.target.value = "";
 });
 
+touchStreak();
 applyTheme();
 render();
 if (data.crew?.code) crewSync(false);
