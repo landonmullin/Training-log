@@ -137,7 +137,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 42;
+const APP_VERSION = 43;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
@@ -1036,6 +1036,19 @@ async function crewFetchEvents(){
     .orderBy("createdAt","desc").limit(25).get();
   ui.crewEvents = snap.docs.map(d=>({id:d.id, ...d.data()}));
 }
+async function crewFetchGrocery(){
+  const fbu = await fbInit();
+  const snap = await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+    .orderBy("createdAt","desc").limit(30).get();
+  ui.groceryLists = snap.docs.map(d=>({id:d.id, ...d.data()}))
+    .filter(l => l.owner===fbu.uid || (l.sharedWith||[]).includes(fbu.uid));
+}
+async function crewFetchGroceryItems(listId){
+  const fbu = await fbInit();
+  const snap = await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+    .doc(listId).collection("items").orderBy("createdAt","asc").limit(300).get();
+  ui.groceryItems = snap.docs.map(d=>({id:d.id, ...d.data()}));
+}
 async function crewFetchTodos(){
   const {db} = await fbInit();
   const snap = await db.collection("crews").doc(data.crew.code).collection("todos")
@@ -1050,7 +1063,11 @@ async function crewSync(manual){
     await crewPushEvents();
     await crewFetchStats();
     await crewFetchEvents();
-    if (ui.tab==="todo") await crewFetchTodos();
+    if (ui.tab==="todo" && ui.todoTab!=="grocery") await crewFetchTodos();
+    if (ui.tab==="todo" && ui.todoTab==="grocery"){
+      await crewFetchGrocery();
+      if (ui.groceryOpenId) await crewFetchGroceryItems(ui.groceryOpenId);
+    }
     const lastBk = data.settings.cloudBackup?.at || 0;
     if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
     if (manual) toast("Crew synced ✓");
@@ -1157,6 +1174,7 @@ const ui = {
   crewEvents: null,
   bkList: null, bkBusy: false,
   eventsOpen: false,
+  groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false,
   updateMsg: null,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
@@ -1929,16 +1947,99 @@ function renderTodo(){
   const open = data.todos.filter(t=>!t.done);
   const done = data.todos.filter(t=>t.done).sort((a,b)=>(b.doneAt||0)-(a.doneAt||0));
   const inCrew = !!data.crew?.code;
-  let html = ui.todoTab!=="crew" ? `<div class="card" style="border-left:4px solid var(--ink)">
+  let html = (ui.todoTab!=="crew" && ui.todoTab!=="grocery") ? `<div class="card" style="border-left:4px solid var(--ink)">
     <div class="lbl">Add tasks — press return to add and keep typing</div>
     <input id="todoInput" placeholder="What do you need to do?" enterkeyhint="done"
       onkeydown="if(event.key==='Enter'){event.preventDefault();App.addTodo(this);}">
   </div>` : "";
   html += `<div class="seg">
-    <button class="${ui.todoTab!=="done"&&ui.todoTab!=="crew"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
+    <button class="${ui.todoTab!=="done"&&ui.todoTab!=="crew"&&ui.todoTab!=="grocery"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
     <button class="${ui.todoTab==="done"?"on":""}" onclick="App.todoTab('done')">Completed${done.length?` (${done.length})`:""}</button>
     ${inCrew?`<button class="${ui.todoTab==="crew"?"on":""}" onclick="App.todoTab('crew')">Crew</button>`:""}
+    ${inCrew?`<button class="${ui.todoTab==="grocery"?"on":""}" onclick="App.todoTab('grocery')">Grocery</button>`:""}
   </div>`;
+  if (ui.todoTab==="grocery"){
+    if (!ui.groceryLists){ crewFetchGrocery().then(()=>render()).catch(()=>{ ui.groceryLists=[]; render(); }); }
+    const myUid = fb?.uid || null;
+    const lists = ui.groceryLists || [];
+
+    // ---------- inside an open list ----------
+    if (ui.groceryOpenId){
+      const list = lists.find(l=>l.id===ui.groceryOpenId);
+      const items = ui.groceryItems;
+      const openItems = (items||[]).filter(i=>!i.done);
+      const doneItems = (items||[]).filter(i=>i.done);
+      const shared = list ? [list.ownerName, ...(list.sharedNames||[])].filter(Boolean) : [];
+      html += `<div class="card" style="border-left:4px solid var(--pull)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <button onclick="App.groceryBack()" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer;padding:0">‹ all lists</button>
+          ${list && list.owner===myUid ? delBtn("glist-"+list.id, `App.groceryDeleteList('${list.id}')`, "delete list") : ""}
+        </div>
+        <div class="h2" style="margin:0 0 2px">${esc(list?.name || "List")}</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">${shared.length?`shared with ${shared.map(esc).join(", ")}`:"private"}</div>
+        <input id="gItemInput" placeholder="Add an item…" enterkeyhint="done"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();App.groceryAdd(this);}">
+      </div>`;
+      if (items === null){
+        html += `<div class="card muted">Loading items…</div>`;
+      } else {
+        html += openItems.map(i=>`<div class="todo-row">
+          <button class="todo-check" onclick="App.groceryToggle('${i.id}', true)"></button>
+          <span class="todo-text">${esc(i.text)}${i.addedByName?`<div style="font-size:11px;color:var(--sub);font-family:var(--mono)">added by ${esc(i.addedByName)}</div>`:""}</span>
+          <button class="todo-x" onclick="App.groceryRemove('${i.id}')">✕</button>
+        </div>`).join("");
+        if (!openItems.length) html += `<div class="card muted">Nothing on the list yet.</div>`;
+        if (doneItems.length){
+          html += `<div class="lbl" style="margin:14px 0 6px">In the cart (${doneItems.length})</div>`;
+          html += doneItems.map(i=>`<div class="todo-row completed">
+            <button class="todo-check" onclick="App.groceryToggle('${i.id}', false)">✓</button>
+            <span class="todo-text">${esc(i.text)}${i.doneBy?`<div style="font-size:11px;color:var(--sub);font-family:var(--mono);text-decoration:none">got by ${esc(i.doneBy)}</div>`:""}</span>
+            <button class="todo-x" onclick="App.groceryRemove('${i.id}')">✕</button>
+          </div>`).join("");
+          html += `<div style="text-align:center;margin-top:6px">${delBtn("gclear","App.groceryClearDone()","clear checked items")}</div>`;
+        }
+      }
+      return html;
+    }
+
+    // ---------- list of lists ----------
+    const members = (ui.crewStats||[]).filter(s=>s.uid!==myUid);
+    if (ui.groceryNewOpen){
+      html += `<div class="card" style="border-left:4px solid var(--pull)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span class="lbl" style="margin:0">New grocery list</span>
+          <button onclick="App.groceryNew()" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
+        </div>
+        <input id="gListName" placeholder="e.g. Weekly shop" style="margin-bottom:10px">
+        <div class="lbl">Share with</div>
+        ${members.length ? members.map(m=>`<label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--grid);cursor:pointer">
+          <input type="checkbox" class="gmem" value="${m.uid}" data-name="${esc(m.name||"?")}" style="width:20px;height:20px;flex:none;accent-color:#2B8A3E">
+          <span style="font-size:14px;font-weight:600">${esc(m.name||"?")}</span>
+        </label>`).join("") : `<div style="font-size:12px;color:var(--sub);padding:6px 0">No other crew members have synced yet — you can still make a list for yourself.</div>`}
+        <button class="btn ink" style="margin-top:12px" onclick="App.groceryCreate()">Create list</button>
+      </div>`;
+    } else {
+      html += `<button class="btn ink" style="margin-bottom:12px" onclick="App.groceryNew()">+ New grocery list</button>`;
+    }
+    if (ui.groceryLists === null){
+      html += `<div class="card muted">Loading lists…</div>`;
+    } else if (!lists.length){
+      html += `<div class="card muted">No grocery lists yet. Create one and pick who it's shared with — they can add, check off, and remove items too.</div>`;
+    } else {
+      html += lists.map(l=>{
+        const who = [l.ownerName, ...(l.sharedNames||[])].filter(Boolean);
+        return `<button onclick="App.groceryOpen('${l.id}')" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--pull);border-radius:12px;padding:12px 14px;margin-bottom:8px;cursor:pointer;text-align:left">
+          <span>
+            <span style="font-weight:700;font-size:15px;color:var(--ink);display:block">${esc(l.name||"List")}</span>
+            <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${who.map(esc).join(", ")}</span>
+          </span>
+          <span style="color:var(--sub);font-size:18px">›</span>
+        </button>`;
+      }).join("");
+    }
+    html += `<button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="App.crewSyncNow()">Refresh</button>`;
+    return html;
+  }
   if (ui.todoTab==="crew"){
     if (!ui.crewTodos){ crewFetchTodos().then(()=>render()).catch(()=>{ ui.crewTodos=[]; render(); }); }
     const members = (ui.crewStats||[]).filter(s=>s.uid!==(fb?.uid));
@@ -2620,6 +2721,96 @@ window.App = {
       setTimeout(()=>{ const el=$("#crewTodoInput"); if(el) el.focus(); }, 50);
     } catch(e){ toast("Couldn't add — check connection", true); }
   },
+  // grocery lists (shared with chosen crew members)
+  groceryNew(){ ui.groceryNewOpen = !ui.groceryNewOpen; render(); },
+  groceryOpen(id){ ui.groceryOpenId = id; ui.groceryItems = null; render();
+    crewFetchGroceryItems(id).then(()=>render()).catch(()=>{ ui.groceryItems=[]; render(); }); },
+  groceryBack(){ ui.groceryOpenId = null; ui.groceryItems = null; render(); },
+  async groceryCreate(){
+    const name = ($("#gListName").value||"").trim();
+    if (!name){ toast("Name the list", true); return; }
+    const picked = Array.from(document.querySelectorAll(".gmem:checked")).map(el=>el.value);
+    const names = Array.from(document.querySelectorAll(".gmem:checked")).map(el=>el.dataset.name||"?");
+    try {
+      const fbu = await fbInit();
+      await fbu.db.collection("crews").doc(data.crew.code).collection("grocery").add({
+        name, owner: fbu.uid, ownerName: data.crew.name,
+        sharedWith: picked, sharedNames: names, createdAt: Date.now()
+      });
+      ui.groceryNewOpen = false;
+      await crewFetchGrocery();
+      toast("List created \u2713"); render();
+    } catch(e){ toast("Couldn't create the list — check connection", true); }
+  },
+  async groceryDeleteList(id){
+    if (!confirmDel("glist-"+id)) return;
+    try {
+      const fbu = await fbInit();
+      const ref = fbu.db.collection("crews").doc(data.crew.code).collection("grocery").doc(id);
+      const items = await ref.collection("items").get();
+      for (const doc of items.docs) await doc.ref.delete();
+      await ref.delete();
+      ui.groceryOpenId = null; ui.groceryItems = null;
+      await crewFetchGrocery();
+      toast("List deleted"); render();
+    } catch(e){ toast("Couldn't delete — check connection", true); }
+  },
+  async groceryAdd(inputEl){
+    const text = (inputEl.value||"").trim();
+    if (!text || !ui.groceryOpenId) return;
+    inputEl.value = "";
+    const tempId = "tmp-" + uid();
+    ui.groceryItems = [...(ui.groceryItems||[]), {id:tempId, text, done:false, addedByName:data.crew.name, createdAt:Date.now()}];
+    render();
+    setTimeout(()=>{ const el=$("#gItemInput"); if(el) el.focus(); }, 30);
+    try {
+      const fbu = await fbInit();
+      const ref = await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+        .doc(ui.groceryOpenId).collection("items").add({
+          text, done:false, addedBy: fbu.uid, addedByName: data.crew.name, createdAt: Date.now()
+        });
+      const it = (ui.groceryItems||[]).find(x=>x.id===tempId);
+      if (it) it.id = ref.id;
+    } catch(e){ toast("Couldn't add — check connection", true); }
+  },
+  async groceryToggle(id, done){
+    if (String(id).startsWith("tmp-")) return;
+    const it = (ui.groceryItems||[]).find(x=>x.id===id);
+    if (it){ it.done = done; it.doneBy = done ? data.crew.name : null; }
+    if (done) ding();
+    render();
+    try {
+      const fbu = await fbInit();
+      await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+        .doc(ui.groceryOpenId).collection("items").doc(id)
+        .update({ done, doneBy: done ? data.crew.name : null, doneAt: done ? Date.now() : null });
+    } catch(e){ toast("Couldn't update — check connection", true); }
+  },
+  async groceryRemove(id){
+    if (String(id).startsWith("tmp-")) return;
+    ui.groceryItems = (ui.groceryItems||[]).filter(x=>x.id!==id);
+    render();
+    try {
+      const fbu = await fbInit();
+      await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+        .doc(ui.groceryOpenId).collection("items").doc(id).delete();
+    } catch(e){ toast("Couldn't remove — check connection", true); }
+  },
+  async groceryClearDone(){
+    if (!confirmDel("gclear")) return;
+    const doneIds = (ui.groceryItems||[]).filter(i=>i.done && !String(i.id).startsWith("tmp-")).map(i=>i.id);
+    ui.groceryItems = (ui.groceryItems||[]).filter(i=>!i.done);
+    render();
+    try {
+      const fbu = await fbInit();
+      for (const id of doneIds){
+        await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
+          .doc(ui.groceryOpenId).collection("items").doc(id).delete();
+      }
+      toast("Cleared checked items");
+    } catch(e){ toast("Couldn't clear — check connection", true); }
+  },
+
   async crewToggleTodo(id, done){
     try {
       const {db} = await fbInit();
@@ -2683,7 +2874,7 @@ window.App = {
   },
 
   // to-do
-  todoTab(t){ ui.todoTab=t; render(); },
+  todoTab(t){ ui.todoTab=t; if(t!=="grocery"){ ui.groceryOpenId=null; ui.groceryNewOpen=false; } render(); },
   addTodo(inputEl){
     const text = inputEl.value.trim();
     if (!text) return;
