@@ -32,6 +32,7 @@
   .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--sub);text-transform:uppercase;margin-bottom:4px}
   input,select,textarea{width:100%;padding:10px 12px;font-size:16px;font-family:var(--body);border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);outline:none;-webkit-appearance:none;appearance:none}
   textarea{min-height:90px;font-family:var(--mono);font-size:13px;resize:vertical}
+  input[type=checkbox]{-webkit-appearance:checkbox;appearance:checkbox;width:auto;padding:0}
   input.mono{font-family:var(--mono)}
   .btn{display:block;width:100%;padding:12px 16px;font-size:15px;font-weight:700;border:none;border-radius:10px;cursor:pointer;font-family:var(--body)}
   .btn.ink{background:var(--ink);color:#fff}
@@ -137,7 +138,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 43;
+const APP_VERSION = 44;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
@@ -1174,7 +1175,7 @@ const ui = {
   crewEvents: null,
   bkList: null, bkBusy: false,
   eventsOpen: false,
-  groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false,
+  groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false, groceryPick: [],
   updateMsg: null,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
@@ -2012,10 +2013,13 @@ function renderTodo(){
         </div>
         <input id="gListName" placeholder="e.g. Weekly shop" style="margin-bottom:10px">
         <div class="lbl">Share with</div>
-        ${members.length ? members.map(m=>`<label style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--grid);cursor:pointer">
-          <input type="checkbox" class="gmem" value="${m.uid}" data-name="${esc(m.name||"?")}" style="width:20px;height:20px;flex:none;accent-color:#2B8A3E">
-          <span style="font-size:14px;font-weight:600">${esc(m.name||"?")}</span>
-        </label>`).join("") : `<div style="font-size:12px;color:var(--sub);padding:6px 0">No other crew members have synced yet — you can still make a list for yourself.</div>`}
+        ${members.length ? members.map(m=>{
+          const on = (ui.groceryPick||[]).includes(m.uid);
+          return `<button onclick="App.groceryTogglePick('${m.uid}')" style="display:flex;align-items:center;gap:12px;width:100%;background:none;border:none;border-bottom:1px solid var(--grid);padding:10px 0;cursor:pointer;text-align:left">
+            <span style="width:24px;height:24px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;border:2px solid ${on?"#2B8A3E":"var(--line)"};background:${on?"#2B8A3E":"transparent"}">${on?"✓":""}</span>
+            <span style="font-size:14px;font-weight:600;color:var(--ink)">${esc(m.name||"?")}</span>
+          </button>`;
+        }).join("") : `<div style="font-size:12px;color:var(--sub);padding:6px 0">No other crew members have synced yet — you can still make a list for yourself.</div>`}
         <button class="btn ink" style="margin-top:12px" onclick="App.groceryCreate()">Create list</button>
       </div>`;
     } else {
@@ -2722,22 +2726,27 @@ window.App = {
     } catch(e){ toast("Couldn't add — check connection", true); }
   },
   // grocery lists (shared with chosen crew members)
-  groceryNew(){ ui.groceryNewOpen = !ui.groceryNewOpen; render(); },
+  groceryNew(){ ui.groceryNewOpen = !ui.groceryNewOpen; ui.groceryPick = []; render(); },
+  groceryTogglePick(u){
+    const cur = ui.groceryPick || [];
+    ui.groceryPick = cur.includes(u) ? cur.filter(x=>x!==u) : [...cur, u];
+    render();
+  },
   groceryOpen(id){ ui.groceryOpenId = id; ui.groceryItems = null; render();
     crewFetchGroceryItems(id).then(()=>render()).catch(()=>{ ui.groceryItems=[]; render(); }); },
   groceryBack(){ ui.groceryOpenId = null; ui.groceryItems = null; render(); },
   async groceryCreate(){
     const name = ($("#gListName").value||"").trim();
     if (!name){ toast("Name the list", true); return; }
-    const picked = Array.from(document.querySelectorAll(".gmem:checked")).map(el=>el.value);
-    const names = Array.from(document.querySelectorAll(".gmem:checked")).map(el=>el.dataset.name||"?");
+    const picked = [...(ui.groceryPick||[])];
+    const names = picked.map(u => (ui.crewStats||[]).find(s=>s.uid===u)?.name || "?");
     try {
       const fbu = await fbInit();
       await fbu.db.collection("crews").doc(data.crew.code).collection("grocery").add({
         name, owner: fbu.uid, ownerName: data.crew.name,
         sharedWith: picked, sharedNames: names, createdAt: Date.now()
       });
-      ui.groceryNewOpen = false;
+      ui.groceryNewOpen = false; ui.groceryPick = [];
       await crewFetchGrocery();
       toast("List created \u2713"); render();
     } catch(e){ toast("Couldn't create the list — check connection", true); }
