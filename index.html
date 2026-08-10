@@ -144,7 +144,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 45;
+const APP_VERSION = 46;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
@@ -736,13 +736,31 @@ const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:
 
 // ================= birthdays =================
 const mmdd = iso => iso.slice(5); // "MM-DD"
+function birthdayName(uid){
+  const stats = ui.crewStats || [];
+  return stats.find(s=>s.uid===uid)?.name
+      || (uid === fb?.uid ? data.crew?.name : null)
+      || null;
+}
 function birthdayMapWithNames(){
   const bd = data.settings.birthdays || {};
-  const stats = ui.crewStats || [];
-  return Object.entries(bd).map(([uid, md]) => ({
-    uid, md,
-    name: stats.find(s=>s.uid===uid)?.name || (uid === fb?.uid ? data.crew?.name : null) || "Crew member"
-  }));
+  return Object.entries(bd).map(([uid, md]) => {
+    const name = birthdayName(uid);
+    return { uid, md, name: name || "Crew member", resolved: !!name };
+  });
+}
+const bdayText = name => `It's ${name}'s birthday today — happy birthday!`;
+// fix events written before crew names had loaded
+function repairBirthdayEvents(){
+  if (!(ui.crewStats||[]).length) return;
+  let changed = false;
+  (data.events || []).forEach(e => {
+    const m = /^bday-(.+)-(\d{4})$/.exec(e.eid || "");
+    if (!m) return;
+    const nm = birthdayName(m[1]);
+    if (nm && /Crew member/.test(e.text)){ e.text = bdayText(nm); changed = true; }
+  });
+  if (changed) save();
 }
 function todaysBirthdays(){
   const t = mmdd(todayISO());
@@ -867,10 +885,11 @@ function collectNewEvents(){
   // birthdays — every device generates these from the shared birthday map
   const yr = todayISO().slice(0,4);
   for (const b of todaysBirthdays()){
+    if (!b.resolved) continue; // wait for crew names to load rather than writing a placeholder
     const eid = `bday-${b.uid}-${yr}`;
     if (seen.has(eid)) continue;
     seen.add(eid);
-    fresh.push({ eid, icon:"\u{1F382}", text:`It's ${b.name}'s birthday today — happy birthday!`, date:todayISO(), createdAt:Date.now(), local:true });
+    fresh.push({ eid, icon:"\u{1F382}", text:bdayText(b.name), date:todayISO(), createdAt:Date.now(), local:true });
   }
   // weekly streak milestones
   const st = data.settings.streak;
@@ -1145,6 +1164,7 @@ async function crewSync(manual){
     }
     const lastBk = data.settings.cloudBackup?.at || 0;
     if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
+    repairBirthdayEvents();
     if (manual) toast("Crew synced ✓");
     render();
     checkBirthdayCelebration();
@@ -1317,6 +1337,7 @@ function calendarLegend(){
   </div>`;
 }
 function renderCalendar(){
+  repairBirthdayEvents();
   collectNewEvents();
   const map = byDate();
   let banner = "";
