@@ -33,6 +33,12 @@
   input,select,textarea{width:100%;padding:10px 12px;font-size:16px;font-family:var(--body);border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);outline:none;-webkit-appearance:none;appearance:none}
   textarea{min-height:90px;font-family:var(--mono);font-size:13px;resize:vertical}
   input[type=checkbox]{-webkit-appearance:checkbox;appearance:checkbox;width:auto;padding:0}
+  #bdayOverlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px)}
+  .bday-msg{background:var(--card);border-radius:20px;padding:28px 34px;text-align:center;color:var(--ink);box-shadow:0 12px 40px rgba(0,0,0,0.3);animation:bdayPop .5s cubic-bezier(.2,1.4,.4,1)}
+  @keyframes bdayPop{0%{transform:scale(.6);opacity:0}100%{transform:scale(1);opacity:1}}
+  .bday-confetti{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+  .bday-confetti span{position:absolute;top:-20px;border-radius:2px;animation-name:bdayFall;animation-timing-function:linear;animation-iteration-count:infinite}
+  @keyframes bdayFall{0%{transform:translateY(-20px) rotate(0deg);opacity:1}100%{transform:translateY(105vh) rotate(720deg);opacity:.9}}
   input.mono{font-family:var(--mono)}
   .btn{display:block;width:100%;padding:12px 16px;font-size:15px;font-weight:700;border:none;border-radius:10px;cursor:pointer;font-family:var(--body)}
   .btn.ink{background:var(--ink);color:#fff}
@@ -138,7 +144,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 44;
+const APP_VERSION = 45;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
@@ -727,6 +733,62 @@ function hoursBetween(inT, outT){
 const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
 
 
+
+// ================= birthdays =================
+const mmdd = iso => iso.slice(5); // "MM-DD"
+function birthdayMapWithNames(){
+  const bd = data.settings.birthdays || {};
+  const stats = ui.crewStats || [];
+  return Object.entries(bd).map(([uid, md]) => ({
+    uid, md,
+    name: stats.find(s=>s.uid===uid)?.name || (uid === fb?.uid ? data.crew?.name : null) || "Crew member"
+  }));
+}
+function todaysBirthdays(){
+  const t = mmdd(todayISO());
+  return birthdayMapWithNames().filter(b => b.md === t);
+}
+// full-screen confetti + message, shown at most 3 times on the person's own birthday
+function celebrate(name){
+  if (document.getElementById("bdayOverlay")) return;
+  const wrap = document.createElement("div");
+  wrap.id = "bdayOverlay";
+  const colors = ["#E8590C","#2B8A3E","#7048E8","#1971C2","#F59F00","#E64980"];
+  let pieces = "";
+  for (let i=0;i<70;i++){
+    const left = Math.random()*100, delay = Math.random()*1.2, dur = 2.4 + Math.random()*1.8;
+    const c = colors[i % colors.length], size = 7 + Math.random()*8;
+    const rot = Math.random()*360;
+    pieces += `<span style="left:${left}%;width:${size}px;height:${size*0.6}px;background:${c};animation-delay:${delay}s;animation-duration:${dur}s;transform:rotate(${rot}deg)"></span>`;
+  }
+  wrap.innerHTML = `<div class="bday-confetti">${pieces}</div>
+    <div class="bday-msg">
+      <div style="font-size:52px;line-height:1">\u{1F382}</div>
+      <div style="font-family:var(--disp);font-weight:700;font-size:30px;text-transform:uppercase;font-stretch:condensed;margin-top:6px">Happy Birthday</div>
+      <div style="font-family:var(--disp);font-weight:700;font-size:24px;color:#E8590C;font-stretch:condensed">${esc(name)}!</div>
+      <div style="font-size:12px;color:var(--sub);margin-top:12px;font-family:var(--mono)">tap to dismiss</div>
+    </div>`;
+  wrap.onclick = () => wrap.remove();
+  document.body.appendChild(wrap);
+  try { ding(); } catch(e){}
+  setTimeout(()=>{ const el = document.getElementById("bdayOverlay"); if (el) el.remove(); }, 6000);
+}
+function checkBirthdayCelebration(){
+  const myUid = fb?.uid;
+  const bd = data.settings.birthdays || {};
+  const today = todayISO();
+  const isMine = myUid && bd[myUid] === mmdd(today);
+  const selfSet = !myUid && data.settings.myBirthday === mmdd(today); // offline fallback
+  if (!isMine && !selfSet) return;
+  const seen = data.settings.bdayShown || {};
+  if (seen.date !== today){ seen.date = today; seen.count = 0; }
+  if (seen.count >= 3) { data.settings.bdayShown = seen; return; }
+  seen.count += 1;
+  data.settings.bdayShown = seen;
+  save();
+  setTimeout(()=>celebrate(data.crew?.name || "friend"), 400);
+}
+
 // ================= streak & activity events =================
 function yesterdayOf(iso){
   const [y,m,d] = iso.split("-").map(Number);
@@ -801,6 +863,14 @@ function collectNewEvents(){
     seen.add(item.id);
     if (!built) continue;
     fresh.push({ eid:item.id, icon:built.icon, text:built.text, date:item.date, createdAt:Date.now() });
+  }
+  // birthdays — every device generates these from the shared birthday map
+  const yr = todayISO().slice(0,4);
+  for (const b of todaysBirthdays()){
+    const eid = `bday-${b.uid}-${yr}`;
+    if (seen.has(eid)) continue;
+    seen.add(eid);
+    fresh.push({ eid, icon:"\u{1F382}", text:`It's ${b.name}'s birthday today — happy birthday!`, date:todayISO(), createdAt:Date.now(), local:true });
   }
   // weekly streak milestones
   const st = data.settings.streak;
@@ -1015,13 +1085,17 @@ async function crewFetchStats(){
   const {db} = await fbInit();
   const crewDoc = await db.collection("crews").doc(data.crew.code).get();
   ui.crewOwner = crewDoc.exists ? (crewDoc.data().owner || null) : null;
+  if (crewDoc.exists && crewDoc.data().birthdays){
+    data.settings.birthdays = crewDoc.data().birthdays; // cached so it works offline
+    save();
+  }
   const snap = await db.collection("crews").doc(data.crew.code).collection("stats").get();
   ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
   ui.crewStatsAt = Date.now();
 }
 async function crewPushEvents(){
   if (!data.crew?.code) return;
-  const pending = (data.events || []).filter(e => !e.pushed);
+  const pending = (data.events || []).filter(e => !e.pushed && !e.local);
   if (!pending.length) return;
   const {db, uid} = await fbInit();
   const col = db.collection("crews").doc(data.crew.code).collection("events");
@@ -1073,6 +1147,7 @@ async function crewSync(manual){
     if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
     if (manual) toast("Crew synced ✓");
     render();
+    checkBirthdayCelebration();
   } catch(e){ if (manual) toast("Crew sync failed — check connection", true); }
 }
 
@@ -1883,6 +1958,20 @@ function renderSettings(){
       ${delBtn("crew-leave","App.crewLeave()","leave crew")}
     `}
   </div>
+  ${data.crew?.code ? `<div class="card">
+    <div class="lbl" style="margin-bottom:8px">Crew birthdays</div>
+    <div style="font-size:12px;color:var(--sub);margin-bottom:10px">Everyone sees a birthday message in the activity feed, and the birthday person gets a celebration when they open the app.</div>
+    ${(() => {
+      const members = ui.crewStats || [];
+      const bd = data.settings.birthdays || {};
+      if (!members.length) return `<div style="font-size:12px;color:var(--sub)">No crew members have synced yet — hit Refresh on the leaderboard first.</div>`;
+      return members.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--grid)">
+        <span style="flex:1;font-weight:600;font-size:14px">${esc(m.name||"?")}</span>
+        <input type="date" id="bd-${m.uid}" value="${bd[m.uid]?`2000-${bd[m.uid]}`:""}" style="width:auto;flex:none;font-size:13px;padding:6px 8px" onchange="App.setBirthday('${m.uid}', this.value)">
+      </div>`).join("");
+    })()}
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">only month & day are used — the year is ignored</div>
+  </div>` : ""}
   ${data.crew?.config ? `<div class="card">
     <div class="lbl" style="margin-bottom:8px">Cloud backup</div>
     ${data.crew?.code ? `
@@ -2600,6 +2689,21 @@ window.App = {
 
   toggleEvents(){ ui.eventsOpen = !ui.eventsOpen; render(); },
 
+  async setBirthday(uid, val){
+    if (!val) return;
+    const md = val.slice(5); // MM-DD
+    const bd = { ...(data.settings.birthdays || {}) };
+    bd[uid] = md;
+    data.settings.birthdays = bd;
+    save();
+    try {
+      const fbu = await fbInit();
+      await fbu.db.collection("crews").doc(data.crew.code).set({ birthdays: bd }, { merge: true });
+      toast("Birthday saved \u2713");
+      render();
+    } catch(e){ toast("Saved locally — couldn't reach the crew", true); }
+  },
+
   // cloud backup
   cloudBackupNow(){ toast("Backing up…"); cloudBackup(true); },
   async cloudFindBackups(){
@@ -3021,6 +3125,7 @@ $("#importFile").addEventListener("change", async e=>{
 touchStreak();
 applyTheme();
 render();
+setTimeout(checkBirthdayCelebration, 900); // after crew data has a chance to load
 if (data.crew?.code) crewSync(false);
 // handle Strava OAuth redirect + auto-sync (only for users who configured it)
 (async function stravaBoot(){
