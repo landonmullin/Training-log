@@ -144,7 +144,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 46;
+const APP_VERSION = 47;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
 const TYPE_META = {
@@ -736,6 +736,19 @@ const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:
 
 // ================= birthdays =================
 const mmdd = iso => iso.slice(5); // "MM-DD"
+// my own birthday as "MM-DD"; cached locally so XP math works offline / pre-auth
+function myBirthdayMD(){
+  const bd = data.settings.birthdays || {};
+  if (fb?.uid && bd[fb.uid]) return bd[fb.uid];
+  return data.settings.myBirthday || null;
+}
+function cacheMyBirthday(){
+  const bd = data.settings.birthdays || {};
+  if (fb?.uid && bd[fb.uid] && data.settings.myBirthday !== bd[fb.uid]){
+    data.settings.myBirthday = bd[fb.uid];
+    save();
+  }
+}
 function birthdayName(uid){
   const stats = ui.crewStats || [];
   return stats.find(s=>s.uid===uid)?.name
@@ -784,7 +797,8 @@ function celebrate(name){
       <div style="font-size:52px;line-height:1">\u{1F382}</div>
       <div style="font-family:var(--disp);font-weight:700;font-size:30px;text-transform:uppercase;font-stretch:condensed;margin-top:6px">Happy Birthday</div>
       <div style="font-family:var(--disp);font-weight:700;font-size:24px;color:#E8590C;font-stretch:condensed">${esc(name)}!</div>
-      <div style="font-size:12px;color:var(--sub);margin-top:12px;font-family:var(--mono)">tap to dismiss</div>
+      <div style="font-family:var(--mono);font-size:12px;font-weight:700;color:#E8590C;margin-top:10px">\u{1F382} DOUBLE XP ALL DAY</div>
+      <div style="font-size:12px;color:var(--sub);margin-top:10px;font-family:var(--mono)">tap to dismiss</div>
     </div>`;
   wrap.onclick = () => wrap.remove();
   document.body.appendChild(wrap);
@@ -923,18 +937,23 @@ const RANKS = [
 ];
 function activityXP(){
   const since = data.settings.xpStart || todayISO();
+  const bday = myBirthdayMD();                        // "MM-DD" or null
+  const mult = d => (bday && d.slice(5) === bday) ? 2 : 1;  // birthday = double XP
   let xp = 0;
   data.cardio.forEach(c=>{
     if (c.date < since) return;
+    let v = 0;
     if (c.type==="run" || c.type==="walk" || c.type==="treadmill"){
-      xp += (c.distanceMi||0) * 100;
+      v = (c.distanceMi||0) * 100;
     } else if (c.durationSec){
-      xp += (c.durationSec/60) * 5;
+      v = (c.durationSec/60) * 5;
     }
+    xp += v * mult(c.date);
   });
-  data.lifts.forEach(w=>{ if (w.date >= since) xp += 250; });
+  data.lifts.forEach(w=>{ if (w.date >= since) xp += 250 * mult(w.date); });
   return Math.round(xp);
 }
+const isMyBirthdayToday = () => { const b = myBirthdayMD(); return !!b && b === todayISO().slice(5); };
 function rankFor(xp){
   let r = RANKS[0], next = null;
   for (let i=0;i<RANKS.length;i++){
@@ -1107,6 +1126,7 @@ async function crewFetchStats(){
   if (crewDoc.exists && crewDoc.data().birthdays){
     data.settings.birthdays = crewDoc.data().birthdays; // cached so it works offline
     save();
+    cacheMyBirthday();
   }
   const snap = await db.collection("crews").doc(data.crew.code).collection("stats").get();
   ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
@@ -1432,7 +1452,8 @@ function renderCalendar(){
     <span style="font-family:var(--disp);font-weight:700;font-size:15px;text-transform:uppercase;color:var(--ink)">${rank.name}</span>
     <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${xp.toLocaleString()} XP</span>
     <span style="flex:1;height:6px;border-radius:3px;background:var(--grid);overflow:hidden;display:block"><span style="display:block;height:100%;width:${prog}%;background:#B08D2F"></span></span>
-    ${next?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub)">${(next.min-xp).toLocaleString()} to ${next.icon}</span>`:""}
+    ${isMyBirthdayToday()?`<span style="font-family:var(--mono);font-size:10px;font-weight:700;color:#E8590C;white-space:nowrap">\u{1F382} 2\u00D7 XP</span>`
+      : next?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub)">${(next.min-xp).toLocaleString()} to ${next.icon}</span>`:""}
   </button>`;
   const allEvs = mergedEvents(40);
   const evs = ui.eventsOpen ? allEvs : allEvs.slice(0, 3);
@@ -2468,7 +2489,7 @@ function renderProgress(){
       </div>
     </div>
     ${next?`<div style="height:8px;border-radius:4px;background:var(--grid);margin-top:10px;overflow:hidden"><div style="height:100%;width:${prog}%;background:#B08D2F"></div></div>`:""}
-    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout</div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
   </div>`;
   html += `<div class="h2" style="margin-top:2px">Trends</div>`;
   html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
@@ -2717,6 +2738,7 @@ window.App = {
     bd[uid] = md;
     data.settings.birthdays = bd;
     save();
+    cacheMyBirthday();
     try {
       const fbu = await fbInit();
       await fbu.db.collection("crews").doc(data.crew.code).set({ birthdays: bd }, { merge: true });
