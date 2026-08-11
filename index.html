@@ -129,6 +129,7 @@
     <h1>TRAINING LOG</h1>
     <div style="display:flex;gap:8px">
       <button id="payBtn" class="hdrbtn" onclick="App.tab('pay')" aria-label="Pay tracker" style="display:none"></button>
+      <button id="schoolBtn" class="hdrbtn" onclick="App.tab('school')" aria-label="School"></button>
       <button id="lbBtn" class="hdrbtn" onclick="App.openLeaderboard()" aria-label="Leaderboard"></button>
       <button id="todoBtn" class="hdrbtn" onclick="App.tab('todo')" aria-label="To-do list"></button>
       <button id="settingsBtn" class="hdrbtn" onclick="App.tab('settings')" aria-label="Settings"></button>
@@ -144,9 +145,10 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 47;
+const APP_VERSION = 50;
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[] };
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
+  school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
   walk:{label:"Walk",emoji:"🚶"},
@@ -156,6 +158,7 @@ const TYPE_META = {
   basketball:{label:"Basketball",emoji:"🏀"},
   volleyball:{label:"Volleyball",emoji:"🏐"},
   pickleball:{label:"Pickleball",emoji:"🥒"},
+  pingpong:{label:"Ping Pong",emoji:"🏓"},
 };
 const tmeta = t => TYPE_META[t] || TYPE_META.run;
 const DEFAULT_EXERCISES = [
@@ -193,6 +196,9 @@ for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
 if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
+if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
+if (!data.school || typeof data.school !== "object") data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[] };
+for (const k of ["classes","tasks","dates","sessions","assignments"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
 if (!data.settings.xpStart){ // XP counts only from the first run of this version onward
   const _d = new Date();
   data.settings.xpStart = `${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,"0")}-${String(_d.getDate()).padStart(2,"0")}`;
@@ -734,6 +740,59 @@ const money = n => "$" + (n||0).toLocaleString(undefined,{minimumFractionDigits:
 
 
 
+
+// ================= school =================
+const SCHOOL_TASK_XP = 50; // 1 task == 0.5 mile run
+function schoolClasses(){ return data.school.classes.slice().sort((a,b)=>a.name.localeCompare(b.name)); }
+function classById(id){ return data.school.classes.find(c=>c.id===id) || null; }
+function className(id){ return classById(id)?.name || "Unassigned"; }
+// classes are created once by typing a name and persist until deleted
+function ensureClass(name){
+  const n = (name||"").trim();
+  if (!n) return null;
+  const found = data.school.classes.find(c=>c.name.toLowerCase()===n.toLowerCase());
+  if (found) return found.id;
+  const c = { id: uid(), name: n, createdAt: Date.now() };
+  data.school.classes.push(c);
+  return c.id;
+}
+const CLASS_COLORS = ["#1971C2","#E8590C","#2B8A3E","#7048E8","#C2255C","#0B7285","#B08D2F","#5F3DC4"];
+function classColor(id){
+  const i = data.school.classes.findIndex(c=>c.id===id);
+  return CLASS_COLORS[(i<0?0:i) % CLASS_COLORS.length];
+}
+// ---- grades: weighted average of graded assignments ----
+function classGrade(classId){
+  const rows = data.school.assignments.filter(a=>a.classId===classId);
+  const graded = rows.filter(a=>a.earned!=null && a.total>0);
+  if (!graded.length) return { pct:null, gradedWeight:0, totalWeight:rows.reduce((s,a)=>s+(+a.weight||0),0), count:rows.length, gradedCount:0 };
+  const wSum = graded.reduce((s,a)=>s+(+a.weight||0), 0);
+  if (wSum <= 0) {
+    // no weights entered — fall back to straight points
+    const e = graded.reduce((s,a)=>s+(+a.earned), 0), t = graded.reduce((s,a)=>s+(+a.total), 0);
+    return { pct: t>0 ? e/t*100 : null, gradedWeight:0, totalWeight:0, count:rows.length, gradedCount:graded.length };
+  }
+  const num = graded.reduce((s,a)=> s + (+a.weight||0) * ((+a.earned)/(+a.total)), 0);
+  return {
+    pct: num/wSum*100,
+    gradedWeight: wSum,
+    totalWeight: rows.reduce((s,a)=>s+(+a.weight||0), 0),
+    count: rows.length, gradedCount: graded.length
+  };
+}
+function letterGrade(p){
+  if (p==null) return "—";
+  if (p>=93) return "A"; if (p>=90) return "A-";
+  if (p>=87) return "B+"; if (p>=83) return "B"; if (p>=80) return "B-";
+  if (p>=77) return "C+"; if (p>=73) return "C"; if (p>=70) return "C-";
+  if (p>=67) return "D+"; if (p>=63) return "D"; if (p>=60) return "D-";
+  return "F";
+}
+const DATE_KINDS = { exam:{label:"Exam", icon:"\u{1F4DD}"}, lab:{label:"Lab", icon:"\u{1F9EA}"}, quiz:{label:"Quiz", icon:"\u2753"}, project:{label:"Project", icon:"\u{1F4C1}"}, other:{label:"Other", icon:"\u{1F4CC}"} };
+function schoolXP(since){
+  return data.school.tasks.filter(t=>t.done && t.doneAt && t.doneAt >= since).length * SCHOOL_TASK_XP;
+}
+
 // ================= birthdays =================
 const mmdd = iso => iso.slice(5); // "MM-DD"
 // my own birthday as "MM-DD"; cached locally so XP math works offline / pre-auth
@@ -951,6 +1010,7 @@ function activityXP(){
     xp += v * mult(c.date);
   });
   data.lifts.forEach(w=>{ if (w.date >= since) xp += 250 * mult(w.date); });
+  data.school.tasks.forEach(t=>{ if (t.done && t.doneAt && t.doneAt >= since) xp += SCHOOL_TASK_XP * mult(t.doneAt); });
   return Math.round(xp);
 }
 const isMyBirthdayToday = () => { const b = myBirthdayMD(); return !!b && b === todayISO().slice(5); };
@@ -1290,6 +1350,9 @@ const ui = {
   crewEvents: null,
   bkList: null, bkBusy: false,
   eventsOpen: false,
+  schoolTab: "tasks", schoolMonth: null, schoolSel: null, schoolGradeClass: null,
+  schoolShowDoneFlag: false, gradingId: null,
+  classPick: {}, classPickerOpen: null, classSearch: "", focusClassSearch: false,
   groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false, groceryPick: [],
   updateMsg: null,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
@@ -1301,7 +1364,7 @@ const ui = {
 // ================= views =================
 function render(){
   renderNav();
-  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay }[ui.tab];
+  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay, school:renderSchool }[ui.tab];
   $("#view").innerHTML = v();
   afterRender();
 }
@@ -1322,6 +1385,13 @@ function renderNav(){
   tb.style.display = data.settings.todoEnabled ? "flex" : "none";
   tb.className = "hdrbtn" + (ui.tab==="todo" ? " on" : "");
   tb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 6.5l1.5 1.5L8 5.5"/><path d="M11 7h10"/><path d="M4 12.5l1.5 1.5L8 11.5"/><path d="M11 13h10"/><path d="M4 18.5l1.5 1.5L8 17.5"/><path d="M11 19h10"/></svg>${open?`<span class="badge">${open}</span>`:""}`;
+  const scb = $("#schoolBtn");
+  if (scb){
+    scb.style.display = data.settings.schoolEnabled ? "flex" : "none";
+    scb.className = "hdrbtn" + (ui.tab==="school" ? " on" : "");
+    const dueSoon = data.school.tasks.filter(t=>!t.done && t.due && t.due <= todayISO()).length;
+    scb.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H19v14H5.5A1.5 1.5 0 0 0 4 18.5z"/><path d="M4 18.5A1.5 1.5 0 0 1 5.5 17H19v4H5.5A1.5 1.5 0 0 1 4 19.5z"/><path d="M8 7h7"/></svg>${dueSoon?`<span class="badge">${dueSoon}</span>`:""}`;
+  }
   const lb = $("#lbBtn");
   lb.style.display = data.crew?.code ? "flex" : "none";
   lb.className = "hdrbtn" + (ui.tab==="progress" && ui.trendView==="crew" ? " on" : "");
@@ -1962,7 +2032,255 @@ function renderPay(){
 }
 
 // ----- pay tracker -----
+// ----- school -----
+// class picker — same search-and-pick behavior as the movement picker in Lift
+function classFieldHTML(ctx){
+  const chosen = ui.classPick[ctx];
+  if (chosen && classById(chosen)){
+    const c = classById(chosen);
+    return `<button onclick="App.clearClassPick('${ctx}')" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:var(--card);border:1px solid var(--line);border-left:4px solid ${classColor(c.id)};border-radius:8px;padding:10px 12px;cursor:pointer;text-align:left">
+      <span style="font-weight:700;font-size:15px;color:var(--ink)">${esc(c.name)}</span>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">change</span>
+    </button>`;
+  }
+  if (ui.classPickerOpen !== ctx){
+    return `<button class="btn soft" onclick="App.openClassPicker('${ctx}')">+ Choose class</button>`;
+  }
+  return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px">
+    <input id="clsSearch" value="${esc(ui.classSearch)}" placeholder="Type to search or add a class…" oninput="App.searchClass(this.value)">
+    <div style="max-height:200px;overflow-y:auto;margin-top:8px">${classMatchesHTML(ctx)}</div>
+    <button onclick="App.closeClassPicker()" style="background:none;border:none;color:var(--sub);font-size:13px;margin-top:6px;cursor:pointer">cancel</button>
+  </div>`;
+}
+function classMatchesHTML(ctx){
+  const q = (ui.classSearch||"").trim().toLowerCase();
+  const all = schoolClasses();
+  const list = all.filter(c=>c.name.toLowerCase().includes(q));
+  const exact = all.some(c=>c.name.toLowerCase()===q);
+  let h = list.map(c=>`<button class="pick" onclick="App.pickClass('${ctx}','${c.id}')">
+      <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${classColor(c.id)};margin-right:8px"></span>${esc(c.name)}</button>`).join("");
+  if (q && !exact) h += `<button class="pick new" onclick="App.addClassFromSearch('${ctx}')">+ Add "${esc(ui.classSearch.trim())}" as a new class</button>`;
+  if (!list.length && !q) h += `<div style="font-size:12px;color:var(--sub);padding:8px 4px">No classes yet — type a name above to create your first one.</div>`;
+  return h;
+}
+function renderSchool(){
+  const tab = ui.schoolTab || "tasks";
+  const classes = schoolClasses();
+  let html = `<div class="seg">
+    <button class="${tab==="tasks"?"on":""}" onclick="App.schoolTab('tasks')">Tasks</button>
+    <button class="${tab==="cal"?"on":""}" onclick="App.schoolTab('cal')">Dates</button>
+    <button class="${tab==="grades"?"on":""}" onclick="App.schoolTab('grades')">Grades</button>
+    <button class="${tab==="study"?"on":""}" onclick="App.schoolTab('study')">Study</button>
+  </div>`;
+
+  // ================= TASKS =================
+  if (tab === "tasks"){
+    const open = data.school.tasks.filter(t=>!t.done);
+    const done = data.school.tasks.filter(t=>t.done).sort((a,b)=>(b.doneAt||"")<(a.doneAt||"")?-1:1);
+    html += `<div class="card" style="border-left:4px solid var(--ink)">
+      <div class="lbl">New task</div>
+      <input id="stText" placeholder="e.g. Read chapter 4" enterkeyhint="done" style="margin:6px 0 8px"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();App.addSchoolTask();}">
+      <div class="lbl">Class</div>
+      <div style="margin:4px 0 8px">${classFieldHTML("task")}</div>
+      <div class="lbl">Due date</div>
+      <input type="date" id="stDue" style="margin:4px 0 8px">
+      <button class="btn ink" onclick="App.addSchoolTask()">Add task</button>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">type a new class name once and it's saved · +${SCHOOL_TASK_XP} XP per task completed</div>
+    </div>`;
+    if (ui.schoolShowDone){
+      html += `<div class="lbl" style="margin:12px 0 6px">Completed (${done.length})</div>`;
+      html += done.slice(0,40).map(t=>`<div class="todo-row completed">
+        <button class="todo-check" onclick="App.toggleSchoolTask('${t.id}', false)">✓</button>
+        <span class="todo-text">${esc(t.text)}<div style="font-size:11px;color:var(--sub);font-family:var(--mono);text-decoration:none">${esc(className(t.classId))}${t.doneAt?` · done ${shortDate(t.doneAt)}`:""}</div></span>
+        <button class="todo-x" onclick="App.delSchoolTask('${t.id}')">✕</button>
+      </div>`).join("") || `<div class="card muted">Nothing completed yet.</div>`;
+      html += `<div style="text-align:center;margin-top:8px"><button style="background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer" onclick="App.schoolShowDone(false)">← back to open tasks</button></div>`;
+      return html;
+    }
+    // group open tasks by class, sorted by due date
+    const byClass = {};
+    open.forEach(t=>{ (byClass[t.classId||""] = byClass[t.classId||""] || []).push(t); });
+    const order = Object.keys(byClass).sort((a,b)=>className(a).localeCompare(className(b)));
+    if (!open.length) html += `<div class="card muted">No open tasks. Add one above.</div>`;
+    order.forEach(cid=>{
+      const list = byClass[cid].sort((a,b)=>(a.due||"9999")<(b.due||"9999")?-1:1);
+      html += `<div class="lbl" style="margin:14px 0 6px;color:${classColor(cid)}">${esc(className(cid))}</div>`;
+      html += list.map(t=>{
+        const overdue = t.due && t.due < todayISO();
+        const soon = t.due && t.due === todayISO();
+        return `<div class="todo-row">
+          <button class="todo-check" onclick="App.toggleSchoolTask('${t.id}', true)"></button>
+          <span class="todo-text">${esc(t.text)}${t.due?`<div style="font-size:11px;font-family:var(--mono);color:${overdue?"#C92A2A":soon?"#E8590C":"var(--sub)"}">${overdue?"overdue · ":soon?"due today · ":"due "}${shortDate(t.due)}</div>`:""}</span>
+          <button class="todo-x" onclick="App.delSchoolTask('${t.id}')">✕</button>
+        </div>`;
+      }).join("");
+    });
+    html += `<div style="text-align:center;margin-top:12px"><button style="background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer" onclick="App.schoolShowDone(true)">completed tasks (${done.length}) →</button></div>`;
+    return html;
+  }
+
+  // ================= DATES CALENDAR =================
+  if (tab === "cal"){
+    const cur = ui.schoolMonth || todayISO().slice(0,7);
+    const [cy, cm] = cur.split("-").map(Number);
+    const first = new Date(cy, cm-1, 1), startDow = first.getDay();
+    const dim = new Date(cy, cm, 0).getDate();
+    const prevM = isoFromDate(new Date(cy, cm-2, 1)).slice(0,7);
+    const nextM = isoFromDate(new Date(cy, cm, 1)).slice(0,7);
+    const evByDay = {};
+    data.school.dates.forEach(dt2=>{ if (dt2.date.slice(0,7)===cur) (evByDay[dt2.date] = evByDay[dt2.date]||[]).push(dt2); });
+    data.school.tasks.filter(t=>!t.done && t.due && t.due.slice(0,7)===cur)
+      .forEach(t=>{ (evByDay[t.due] = evByDay[t.due]||[]).push({...t, isTask:true}); });
+    let cells = "";
+    for (let i=0;i<startDow;i++) cells += "<div></div>";
+    for (let dnum=1; dnum<=dim; dnum++){
+      const iso = `${cy}-${String(cm).padStart(2,"0")}-${String(dnum).padStart(2,"0")}`;
+      const evs = evByDay[iso] || [];
+      const dots = evs.slice(0,3).map(e=>`<span style="width:5px;height:5px;border-radius:50%;background:${classColor(e.classId)};display:block"></span>`).join("");
+      cells += `<button class="day ${iso===ui.schoolSel?"sel":""} ${iso===todayISO()?"today":""}" onclick="App.schoolSelDay('${iso}')">
+        <span class="num">${dnum}</span><span class="marks">${dots}</span></button>`;
+    }
+    html += `<div class="card">
+      <div class="calhead">
+        <button onclick="App.schoolMonth('${prevM}')">‹</button>
+        <div class="h2" style="margin:0">${new Date(cy,cm-1,1).toLocaleDateString(undefined,{month:"long",year:"numeric"})}</div>
+        <button onclick="App.schoolMonth('${nextM}')">›</button>
+      </div>
+      <div class="cal">${["S","M","T","W","T","F","S"].map(x=>`<div class="dow">${x}</div>`).join("")}${cells}</div>
+      <div class="legend">${classes.map(c=>`<span class="item"><span class="sw" style="background:${classColor(c.id)}"></span>${esc(c.name)}</span>`).join("") || `<span class="item">add a class to color-code dates</span>`}</div>
+    </div>`;
+    // add form
+    html += `<div class="card" style="border-left:4px solid var(--ink)">
+      <div class="lbl">Add an important date</div>
+      <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px">
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <select id="sdKind">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}">${v.icon} ${v.label}</option>`).join("")}</select>
+        <input type="date" id="sdDate" value="${ui.schoolSel||todayISO()}">
+      </div>
+      <div class="lbl">Class</div>
+      <div style="margin:4px 0 10px">${classFieldHTML("date")}</div>
+      <button class="btn ink" onclick="App.addSchoolDate()">Add date</button>
+    </div>`;
+    // upcoming list
+    const upcoming = data.school.dates.filter(x=>x.date >= todayISO()).sort((a,b)=>a.date<b.date?-1:1).slice(0,12);
+    if (upcoming.length){
+      html += `<div class="lbl" style="margin:14px 0 6px">Coming up</div>`;
+      html += upcoming.map(x=>{
+        const days = Math.round((new Date(x.date+"T12:00") - new Date(todayISO()+"T12:00"))/86400000);
+        return `<div class="card" style="padding:11px 14px;border-left:4px solid ${classColor(x.classId)};display:flex;justify-content:space-between;align-items:center">
+          <div><div style="font-weight:700;font-size:14px">${DATE_KINDS[x.kind]?.icon||"📌"} ${esc(x.title)}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(x.classId))} · ${prettyDate(x.date)}</div></div>
+          <div style="text-align:right">
+            <div style="font-family:var(--mono);font-size:12px;font-weight:700;color:${days<=3?"#C92A2A":"var(--ink)"}">${days===0?"today":days===1?"tomorrow":`${days}d`}</div>
+            <button class="todo-x" onclick="App.delSchoolDate('${x.id}')">✕</button>
+          </div>
+        </div>`;
+      }).join("");
+    }
+    return html;
+  }
+
+  // ================= GRADES =================
+  if (tab === "grades"){
+    if (!classes.length) return html + `<div class="card muted">Add a task with a class name first — classes you create show up here.</div>`;
+    const openId = ui.schoolGradeClass || classes[0].id;
+    html += `<div class="card">
+      <div class="lbl" style="margin-bottom:6px">Class</div>
+      <select onchange="App.schoolGradeClass(this.value)">${classes.map(c=>`<option value="${c.id}" ${c.id===openId?"selected":""}>${esc(c.name)}</option>`).join("")}</select>
+    </div>`;
+    const g = classGrade(openId);
+    const rows = data.school.assignments.filter(a=>a.classId===openId)
+      .sort((a,b)=>(a.due||"9999")<(b.due||"9999")?-1:1);
+    html += `<div class="card" style="border-left:4px solid ${classColor(openId)}">
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="font-family:var(--disp);font-weight:700;font-size:38px;font-stretch:condensed;color:${classColor(openId)}">${g.pct!=null?g.pct.toFixed(1)+"%":"—"}</div>
+        <div>
+          <div style="font-family:var(--disp);font-weight:700;font-size:22px;font-stretch:condensed">${letterGrade(g.pct)}</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${g.gradedCount} of ${g.count} graded${g.totalWeight?` · ${g.gradedWeight}% of ${g.totalWeight}% weight in`:""}</div>
+        </div>
+      </div>
+      ${g.totalWeight>0 && g.totalWeight!==100 ? `<div style="font-family:var(--mono);font-size:10px;color:#E8590C;margin-top:8px">weights total ${g.totalWeight}% — should usually be 100%</div>`:""}
+    </div>`;
+    html += `<div class="card" style="border-left:4px solid var(--ink)">
+      <div class="lbl">Add an assignment</div>
+      <input id="agName" placeholder="e.g. Exam 1" style="margin:6px 0 8px">
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1"><div class="lbl">Weight %</div><input class="mono" type="number" inputmode="decimal" id="agWeight" placeholder="20"></div>
+        <div style="flex:1"><div class="lbl">Due</div><input type="date" id="agDue"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <div style="flex:1"><div class="lbl">Earned</div><input class="mono" type="number" inputmode="decimal" id="agEarned" placeholder="blank if ungraded"></div>
+        <div style="flex:1"><div class="lbl">Out of</div><input class="mono" type="number" inputmode="decimal" id="agTotal" placeholder="100"></div>
+      </div>
+      <button class="btn ink" onclick="App.addAssignment('${openId}')">Add assignment</button>
+    </div>`;
+    if (!rows.length) html += `<div class="card muted">No assignments yet for this class.</div>`;
+    else html += rows.map(a=>{
+      const pct = (a.earned!=null && a.total>0) ? (a.earned/a.total*100) : null;
+      return `<div class="card" style="padding:11px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="flex:1">
+            <div style="font-weight:700;font-size:14px">${esc(a.name)}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${a.weight?`${a.weight}% of grade`:"no weight"}${a.due?` · due ${shortDate(a.due)}`:""}</div>
+          </div>
+          <div style="text-align:right">
+            ${pct!=null
+              ? `<div style="font-family:var(--mono);font-weight:700;font-size:15px;color:${pct>=90?"#2B8A3E":pct>=80?"var(--ink)":pct>=70?"#E8590C":"#C92A2A"}">${pct.toFixed(1)}%</div>
+                 <div style="font-family:var(--mono);font-size:10px;color:var(--sub)">${a.earned}/${a.total}</div>`
+              : `<button class="btn" style="width:auto;padding:6px 10px;font-size:12px;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.gradeAssignment('${a.id}')">enter grade</button>`}
+          </div>
+        </div>
+        ${ui.gradingId===a.id?`<div style="display:flex;gap:8px;margin-top:10px;align-items:flex-end">
+          <div style="flex:1"><div class="lbl">Earned</div><input class="mono" type="number" inputmode="decimal" id="gEarned" value="${a.earned??""}"></div>
+          <div style="flex:1"><div class="lbl">Out of</div><input class="mono" type="number" inputmode="decimal" id="gTotal" value="${a.total??100}"></div>
+          <button class="btn ink" style="width:auto;padding:10px 14px" onclick="App.saveGrade('${a.id}')">Save</button>
+        </div>`:""}
+        <div style="text-align:right;margin-top:6px">${delBtn("ag-"+a.id, `App.delAssignment('${a.id}')`)}</div>
+      </div>`;
+    }).join("");
+    return html;
+  }
+
+  // ================= STUDY =================
+  if (tab === "study"){
+    const sessions = data.school.sessions.slice().sort((a,b)=>a.date<b.date?1:-1);
+    const wk = weekStartISO(todayISO());
+    const thisWeek = sessions.filter(s=>weekStartISO(s.date)===wk).reduce((n,s)=>n+(+s.minutes||0),0);
+    const total = sessions.reduce((n,s)=>n+(+s.minutes||0),0);
+    html += `<div class="card stats" style="border-left:4px solid var(--legs)">
+      ${stat("this week", durWords(thisWeek*60))}
+      ${stat("all time", durWords(total*60))}
+      ${stat("sessions", sessions.length)}
+    </div>`;
+    html += `<div class="card" style="border-left:4px solid var(--ink)">
+      <div class="lbl">Log a study session</div>
+      <div class="lbl">Class</div>
+      <div style="margin:4px 0 8px">${classFieldHTML("study")}</div>
+      <div class="lbl">Date</div>
+      <input type="date" id="ssDate" value="${todayISO()}" style="margin:4px 0 8px">
+      <div class="lbl">Minutes</div>
+      <input class="mono" type="number" inputmode="numeric" id="ssMin" placeholder="60" style="margin-bottom:8px">
+      <div class="lbl">What did you study?</div>
+      <textarea id="ssNotes" placeholder="Topics, chapters, problem sets…" style="margin-bottom:10px"></textarea>
+      <button class="btn ink" onclick="App.addStudySession()">Save session</button>
+    </div>`;
+    if (!sessions.length) html += `<div class="card muted">No study sessions logged yet.</div>`;
+    else html += sessions.slice(0,30).map(s=>`<div class="card" style="padding:11px 14px;border-left:4px solid ${classColor(s.classId)}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><div style="font-weight:700;font-size:14px">${esc(className(s.classId))}</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${shortDate(s.date)} · ${durWords((+s.minutes||0)*60)}</div></div>
+        ${delBtn("ss-"+s.id, `App.delStudySession('${s.id}')`)}
+      </div>
+      ${s.notes?`<div style="font-size:13px;color:var(--ink);margin-top:8px;line-height:1.45;white-space:pre-wrap">${esc(s.notes)}</div>`:""}
+    </div>`).join("");
+    return html;
+  }
+  return html;
+}
+
 // ----- settings -----
+
 function setRow(title, desc, on, fn){
   return `<div class="setrow">
     <div><div class="t">${title}</div>${desc?`<div class="d">${desc}</div>`:""}</div>
@@ -1980,6 +2298,7 @@ function renderSettings(){
     <div class="lbl" style="margin-bottom:8px">Features</div>
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
     ${setRow("Pay tracker", "Log restaurant shifts & pay periods", !!s.payEnabled, "App.togglePayFeature()")}
+    ${setRow("School", "Classes, assignments, grades & study log", !!s.schoolEnabled, "App.toggleSchoolFeature()")}
   </div>
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Crew sync — leaderboard & shared tasks with friends</div>
@@ -2489,7 +2808,7 @@ function renderProgress(){
       </div>
     </div>
     ${next?`<div style="height:8px;border-radius:4px;background:var(--grid);margin-top:10px;overflow:hidden"><div style="height:100%;width:${prog}%;background:#B08D2F"></div></div>`:""}
-    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout · 50/school task${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
   </div>`;
   html += `<div class="h2" style="margin-top:2px">Trends</div>`;
   html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
@@ -2574,12 +2893,14 @@ function initMaps(){
 function afterRender(){
   const s = $("#exSearch");
   if (s && ui.focusSearch){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); ui.focusSearch=false; }
+  const cs = $("#clsSearch");
+  if (cs && ui.focusClassSearch){ cs.focus(); ui.focusClassSearch=false; }
   initMaps();
 }
 
 // ================= actions =================
 window.App = {
-  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
+  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
   selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
@@ -2746,6 +3067,100 @@ window.App = {
       render();
     } catch(e){ toast("Saved locally — couldn't reach the crew", true); }
   },
+
+  // school
+  schoolTab(t){ ui.schoolTab = t; ui.gradingId = null; ui.classPickerOpen = null; render(); },
+  openClassPicker(ctx){ ui.classPickerOpen = ctx; ui.classSearch = ""; ui.focusClassSearch = true; render(); },
+  closeClassPicker(){ ui.classPickerOpen = null; ui.classSearch = ""; render(); },
+  searchClass(v){
+    ui.classSearch = v;
+    const box = document.querySelector("#clsSearch");
+    const list = box ? box.nextElementSibling : null;
+    if (list) list.innerHTML = classMatchesHTML(ui.classPickerOpen); // update without losing the keyboard
+  },
+  pickClass(ctx, id){ ui.classPick[ctx] = id; ui.classPickerOpen = null; ui.classSearch = ""; render(); },
+  clearClassPick(ctx){ delete ui.classPick[ctx]; ui.classPickerOpen = ctx; ui.classSearch = ""; ui.focusClassSearch = true; render(); },
+  addClassFromSearch(ctx){
+    const id = ensureClass(ui.classSearch);
+    if (!id) return;
+    save();
+    ui.classPick[ctx] = id; ui.classPickerOpen = null; ui.classSearch = "";
+    toast("Class added \u2713"); render();
+  },
+  schoolMonth(m){ ui.schoolMonth = m; render(); },
+  schoolSelDay(iso){ ui.schoolSel = ui.schoolSel===iso ? null : iso; render(); },
+  schoolGradeClass(id){ ui.schoolGradeClass = id; ui.gradingId = null; render(); },
+  schoolShowDone(v){ ui.schoolShowDone = v; render(); },
+  toggleSchoolFeature(){
+    data.settings.schoolEnabled = !data.settings.schoolEnabled;
+    if (!data.settings.schoolEnabled && ui.tab==="school") ui.tab = "settings";
+    save(); render();
+  },
+  addSchoolTask(){
+    const text = ($("#stText").value||"").trim();
+    if (!text){ toast("Type the task first", true); return; }
+    const classId = ui.classPick.task || null;
+    if (!classId){ toast("Choose a class first", true); return; }
+    data.school.tasks.unshift({ id:uid(), text, classId, due:$("#stDue").value||null, done:false, createdAt:Date.now() });
+    save(); toast("Task added \u2713"); render();
+    setTimeout(()=>{ const el=$("#stText"); if(el) el.focus(); }, 40);
+  },
+  toggleSchoolTask(id, done){
+    const t = data.school.tasks.find(x=>x.id===id);
+    if (!t) return;
+    if (done){
+      const el = document.getElementById("stask-"+id);
+      ding();
+      t.done = true; t.doneAt = todayISO();
+      save();
+      toast(`+${SCHOOL_TASK_XP} XP \u2713`);
+    } else {
+      t.done = false; delete t.doneAt; save();
+    }
+    render();
+  },
+  delSchoolTask(id){ data.school.tasks = data.school.tasks.filter(x=>x.id!==id); save(); render(); },
+  addSchoolDate(){
+    const title = ($("#sdTitle").value||"").trim();
+    if (!title){ toast("Name the date first", true); return; }
+    const classId = ui.classPick.date || null;
+    if (!classId){ toast("Choose a class first", true); return; }
+    data.school.dates.push({ id:uid(), title, kind:$("#sdKind").value, date:$("#sdDate").value||todayISO(), classId });
+    save(); toast("Date added \u2713"); render();
+  },
+  delSchoolDate(id){ data.school.dates = data.school.dates.filter(x=>x.id!==id); save(); render(); },
+  addAssignment(classId){
+    const name = ($("#agName").value||"").trim();
+    if (!name){ toast("Name the assignment", true); return; }
+    const earnedRaw = $("#agEarned").value;
+    data.school.assignments.push({
+      id:uid(), classId, name,
+      weight: parseFloat($("#agWeight").value)||0,
+      due: $("#agDue").value||null,
+      earned: earnedRaw==="" ? null : parseFloat(earnedRaw),
+      total: parseFloat($("#agTotal").value)||100
+    });
+    save(); toast("Assignment added \u2713"); render();
+  },
+  gradeAssignment(id){ ui.gradingId = ui.gradingId===id ? null : id; render(); },
+  saveGrade(id){
+    const a = data.school.assignments.find(x=>x.id===id);
+    if (!a) return;
+    const e = parseFloat($("#gEarned").value), t = parseFloat($("#gTotal").value);
+    if (isNaN(e) || !(t>0)){ toast("Enter both scores", true); return; }
+    a.earned = e; a.total = t;
+    ui.gradingId = null; save(); toast("Grade saved \u2713"); render();
+  },
+  delAssignment(id){ if(!confirmDel("ag-"+id))return; data.school.assignments = data.school.assignments.filter(x=>x.id!==id); save(); render(); },
+  addStudySession(){
+    const mins = parseInt($("#ssMin").value, 10);
+    if (!(mins>0)){ toast("How many minutes?", true); return; }
+    const classId = ui.classPick.study || null;
+    if (!classId){ toast("Choose a class first", true); return; }
+    data.school.sessions.push({ id:uid(), classId, date:$("#ssDate").value||todayISO(), minutes:mins, notes:($("#ssNotes").value||"").trim() });
+    save(); toast("Study session logged \u2713"); render();
+  },
+  delStudySession(id){ if(!confirmDel("ss-"+id))return; data.school.sessions = data.school.sessions.filter(x=>x.id!==id); save(); render(); },
 
   // cloud backup
   cloudBackupNow(){ toast("Backing up…"); cloudBackup(true); },
