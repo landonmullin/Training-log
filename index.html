@@ -145,7 +145,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 50;
+const APP_VERSION = 51;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
@@ -197,6 +197,7 @@ if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalT
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
+if (!data.settings.deviceId) data.settings.deviceId = Math.random().toString(36).slice(2,10);
 if (!data.school || typeof data.school !== "object") data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[] };
 for (const k of ["classes","tasks","dates","sessions","assignments"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
 if (!data.settings.xpStart){ // XP counts only from the first run of this version onward
@@ -206,10 +207,18 @@ if (!data.settings.xpStart){ // XP counts only from the first run of this versio
 if (!data.settings.cardioTypes) data.settings.cardioTypes = Object.fromEntries(Object.keys(TYPE_META).map(k=>[k,true]));
 for (const k of Object.keys(TYPE_META)) if (typeof data.settings.cardioTypes[k]==="undefined") data.settings.cardioTypes[k]=true;
 
+let bkPushing = false, bkTimer = null;
 function save(){
+  if (!bkPushing) data.settings.lastChange = Date.now();
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch(e){ toast("Couldn't save — storage full?", true); }
+  if (!bkPushing && data.crew?.code){
+    clearTimeout(bkTimer);
+    bkTimer = setTimeout(()=>cloudBackup(false), 15000); // push shortly after you stop editing
+  }
 }
+// identity that survives a restore onto another device
+function myUid(){ return data.settings.userId || fb?.uid || null; }
 
 // ================= helpers =================
 const $ = s => document.querySelector(s);
@@ -798,20 +807,21 @@ const mmdd = iso => iso.slice(5); // "MM-DD"
 // my own birthday as "MM-DD"; cached locally so XP math works offline / pre-auth
 function myBirthdayMD(){
   const bd = data.settings.birthdays || {};
-  if (fb?.uid && bd[fb.uid]) return bd[fb.uid];
+  const u = myUid(); if (u && bd[u]) return bd[u];
   return data.settings.myBirthday || null;
 }
 function cacheMyBirthday(){
   const bd = data.settings.birthdays || {};
-  if (fb?.uid && bd[fb.uid] && data.settings.myBirthday !== bd[fb.uid]){
-    data.settings.myBirthday = bd[fb.uid];
+  const u = myUid();
+  if (u && bd[u] && data.settings.myBirthday !== bd[u]){
+    data.settings.myBirthday = bd[u];
     save();
   }
 }
 function birthdayName(uid){
   const stats = ui.crewStats || [];
   return stats.find(s=>s.uid===uid)?.name
-      || (uid === fb?.uid ? data.crew?.name : null)
+      || (uid === myUid() ? data.crew?.name : null)
       || null;
 }
 function birthdayMapWithNames(){
@@ -865,11 +875,11 @@ function celebrate(name){
   setTimeout(()=>{ const el = document.getElementById("bdayOverlay"); if (el) el.remove(); }, 6000);
 }
 function checkBirthdayCelebration(){
-  const myUid = fb?.uid;
+  const me = myUid();
   const bd = data.settings.birthdays || {};
   const today = todayISO();
-  const isMine = myUid && bd[myUid] === mmdd(today);
-  const selfSet = !myUid && data.settings.myBirthday === mmdd(today); // offline fallback
+  const isMine = me && bd[me] === mmdd(today);
+  const selfSet = !me && data.settings.myBirthday === mmdd(today); // offline fallback
   if (!isMine && !selfSet) return;
   const seen = data.settings.bdayShown || {};
   if (seen.date !== today){ seen.date = today; seen.count = 0; }
@@ -1140,6 +1150,7 @@ async function fbInit(){
   const auth = firebase.auth();
   if (!auth.currentUser) await auth.signInAnonymously();
   fb = { auth, db: firebase.firestore(), uid: auth.currentUser.uid };
+  if (!data.settings.userId){ data.settings.userId = auth.currentUser.uid; save(); }
   return fb;
 }
 function statsTotals(dateFilter){
@@ -1162,8 +1173,8 @@ function myStats(){
 }
 async function crewPushStats(){
   if (!data.crew?.code) return;
-  const {db, uid} = await fbInit();
-  await db.collection("crews").doc(data.crew.code).collection("stats").doc(uid)
+  const {db} = await fbInit();
+  await db.collection("crews").doc(data.crew.code).collection("stats").doc(myUid())
     .set({ name:data.crew.name, ...myStats(), updatedAt:Date.now() });
 }
 // read a member's value for a period; null = no data pushed for the current period yet
@@ -1196,10 +1207,10 @@ async function crewPushEvents(){
   if (!data.crew?.code) return;
   const pending = (data.events || []).filter(e => !e.pushed && !e.local);
   if (!pending.length) return;
-  const {db, uid} = await fbInit();
+  const {db} = await fbInit();
   const col = db.collection("crews").doc(data.crew.code).collection("events");
   for (const ev of pending.slice(0, 10)){
-    await col.add({ eid:ev.eid, icon:ev.icon, text:ev.text, date:ev.date, uid, name:data.crew.name, createdAt:ev.createdAt || Date.now() });
+    await col.add({ eid:ev.eid, icon:ev.icon, text:ev.text, date:ev.date, uid:myUid(), name:data.crew.name, createdAt:ev.createdAt || Date.now() });
     ev.pushed = true;
   }
   save();
@@ -1215,7 +1226,7 @@ async function crewFetchGrocery(){
   const snap = await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
     .orderBy("createdAt","desc").limit(30).get();
   ui.groceryLists = snap.docs.map(d=>({id:d.id, ...d.data()}))
-    .filter(l => l.owner===fbu.uid || (l.sharedWith||[]).includes(fbu.uid));
+    .filter(l => l.owner===myUid() || (l.sharedWith||[]).includes(myUid()));
 }
 async function crewFetchGroceryItems(listId){
   const fbu = await fbInit();
@@ -1242,8 +1253,16 @@ async function crewSync(manual){
       await crewFetchGrocery();
       if (ui.groceryOpenId) await crewFetchGroceryItems(ui.groceryOpenId);
     }
-    const lastBk = data.settings.cloudBackup?.at || 0;
-    if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
+    const other = await cloudCheckOtherDevice();
+    if (other && !other.conflict){
+      await pullOtherDevice();
+      toast("Loaded newer data from your other device \u2713");
+    } else if (other && other.conflict){
+      ui.deviceSync = other;   // both sides changed — let the user choose
+    } else {
+      const lastBk = data.settings.cloudBackup?.at || 0;
+      if ((data.settings.lastChange||0) > lastBk || Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
+    }
     repairBirthdayEvents();
     if (manual) toast("Crew synced ✓");
     render();
@@ -1292,9 +1311,11 @@ async function cloudBackup(manual){
     const prev = data.settings.cloudBackup || {};
     const prevHashes = prev.chunkHashes || [];
     const hashes = chunks.map(hashStr);
+    const now = Date.now();
     await col.doc(key).set({
       name: data.crew.name, core, chunkCount: chunks.length,
-      updatedAt: Date.now(), version: APP_VERSION
+      updatedAt: now, version: APP_VERSION,
+      deviceId: data.settings.deviceId, userId: myUid()
     });
     for (let i=0;i<chunks.length;i++){
       if (prevHashes[i] === hashes[i]) continue; // unchanged, skip the upload
@@ -1303,10 +1324,43 @@ async function cloudBackup(manual){
     for (let i=chunks.length; i<(prev.chunkCount||0); i++){
       try { await col.doc(`${key}__r${i}`).delete(); } catch(e){}
     }
-    data.settings.cloudBackup = { at: Date.now(), chunkCount: chunks.length, chunkHashes: hashes };
+    bkPushing = true;
+    data.settings.cloudBackup = { at: now, chunkCount: chunks.length, chunkHashes: hashes };
     save();
+    bkPushing = false;
     if (manual){ toast("Backed up to the cloud \u2713"); render(); }
   } catch(e){ if (manual) toast("Backup failed — check connection", true); }
+}
+// is there newer data from another device, and would pulling it lose local edits?
+async function cloudCheckOtherDevice(){
+  if (!data.crew?.code || !data.crew?.name) return null;
+  const {db} = await fbInit();
+  const doc = await db.collection("crews").doc(data.crew.code).collection("backups")
+    .doc(nameKey(data.crew.name)).get();
+  if (!doc.exists) return null;
+  const d = doc.data();
+  if (!d.updatedAt) return null;
+  if (d.deviceId && d.deviceId === data.settings.deviceId) return null; // our own last push
+  const lastSynced = data.settings.cloudBackup?.at || 0;
+  if (d.updatedAt <= lastSynced) return null;                            // nothing new
+  const localChange = data.settings.lastChange || 0;
+  return { updatedAt: d.updatedAt, conflict: localChange > lastSynced };
+}
+async function pullOtherDevice(){
+  const parsed = await cloudFetchBackup(data.crew.code, nameKey(data.crew.name));
+  if (!parsed || !Array.isArray(parsed.lifts)) throw new Error("bad backup");
+  const keepCrew = data.crew, keepDevice = data.settings.deviceId;
+  Object.keys(data).forEach(k=>{ delete data[k]; });
+  Object.assign(data, parsed);
+  data.crew = keepCrew;                       // never inherit the other device's crew config wholesale
+  data.settings.deviceId = keepDevice;        // this device keeps its own id
+  bkPushing = true;
+  data.settings.cloudBackup = { at: Date.now(), chunkCount:0, chunkHashes:[] };
+  data.settings.lastChange = 0;
+  save();
+  bkPushing = false;
+  ui.deviceSync = null;
+  render();
 }
 async function cloudListBackups(code){
   const {db} = await fbInit();
@@ -1348,7 +1402,7 @@ const ui = {
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   crewEvents: null,
-  bkList: null, bkBusy: false,
+  bkList: null, bkBusy: false, deviceSync: null,
   eventsOpen: false,
   schoolTab: "tasks", schoolMonth: null, schoolSel: null, schoolGradeClass: null,
   schoolShowDoneFlag: false, gradingId: null,
@@ -1541,7 +1595,15 @@ function renderCalendar(){
     : `<div style="font-size:12px;color:var(--sub);margin-top:6px">Log a workout and it'll show up here${data.crew?.code?" for the whole crew":""}.</div>`}
     ${allEvs.length > 3 ? `<button onclick="App.toggleEvents()" style="background:none;border:none;color:var(--cardio);font-size:12px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:var(--body)">${ui.eventsOpen ? "show less \u25B4" : `show all ${allEvs.length} \u25BE`}</button>` : ""}
   </div>`;
-  return `${banner}${rankStrip}${eventsCard}<div class="card">
+  const dsBanner = ui.deviceSync ? `<div class="card" style="background:#FFF8E6;border-color:#E0C878">
+    <div style="font-weight:700;font-size:14px;color:#7a5c00">Your other device has newer data</div>
+    <div style="font-size:12px;color:#7a5c00;margin:6px 0 10px">It last synced ${new Date(ui.deviceSync.updatedAt).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}, but you've also made changes here. Pick which to keep — the other copy will be replaced.</div>
+    <div style="display:flex;gap:8px">
+      <button class="btn ink" style="flex:1" onclick="App.deviceSyncPull()">Load other device</button>
+      <button class="btn" style="flex:1;background:transparent;border:1px solid #7a5c00;color:#7a5c00" onclick="App.deviceSyncKeep()">Keep this one</button>
+    </div>
+  </div>` : "";
+  return `${banner}${dsBanner}${rankStrip}${eventsCard}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
@@ -2411,7 +2473,7 @@ function renderTodo(){
   </div>`;
   if (ui.todoTab==="grocery"){
     if (!ui.groceryLists){ crewFetchGrocery().then(()=>render()).catch(()=>{ ui.groceryLists=[]; render(); }); }
-    const myUid = fb?.uid || null;
+    const me = myUid();
     const lists = ui.groceryLists || [];
 
     // ---------- inside an open list ----------
@@ -2424,7 +2486,7 @@ function renderTodo(){
       html += `<div class="card" style="border-left:4px solid var(--pull)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <button onclick="App.groceryBack()" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer;padding:0">‹ all lists</button>
-          ${list && list.owner===myUid ? delBtn("glist-"+list.id, `App.groceryDeleteList('${list.id}')`, "delete list") : ""}
+          ${list && list.owner===me ? delBtn("glist-"+list.id, `App.groceryDeleteList('${list.id}')`, "delete list") : ""}
         </div>
         <div class="h2" style="margin:0 0 2px">${esc(list?.name || "List")}</div>
         <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">${shared.length?`shared with ${shared.map(esc).join(", ")}`:"private"}</div>
@@ -2496,14 +2558,14 @@ function renderTodo(){
   }
   if (ui.todoTab==="crew"){
     if (!ui.crewTodos){ crewFetchTodos().then(()=>render()).catch(()=>{ ui.crewTodos=[]; render(); }); }
-    const members = (ui.crewStats||[]).filter(s=>s.uid!==(fb?.uid));
+    const members = (ui.crewStats||[]).filter(s=>s.uid!==myUid());
     html += `<div class="card" style="border-left:4px solid #B08D2F">
       <div class="lbl">Assign a task</div>
       <input id="crewTodoInput" placeholder="What needs doing?" enterkeyhint="done" style="margin-bottom:8px"
         onkeydown="if(event.key==='Enter'){event.preventDefault();App.crewAddTodo(this);}">
       <select id="crewAssign">
         <option value="all">Everyone</option>
-        ${fb?`<option value="${fb.uid}">Me (${esc(data.crew.name)})</option>`:""}
+        ${myUid()?`<option value="${myUid()}">Me (${esc(data.crew.name)})</option>`:""}
         ${members.map(m=>`<option value="${m.uid}">${esc(m.name||"?")}</option>`).join("")}
       </select>
     </div>`;
@@ -2756,16 +2818,16 @@ function renderProgress(){
       </div>`).join("") : `<div class="muted" style="padding:10px">Nobody has synced for this period yet.</div>`}
       ${stale.length?`<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${stale.map(s=>esc(s.name)).join(", ")} — hasn't synced this ${period==="all"?"yet":period==="day"?"today":period==="week"?"week":"month"}</div>`:""}
     </div>`;
-    const myUid = fb?.uid || null;
-    const isOwner = myUid && ui.crewOwner === myUid;
+    const me = myUid();
+    const isOwner = me && ui.crewOwner === me;
     if (isOwner){
       const members = [...ui.crewStats].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
       html += `<div class="card" style="border-left:4px solid var(--danger)">
         <div class="lbl" style="margin-bottom:8px">Members — leader tools</div>
         ${members.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
-          <span style="flex:1;font-weight:700;font-size:14px">${esc(m.name||"?")}${m.uid===myUid?' <span style="font-size:10px;color:var(--sub);font-weight:400">(you)</span>':""}</span>
+          <span style="flex:1;font-weight:700;font-size:14px">${esc(m.name||"?")}${m.uid===me?' <span style="font-size:10px;color:var(--sub);font-weight:400">(you)</span>':""}</span>
           <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${m.updatedAt?"synced "+shortDate(isoFromDate(new Date(m.updatedAt))):"never synced"}</span>
-          ${m.uid!==myUid ? delBtn("rm-"+m.uid, "App.crewRemoveMember('"+m.uid+"','"+esc(m.name||"").replace(/'/g,"")+"')", "remove") : ""}
+          ${m.uid!==me ? delBtn("rm-"+m.uid, "App.crewRemoveMember('"+m.uid+"','"+esc(m.name||"").replace(/'/g,"")+"')", "remove") : ""}
         </div>`).join("")}
         <div style="font-size:12px;color:var(--sub);margin-top:8px">Removing someone clears them from the leaderboard. If they open their app again they'll re-sync back in — duplicates from an old bookmark won't, since that copy is abandoned.</div>
       </div>`;
@@ -3162,6 +3224,18 @@ window.App = {
   },
   delStudySession(id){ if(!confirmDel("ss-"+id))return; data.school.sessions = data.school.sessions.filter(x=>x.id!==id); save(); render(); },
 
+  // multi-device
+  async deviceSyncPull(){
+    toast("Loading…");
+    try { await pullOtherDevice(); toast("Loaded from your other device \u2713"); }
+    catch(e){ toast("Couldn't load — check connection", true); }
+  },
+  deviceSyncKeep(){
+    ui.deviceSync = null;
+    cloudBackup(true);   // overwrite the cloud with this device's copy
+    render();
+  },
+
   // cloud backup
   cloudBackupNow(){ toast("Backing up…"); cloudBackup(true); },
   async cloudFindBackups(){
@@ -3221,7 +3295,7 @@ window.App = {
     try {
       const {db} = await fbInit();
       const code = Array.from({length:6},()=>"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random()*32)]).join("");
-      await db.collection("crews").doc(code).set({createdAt:Date.now(), owner: fb.uid});
+      await db.collection("crews").doc(code).set({createdAt:Date.now(), owner: myUid()});
       data.crew.code = code; data.crew.name = name;
       save(); await crewPushStats(); await crewFetchStats();
       toast("Crew created ✓ — share code "+code); render();
@@ -3305,7 +3379,7 @@ window.App = {
     try {
       const fbu = await fbInit();
       await fbu.db.collection("crews").doc(data.crew.code).collection("grocery").add({
-        name, owner: fbu.uid, ownerName: data.crew.name,
+        name, owner: myUid(), ownerName: data.crew.name,
         sharedWith: picked, sharedNames: names, createdAt: Date.now()
       });
       ui.groceryNewOpen = false; ui.groceryPick = [];
@@ -3338,7 +3412,7 @@ window.App = {
       const fbu = await fbInit();
       const ref = await fbu.db.collection("crews").doc(data.crew.code).collection("grocery")
         .doc(ui.groceryOpenId).collection("items").add({
-          text, done:false, addedBy: fbu.uid, addedByName: data.crew.name, createdAt: Date.now()
+          text, done:false, addedBy: myUid(), addedByName: data.crew.name, createdAt: Date.now()
         });
       const it = (ui.groceryItems||[]).find(x=>x.id===tempId);
       if (it) it.id = ref.id;
@@ -3581,6 +3655,12 @@ $("#importFile").addEventListener("change", async e=>{
 });
 
 touchStreak();
+document.addEventListener("visibilitychange", ()=>{
+  if (document.visibilityState === "hidden" && data.crew?.code){
+    clearTimeout(bkTimer);
+    if ((data.settings.lastChange||0) > (data.settings.cloudBackup?.at||0)) cloudBackup(false);
+  }
+});
 applyTheme();
 render();
 setTimeout(checkBirthdayCelebration, 900); // after crew data has a chance to load
