@@ -145,7 +145,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 51;
+const APP_VERSION = 52;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
@@ -1331,6 +1331,11 @@ async function cloudBackup(manual){
     if (manual){ toast("Backed up to the cloud \u2713"); render(); }
   } catch(e){ if (manual) toast("Backup failed — check connection", true); }
 }
+function hasLocalData(){
+  const s = data.school || {};
+  return (data.lifts?.length || data.cardio?.length || data.weights?.length || data.nutrition?.length ||
+          data.todos?.length || data.shifts?.length || s.tasks?.length || s.classes?.length || s.assignments?.length) > 0;
+}
 // is there newer data from another device, and would pulling it lose local edits?
 async function cloudCheckOtherDevice(){
   if (!data.crew?.code || !data.crew?.name) return null;
@@ -1344,7 +1349,9 @@ async function cloudCheckOtherDevice(){
   const lastSynced = data.settings.cloudBackup?.at || 0;
   if (d.updatedAt <= lastSynced) return null;                            // nothing new
   const localChange = data.settings.lastChange || 0;
-  return { updatedAt: d.updatedAt, conflict: localChange > lastSynced };
+  // a device that has never synced only conflicts if it actually holds data
+  const conflict = lastSynced > 0 ? (localChange > lastSynced) : hasLocalData();
+  return { updatedAt: d.updatedAt, conflict, otherName: d.name || null };
 }
 async function pullOtherDevice(){
   const parsed = await cloudFetchBackup(data.crew.code, nameKey(data.crew.name));
@@ -1374,7 +1381,7 @@ async function cloudFetchBackup(code, key){
   const {db} = await fbInit();
   const col = db.collection("crews").doc(code).collection("backups");
   const doc = await col.doc(key).get();
-  if (!doc.exists) throw new Error("not found");
+  if (!doc.exists){ const e = new Error("not found"); e.code = "NOTFOUND"; throw e; }
   const d = doc.data();
   const restored = JSON.parse(d.core);
   const routeMap = {};
@@ -1600,7 +1607,7 @@ function renderCalendar(){
     <div style="font-size:12px;color:#7a5c00;margin:6px 0 10px">It last synced ${new Date(ui.deviceSync.updatedAt).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}, but you've also made changes here. Pick which to keep — the other copy will be replaced.</div>
     <div style="display:flex;gap:8px">
       <button class="btn ink" style="flex:1" onclick="App.deviceSyncPull()">Load other device</button>
-      <button class="btn" style="flex:1;background:transparent;border:1px solid #7a5c00;color:#7a5c00" onclick="App.deviceSyncKeep()">Keep this one</button>
+      ${hasLocalData()?`<button class="btn" style="flex:1;background:transparent;border:1px solid #7a5c00;color:#7a5c00" onclick="App.deviceSyncKeep()">Keep this one</button>`:""}
     </div>
   </div>` : "";
   return `${banner}${dsBanner}${rankStrip}${eventsCard}<div class="card">
@@ -3228,9 +3235,25 @@ window.App = {
   async deviceSyncPull(){
     toast("Loading…");
     try { await pullOtherDevice(); toast("Loaded from your other device \u2713"); }
-    catch(e){ toast("Couldn't load — check connection", true); }
+    catch(e){
+      if (e && e.code === "NOTFOUND"){
+        // the display name on this device doesn't match the one that made the backup
+        ui.deviceSync = null;
+        ui.tab = "settings";
+        try { ui.bkList = await cloudListBackups(data.crew.code); ui.bkCode = data.crew.code; } catch(_){}
+        toast("No backup under \"" + (data.crew?.name||"") + "\" — pick the right name below", true);
+        render();
+      } else {
+        toast("Couldn't load — check connection", true);
+      }
+    }
   },
   deviceSyncKeep(){
+    // guard: never let an empty device overwrite a good backup
+    if (!hasLocalData()){
+      toast("This device has no data yet — load the other one instead", true);
+      return;
+    }
     ui.deviceSync = null;
     cloudBackup(true);   // overwrite the cloud with this device's copy
     render();
