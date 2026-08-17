@@ -145,7 +145,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 54;
+const APP_VERSION = 55;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
@@ -2166,10 +2166,12 @@ function renderSchool(){
     html += `<div class="card" style="border-left:4px solid var(--ink)">
       <div class="lbl">Add an important date</div>
       <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px">
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <select id="sdKind" onchange="App.sdKind(this.value)">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}" ${ui.sdKind===k?"selected":""}>${v.icon} ${v.label}</option>`).join("")}</select>
-        <input type="date" id="sdDate" value="${ui.schoolSel||todayISO()}">
+      <select id="sdKind" onchange="App.sdKind(this.value)" style="margin-bottom:8px">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}" ${ui.sdKind===k?"selected":""}>${v.icon} ${v.label}</option>`).join("")}</select>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${ui.schoolSel||todayISO()}"></div>
+        <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd"></div>
       </div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-bottom:8px">set an end date to block off a whole break at once</div>
       <div id="sdClassWrap" style="${ui.sdKind==="dayoff"?"display:none":""}">
         <div class="lbl">Class</div>
         <div style="margin:4px 0 10px">${classFieldHTML("date")}</div>
@@ -2177,7 +2179,7 @@ function renderSchool(){
       <button class="btn ink" onclick="App.addSchoolDate()">Add date</button>
     </div>`;
     // upcoming list
-    const upcoming = data.school.dates.filter(x=>x.date >= todayISO()).sort((a,b)=>a.date<b.date?-1:1).slice(0,12);
+    const upcoming = data.school.dates.filter(x=>x.date >= todayISO() && x.kind !== "dayoff").sort((a,b)=>a.date<b.date?-1:1).slice(0,12);
     if (upcoming.length){
       html += `<div class="lbl" style="margin:14px 0 6px">Coming up</div>`;
       html += upcoming.map(x=>{
@@ -2192,6 +2194,24 @@ function renderSchool(){
           </div>
         </div>`;
       }).join("");
+    }
+    // days off, collapsed into ranges
+    const offs = data.school.dates.filter(x=>x.kind==="dayoff");
+    if (offs.length){
+      const groups = {};
+      offs.forEach(x=>{ const k = x.groupId || x.id; (groups[k] = groups[k] || []).push(x); });
+      const rows = Object.values(groups).map(g=>{
+        const sorted = g.sort((a,b)=>a.date<b.date?-1:1);
+        return { title:sorted[0].title, from:sorted[0].date, to:sorted[sorted.length-1].date, n:sorted.length, id:sorted[0].id };
+      }).filter(r=>r.to >= todayISO()).sort((a,b)=>a.from<b.from?-1:1);
+      if (rows.length){
+        html += `<div class="lbl" style="margin:14px 0 6px">Breaks & days off</div>`;
+        html += rows.map(r=>`<div class="card" style="padding:11px 14px;border-left:4px solid #2B8A3E;display:flex;justify-content:space-between;align-items:center">
+          <div><div style="font-weight:700;font-size:14px">\u{1F334} ${esc(r.title)}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${r.n>1 ? `${prettyDate(r.from)} – ${prettyDate(r.to)} · ${r.n} days` : prettyDate(r.from)}</div></div>
+          ${delBtn("sd-"+r.id, `App.delSchoolDate('${r.id}')`)}
+        </div>`).join("");
+      }
     }
     return html;
   }
@@ -3145,10 +3165,26 @@ window.App = {
     const kind = $("#sdKind").value;
     const classId = ui.classPick.date || null;
     if (!classId && kind !== "dayoff"){ toast("Choose a class first", true); return; }
-    data.school.dates.push({ id:uid(), title, kind, date:$("#sdDate").value||todayISO(), classId: kind==="dayoff" ? null : classId });
-    save(); toast("Date added \u2713"); render();
+    const start = $("#sdDate").value || todayISO();
+    const end = $("#sdEnd").value || start;
+    if (end < start){ toast("End date is before the start date", true); return; }
+    const [sy,sm,sd] = start.split("-").map(Number);
+    const [ey,em,ed] = end.split("-").map(Number);
+    const days = Math.round((new Date(ey,em-1,ed) - new Date(sy,sm-1,sd)) / 86400000) + 1;
+    if (days > 200){ toast("That range is too long", true); return; }
+    const groupId = days > 1 ? uid() : null;
+    for (let i=0;i<days;i++){
+      const iso = isoFromDate(new Date(sy, sm-1, sd+i));
+      data.school.dates.push({ id:uid(), groupId, title, kind, date:iso, classId: kind==="dayoff" ? null : classId });
+    }
+    save(); toast(days>1 ? `Added ${days} days \u2713` : "Date added \u2713"); render();
   },
-  delSchoolDate(id){ data.school.dates = data.school.dates.filter(x=>x.id!==id); save(); render(); },
+  delSchoolDate(id){
+    const t = data.school.dates.find(x=>x.id===id);
+    if (t && t.groupId) data.school.dates = data.school.dates.filter(x=>x.groupId!==t.groupId);
+    else data.school.dates = data.school.dates.filter(x=>x.id!==id);
+    save(); render();
+  },
   addAssignment(classId){
     const name = ($("#agName").value||"").trim();
     if (!name){ toast("Name the assignment", true); return; }
