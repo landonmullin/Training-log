@@ -145,10 +145,10 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 55;
+const APP_VERSION = 56;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
-  school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
+  school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
   walk:{label:"Walk",emoji:"🚶"},
@@ -192,13 +192,13 @@ function applyTheme(){
 let data;
 try { data = JSON.parse(localStorage.getItem(KEY)) || structuredClone(EMPTY); }
 catch(e){ data = structuredClone(EMPTY); }
-for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
+for (const k of Object.keys(EMPTY)) if (Array.isArray(EMPTY[k]) && !Array.isArray(data[k])) data[k] = [];
 if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
-if (!data.school || typeof data.school !== "object") data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[] };
-for (const k of ["classes","tasks","dates","sessions","assignments"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
+if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] };
+for (const k of ["classes","tasks","dates","sessions","assignments","schedule"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
 if (!data.settings.xpStart){ // XP counts only from the first run of this version onward
   const _d = new Date();
   data.settings.xpStart = `${_d.getFullYear()}-${String(_d.getMonth()+1).padStart(2,"0")}-${String(_d.getDate()).padStart(2,"0")}`;
@@ -793,6 +793,21 @@ function letterGrade(p){
 }
 const DATE_KINDS = { exam:{label:"Exam", icon:"\u{1F4DD}"}, lab:{label:"Lab", icon:"\u{1F9EA}"}, quiz:{label:"Quiz", icon:"\u2753"}, project:{label:"Project", icon:"\u{1F4C1}"}, dayoff:{label:"Day Off", icon:"\u{1F334}"}, other:{label:"Other", icon:"\u{1F4CC}"} };
 const isDayOff = iso => (data.school.dates||[]).some(x=>x.kind==="dayoff" && x.date===iso);
+const DOW = [["SU","Sun","Sunday"],["MO","Mon","Monday"],["TU","Tue","Tuesday"],["WE","Wed","Wednesday"],["TH","Thu","Thursday"],["FR","Fri","Friday"],["SA","Sat","Saturday"]];
+const dowCode = iso => { const [y,m,d]=iso.split("-").map(Number); return DOW[new Date(y,m-1,d).getDay()][0]; };
+function fmtTime(t){
+  if (!t) return "";
+  const [h,m] = t.split(":").map(Number);
+  const ampm = h>=12 ? "pm" : "am";
+  const hh = h%12===0 ? 12 : h%12;
+  return `${hh}:${String(m).padStart(2,"0")}${ampm}`;
+}
+function scheduleFor(iso){
+  const code = dowCode(iso);
+  return (data.school.schedule||[])
+    .filter(s=>(s.days||[]).includes(code))
+    .sort((a,b)=>(a.start||"")<(b.start||"")?-1:1);
+}
 function schoolXP(since){
   return data.school.tasks.filter(t=>t.done && t.doneAt && t.doneAt >= since).length * SCHOOL_TASK_XP;
 }
@@ -1359,7 +1374,7 @@ const ui = {
   crewEvents: null,
   bkList: null, bkBusy: false,
   eventsOpen: false,
-  schoolTab: "tasks", schoolMonth: null, schoolSel: null, schoolGradeClass: null, sdKind: "exam",
+  schoolTab: "tasks", schoolMonth: null, schoolSel: null, schoolGradeClass: null, sdKind: "exam", schedDays: [],
   schoolShowDoneFlag: false, gradingId: null,
   classPick: {}, classPickerOpen: null, classSearch: "", focusClassSearch: false,
   groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false, groceryPick: [],
@@ -1550,7 +1565,29 @@ function renderCalendar(){
     : `<div style="font-size:12px;color:var(--sub);margin-top:6px">Log a workout and it'll show up here${data.crew?.code?" for the whole crew":""}.</div>`}
     ${allEvs.length > 3 ? `<button onclick="App.toggleEvents()" style="background:none;border:none;color:var(--cardio);font-size:12px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:var(--body)">${ui.eventsOpen ? "show less \u25B4" : `show all ${allEvs.length} \u25BE`}</button>` : ""}
   </div>`;
-  return `${banner}${rankStrip}${eventsCard}<div class="card">
+  let todaySched = "";
+  if (data.settings.schoolEnabled){
+    const today = todayISO();
+    const off = (data.school.dates||[]).some(x=>x.kind==="dayoff" && x.date===today);
+    const mtgs = off ? [] : scheduleFor(today);
+    if (off){
+      const t = (data.school.dates||[]).find(x=>x.kind==="dayoff" && x.date===today);
+      todaySched = `<div class="card" style="border-left:4px solid #2B8A3E;padding:12px 14px">
+        <div style="font-weight:700;font-size:14px">\u{1F334} ${esc(t.title||"Day off")}</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:2px">no school today</div>
+      </div>`;
+    } else if (mtgs.length){
+      todaySched = `<div class="card" style="padding:12px 14px">
+        <div class="lbl" style="margin-bottom:8px">Today's classes</div>
+        ${mtgs.map(s=>`<div style="display:flex;align-items:center;gap:10px;padding:5px 0">
+          <span style="width:4px;height:26px;border-radius:2px;background:${classColor(s.classId)};flex:none"></span>
+          <span style="flex:1;font-size:14px;font-weight:600;color:var(--ink)">${esc(className(s.classId))}${s.room?` <span style="font-family:var(--mono);font-size:11px;color:var(--sub);font-weight:400">${esc(s.room)}</span>`:""}</span>
+          <span style="font-family:var(--mono);font-size:12px;color:var(--sub);white-space:nowrap">${fmtTime(s.start)}${s.end?`–${fmtTime(s.end)}`:""}</span>
+        </div>`).join("")}
+      </div>`;
+    }
+  }
+  return `${banner}${rankStrip}${todaySched}${eventsCard}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
@@ -2077,10 +2114,49 @@ function renderSchool(){
   const classes = schoolClasses();
   let html = `<div class="seg">
     <button class="${tab==="tasks"?"on":""}" onclick="App.schoolTab('tasks')">Tasks</button>
+    <button class="${tab==="sched"?"on":""}" onclick="App.schoolTab('sched')">Schedule</button>
     <button class="${tab==="cal"?"on":""}" onclick="App.schoolTab('cal')">Dates</button>
     <button class="${tab==="grades"?"on":""}" onclick="App.schoolTab('grades')">Grades</button>
     <button class="${tab==="study"?"on":""}" onclick="App.schoolTab('study')">Study</button>
   </div>`;
+
+  // ================= SCHEDULE =================
+  if (tab === "sched"){
+    const rows = (data.school.schedule||[]).slice();
+    html += `<div class="card" style="border-left:4px solid var(--ink)">
+      <div class="lbl">Add a class meeting</div>
+      <div style="margin:6px 0 8px">${classFieldHTML("sched")}</div>
+      <div class="lbl">Days</div>
+      <div style="display:flex;gap:5px;margin:5px 0 10px">
+        ${DOW.map(([code,label])=>{
+          const on = (ui.schedDays||[]).includes(code);
+          return `<button onclick="App.toggleSchedDay('${code}')" style="flex:1;padding:9px 0;border-radius:8px;border:1px solid ${on?"var(--ink)":"var(--line)"};background:${on?"var(--ink)":"var(--card)"};color:${on?"var(--card)":"var(--sub)"};font-size:12px;font-weight:700;cursor:pointer;font-family:var(--body)">${label[0]}${label[1]}</button>`;
+        }).join("")}
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1"><div class="lbl">Start</div><input type="time" id="scStart"></div>
+        <div style="flex:1"><div class="lbl">End</div><input type="time" id="scEnd"></div>
+      </div>
+      <div class="lbl">Room</div>
+      <input id="scRoom" placeholder="HOH101" style="margin:4px 0 10px">
+      <button class="btn ink" onclick="App.addSchedule()">Add to schedule</button>
+    </div>`;
+    if (!rows.length) html += `<div class="card muted">No classes scheduled yet.</div>`;
+    else {
+      // grouped by day of week
+      DOW.forEach(([code,label,full])=>{
+        const day = rows.filter(s=>(s.days||[]).includes(code)).sort((a,b)=>(a.start||"")<(b.start||"")?-1:1);
+        if (!day.length) return;
+        html += `<div class="lbl" style="margin:14px 0 6px">${full}</div>`;
+        html += day.map(s=>`<div class="card" style="padding:11px 14px;border-left:4px solid ${classColor(s.classId)};display:flex;justify-content:space-between;align-items:center">
+          <div><div style="font-weight:700;font-size:14px">${esc(className(s.classId))}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${fmtTime(s.start)}${s.end?`–${fmtTime(s.end)}`:""}${s.room?` · ${esc(s.room)}`:""}</div></div>
+          ${delBtn("sc-"+s.id, `App.delSchedule('${s.id}')`)}
+        </div>`).join("");
+      });
+    }
+    return html;
+  }
 
   // ================= TASKS =================
   if (tab === "tasks"){
@@ -3128,6 +3204,26 @@ window.App = {
   schoolMonth(m){ ui.schoolMonth = m; render(); },
   schoolSelDay(iso){ ui.schoolSel = ui.schoolSel===iso ? null : iso; render(); },
   sdKind(k){ ui.sdKind = k; render(); },
+  toggleSchedDay(code){
+    const cur = ui.schedDays || [];
+    ui.schedDays = cur.includes(code) ? cur.filter(x=>x!==code) : [...cur, code];
+    render();
+  },
+  addSchedule(){
+    const classId = ui.classPick.sched || null;
+    if (!classId){ toast("Choose a class first", true); return; }
+    const days = ui.schedDays || [];
+    if (!days.length){ toast("Pick at least one day", true); return; }
+    const start = $("#scStart").value;
+    if (!start){ toast("Enter a start time", true); return; }
+    data.school.schedule.push({
+      id:uid(), classId, days:[...days], start,
+      end:$("#scEnd").value||null, room:($("#scRoom").value||"").trim()
+    });
+    ui.schedDays = [];
+    save(); toast("Added to schedule \u2713"); render();
+  },
+  delSchedule(id){ if(!confirmDel("sc-"+id))return; data.school.schedule = data.school.schedule.filter(x=>x.id!==id); save(); render(); },
   schoolGradeClass(id){ ui.schoolGradeClass = id; ui.gradingId = null; render(); },
   schoolShowDone(v){ ui.schoolShowDone = v; render(); },
   toggleSchoolFeature(){
