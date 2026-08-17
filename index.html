@@ -145,7 +145,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 52;
+const APP_VERSION = 53;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[] } };
@@ -1243,6 +1243,16 @@ async function crewFetchTodos(){
 async function crewSync(manual){
   if (!data.crew?.code) return;
   try {
+    // resolve identity first — a device that's about to adopt another account must not post as itself
+    const pre = await cloudCheckOtherDevice();
+    if (pre && !pre.conflict){
+      await pullOtherDevice();
+      toast("Loaded newer data from your other device \u2713");
+    } else if (pre && pre.conflict){
+      ui.deviceSync = pre;
+      render();
+      return;                      // wait for the user to choose before syncing anything
+    }
     await crewPushStats();
     collectNewEvents();
     await crewPushEvents();
@@ -1253,16 +1263,8 @@ async function crewSync(manual){
       await crewFetchGrocery();
       if (ui.groceryOpenId) await crewFetchGroceryItems(ui.groceryOpenId);
     }
-    const other = await cloudCheckOtherDevice();
-    if (other && !other.conflict){
-      await pullOtherDevice();
-      toast("Loaded newer data from your other device \u2713");
-    } else if (other && other.conflict){
-      ui.deviceSync = other;   // both sides changed — let the user choose
-    } else {
-      const lastBk = data.settings.cloudBackup?.at || 0;
-      if ((data.settings.lastChange||0) > lastBk || Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
-    }
+    const lastBk = data.settings.cloudBackup?.at || 0;
+    if ((data.settings.lastChange||0) > lastBk || Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
     repairBirthdayEvents();
     if (manual) toast("Crew synced ✓");
     render();
@@ -1356,6 +1358,7 @@ async function cloudCheckOtherDevice(){
 async function pullOtherDevice(){
   const parsed = await cloudFetchBackup(data.crew.code, nameKey(data.crew.name));
   if (!parsed || !Array.isArray(parsed.lifts)) throw new Error("bad backup");
+  const oldUid = myUid();
   const keepCrew = data.crew, keepDevice = data.settings.deviceId;
   Object.keys(data).forEach(k=>{ delete data[k]; });
   Object.assign(data, parsed);
@@ -1366,6 +1369,15 @@ async function pullOtherDevice(){
   data.settings.lastChange = 0;
   save();
   bkPushing = false;
+  // this device now reports as the account it just adopted — remove the entry it made under its old id
+  const newUid = myUid();
+  if (oldUid && newUid && oldUid !== newUid){
+    try {
+      const {db} = await fbInit();
+      await db.collection("crews").doc(data.crew.code).collection("stats").doc(oldUid).delete();
+      ui.crewStats = (ui.crewStats||[]).filter(s=>s.uid!==oldUid);
+    } catch(e){}
+  }
   ui.deviceSync = null;
   render();
 }
@@ -2831,12 +2843,15 @@ function renderProgress(){
       const members = [...ui.crewStats].sort((a,b)=>(a.name||"").localeCompare(b.name||""));
       html += `<div class="card" style="border-left:4px solid var(--danger)">
         <div class="lbl" style="margin-bottom:8px">Members — leader tools</div>
-        ${members.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid)">
-          <span style="flex:1;font-weight:700;font-size:14px">${esc(m.name||"?")}${m.uid===me?' <span style="font-size:10px;color:var(--sub);font-weight:400">(you)</span>':""}</span>
+        ${members.map(m=>{
+          const isMe = m.uid===me;
+          const dupOfMe = !isMe && (m.name||"").trim().toLowerCase() === (data.crew.name||"").trim().toLowerCase();
+          return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--grid);${dupOfMe?"background:rgba(232,89,12,0.08);border-radius:6px;padding-left:6px;padding-right:6px":""}">
+          <span style="flex:1;font-weight:700;font-size:14px">${esc(m.name||"?")}${isMe?' <span style="font-size:10px;color:var(--sub);font-weight:400">(this device — your account)</span>':dupOfMe?' <span style="font-size:10px;color:#E8590C;font-weight:600">old duplicate — safe to remove</span>':""}</span>
           <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${m.updatedAt?"synced "+shortDate(isoFromDate(new Date(m.updatedAt))):"never synced"}</span>
-          ${m.uid!==me ? delBtn("rm-"+m.uid, "App.crewRemoveMember('"+m.uid+"','"+esc(m.name||"").replace(/'/g,"")+"')", "remove") : ""}
-        </div>`).join("")}
-        <div style="font-size:12px;color:var(--sub);margin-top:8px">Removing someone clears them from the leaderboard. If they open their app again they'll re-sync back in — duplicates from an old bookmark won't, since that copy is abandoned.</div>
+          ${!isMe ? delBtn("rm-"+m.uid, "App.crewRemoveMember('"+m.uid+"','"+esc(m.name||"").replace(/'/g,"")+"')", "remove") : ""}
+        </div>`;}).join("")}
+        <div style="font-size:12px;color:var(--sub);margin-top:8px">Removing someone clears them from the leaderboard. If they open their app again they'll re-sync back in — abandoned duplicates won't, since nothing writes to them anymore.</div>
       </div>`;
     } else if (ui.crewOwner == null && myUid){
       html += `<div class="card">
