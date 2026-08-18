@@ -147,7 +147,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 59;
+const APP_VERSION = 60;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -1037,7 +1037,6 @@ function activityXP(){
     xp += v * mult(c.date);
   });
   data.lifts.forEach(w=>{ if (w.date >= since) xp += 250 * mult(w.date); });
-  data.school.tasks.forEach(t=>{ if (t.done && t.doneAt && t.doneAt >= since) xp += SCHOOL_TASK_XP * mult(t.doneAt); });
   return Math.round(xp);
 }
 const isMyBirthdayToday = () => { const b = myBirthdayMD(); return !!b && b === todayISO().slice(5); };
@@ -2135,13 +2134,14 @@ function renderSchool(){
         <button onclick="App.stForm(false)" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
       </div>
       <input id="stText" placeholder="e.g. Read chapter 4" enterkeyhint="done" style="margin:6px 0 8px"
+        value="${esc(ui.draftTask.text||"")}" oninput="App.draft('task','text',this.value)"
         onkeydown="if(event.key==='Enter'){event.preventDefault();App.addSchoolTask();}">
       <div class="lbl">Class</div>
       <div style="margin:4px 0 8px">${classFieldHTML("task")}</div>
       <div class="lbl">Due date</div>
-      <input type="date" id="stDue" style="margin:4px 0 8px">
+      <input type="date" id="stDue" style="margin:4px 0 8px"
+        value="${esc(ui.draftTask.due||"")}" oninput="App.draft('task','due',this.value)">
       <button class="btn ink" onclick="App.addSchoolTask()">Add task</button>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">+${SCHOOL_TASK_XP} XP per task completed</div>
     </div>` : `<button class="btn soft" style="margin-top:12px" onclick="App.stForm(true)">+ Add a task</button>`;
     if (ui.schoolShowDone){
       html += `<div class="lbl" style="margin:12px 0 6px">Completed (${done.length})</div>`;
@@ -2261,8 +2261,9 @@ function renderSchool(){
       html += items.slice(0,20).map(it=>{
         const overdue = it.due && it.due < todayISO();
         return `<div class="card" style="padding:11px 14px;border-left:4px solid ${classColor(it.classId)};display:flex;justify-content:space-between;align-items:center;gap:10px">
+          ${it.kind==="task" ? `<button class="todo-check" style="width:24px;height:24px;font-size:13px" onclick="App.toggleSchoolTask('${it.id}', true)"></button>` : ""}
           <div style="flex:1;min-width:0">
-            <div style="font-weight:700;font-size:14px">${it.icon} ${esc(it.title)}</div>
+            <div style="font-weight:700;font-size:14px">${it.kind==="task"?"":it.icon+" "}${esc(it.title)}</div>
             <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(it.classId))}</div>
           </div>
           <div style="font-family:var(--mono);font-size:12px;font-weight:700;white-space:nowrap;color:${it.due?"#C92A2A":"var(--sub)"}">
@@ -2284,11 +2285,12 @@ function renderSchool(){
         <span class="lbl" style="margin:0">Add an important date</span>
         <button onclick="App.sdForm(false)" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
       </div>
-      <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px">
+      <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px"
+        value="${esc(ui.draftDate.title||"")}" oninput="App.draft('date','title',this.value)">
       <select id="sdKind" onchange="App.sdKind(this.value)" style="margin-bottom:8px">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}" ${ui.sdKind===k?"selected":""}>${v.icon} ${v.label}</option>`).join("")}</select>
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end">
-        <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${ui.schoolSel||todayISO()}"></div>
-        <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd"></div>
+        <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${esc(ui.draftDate.from||ui.schoolSel||todayISO())}" oninput="App.draft('date','from',this.value)"></div>
+        <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd" value="${esc(ui.draftDate.to||"")}" oninput="App.draft('date','to',this.value)"></div>
       </div>
       <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-bottom:8px">set an end date to block off a whole break at once</div>
       <div id="sdClassWrap" style="${ui.sdKind==="dayoff"?"display:none":""}">
@@ -2439,11 +2441,11 @@ function renderSettings(){
           }).join("")}
         </div>
         <div style="display:flex;gap:8px;margin-bottom:8px">
-          <div style="flex:1"><div class="lbl">Start</div><input type="time" id="scStart"></div>
-          <div style="flex:1"><div class="lbl">End</div><input type="time" id="scEnd"></div>
+          <div style="flex:1"><div class="lbl">Start</div><input type="time" id="scStart" value="${esc(ui.draftSched.start||"")}" oninput="App.draft('sched','start',this.value)"></div>
+          <div style="flex:1"><div class="lbl">End</div><input type="time" id="scEnd" value="${esc(ui.draftSched.end||"")}" oninput="App.draft('sched','end',this.value)"></div>
         </div>
         <div class="lbl">Room</div>
-        <input id="scRoom" placeholder="HOH101" style="margin:4px 0 10px">
+        <input id="scRoom" placeholder="HOH101" style="margin:4px 0 10px" value="${esc(ui.draftSched.room||"")}" oninput="App.draft('sched','room',this.value)">
         <button class="btn ink" onclick="App.addSchedule()">Add to schedule</button>
       </div>` : `<button class="btn soft" style="margin-top:12px" onclick="App.schedForm(true)">+ Add a class meeting</button>`;
       h += `</div>`;
@@ -2942,7 +2944,7 @@ function renderProgress(){
       </div>
     </div>
     ${next?`<div style="height:8px;border-radius:4px;background:var(--grid);margin-top:10px;overflow:hidden"><div style="height:100%;width:${prog}%;background:#B08D2F"></div></div>`:""}
-    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout · 50/school task${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
   </div>`;
   html += `<div class="h2" style="margin-top:2px">Trends</div>`;
   html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
@@ -3224,10 +3226,14 @@ window.App = {
   schoolMonth(m){ ui.schoolMonth = m; render(); },
   schoolSelDay(iso){ ui.schoolSel = iso; render(); },
   sdKind(k){ ui.sdKind = k; render(); },
-  sdForm(v){ ui.sdFormOpen = v; render(); },
-  stForm(v){ ui.stFormOpen = v; render(); },
+  draft(which, field, val){
+    const key = which==="task" ? "draftTask" : which==="date" ? "draftDate" : "draftSched";
+    ui[key][field] = val;   // stored without re-rendering, so typing is never interrupted
+  },
+  sdForm(v){ ui.sdFormOpen = v; ui.draftDate = {}; render(); },
+  stForm(v){ ui.stFormOpen = v; ui.draftTask = {}; render(); },
   schedSection(){ ui.schedOpen = !ui.schedOpen; if(!ui.schedOpen) ui.schedFormOpen=false; render(); },
-  schedForm(v){ ui.schedFormOpen = v; ui.schedDays = []; render(); },
+  schedForm(v){ ui.schedFormOpen = v; ui.schedDays = []; ui.draftSched = {}; render(); },
   toggleSchedDay(code){
     const cur = ui.schedDays || [];
     ui.schedDays = cur.includes(code) ? cur.filter(x=>x!==code) : [...cur, code];
@@ -3238,13 +3244,14 @@ window.App = {
     if (!classId){ toast("Choose a class first", true); return; }
     const days = ui.schedDays || [];
     if (!days.length){ toast("Pick at least one day", true); return; }
-    const start = $("#scStart").value;
+    const start = ($("#scStart")?.value || ui.draftSched.start || "");
     if (!start){ toast("Enter a start time", true); return; }
     data.school.schedule.push({
       id:uid(), classId, days:[...days], start,
-      end:$("#scEnd").value||null, room:($("#scRoom").value||"").trim()
+      end:($("#scEnd")?.value || ui.draftSched.end || null),
+      room:(($("#scRoom")?.value ?? ui.draftSched.room) || "").trim()
     });
-    ui.schedDays = []; ui.schedFormOpen = false; delete ui.classPick.sched;
+    ui.schedDays = []; ui.schedFormOpen = false; ui.draftSched = {}; delete ui.classPick.sched;
     save(); toast("Added to schedule \u2713"); render();
   },
   delSchedule(id){ if(!confirmDel("sc-"+id))return; data.school.schedule = data.school.schedule.filter(x=>x.id!==id); save(); render(); },
@@ -3256,11 +3263,12 @@ window.App = {
     save(); render();
   },
   addSchoolTask(){
-    const text = ($("#stText").value||"").trim();
+    const text = (($("#stText")?.value ?? ui.draftTask.text) || "").trim();
     if (!text){ toast("Type the task first", true); return; }
     const classId = ui.classPick.task || null;
     if (!classId){ toast("Choose a class first", true); return; }
-    data.school.tasks.unshift({ id:uid(), text, classId, due:$("#stDue").value||null, done:false, createdAt:Date.now() });
+    data.school.tasks.unshift({ id:uid(), text, classId, due:($("#stDue")?.value || ui.draftTask.due || null), done:false, createdAt:Date.now() });
+    ui.draftTask = {};
     save(); toast("Task added \u2713"); render();
     setTimeout(()=>{ const el=$("#stText"); if(el) el.focus(); }, 40);
   },
@@ -3272,7 +3280,6 @@ window.App = {
       ding();
       t.done = true; t.doneAt = todayISO();
       save();
-      toast(`+${SCHOOL_TASK_XP} XP \u2713`);
     } else {
       t.done = false; delete t.doneAt; save();
     }
@@ -3280,13 +3287,13 @@ window.App = {
   },
   delSchoolTask(id){ data.school.tasks = data.school.tasks.filter(x=>x.id!==id); save(); render(); },
   addSchoolDate(){
-    const title = ($("#sdTitle").value||"").trim();
+    const title = (($("#sdTitle")?.value ?? ui.draftDate.title) || "").trim();
     if (!title){ toast("Name the date first", true); return; }
     const kind = $("#sdKind").value;
     const classId = ui.classPick.date || null;
     if (!classId && kind !== "dayoff"){ toast("Choose a class first", true); return; }
-    const start = $("#sdDate").value || todayISO();
-    const end = $("#sdEnd").value || start;
+    const start = ($("#sdDate")?.value || ui.draftDate.from || todayISO());
+    const end = ($("#sdEnd")?.value || ui.draftDate.to || start);
     if (end < start){ toast("End date is before the start date", true); return; }
     const [sy,sm,sd] = start.split("-").map(Number);
     const [ey,em,ed] = end.split("-").map(Number);
@@ -3297,7 +3304,7 @@ window.App = {
       const iso = isoFromDate(new Date(sy, sm-1, sd+i));
       data.school.dates.push({ id:uid(), groupId, title, kind, date:iso, classId: kind==="dayoff" ? null : classId });
     }
-    ui.sdFormOpen = false;
+    ui.sdFormOpen = false; ui.draftDate = {};
     save(); toast(days>1 ? `Added ${days} days \u2713` : "Date added \u2713"); render();
   },
   delSchoolDate(id){
