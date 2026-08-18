@@ -147,7 +147,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 58;
+const APP_VERSION = 59;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -2200,7 +2200,7 @@ function renderSchool(){
         style="${off?"background:rgba(43,138,62,0.18)":""}">
         <span class="num">${dnum}</span><span class="marks">${off?`<span style="font-size:9px;line-height:1">\u{1F334}</span>`:""}${dots}</span></button>`;
     }
-    html += `<div class="card">
+    const calCard = `<div class="card">
       <div class="calhead">
         <button onclick="App.schoolMonth('${prevM}')">‹</button>
         <div class="h2" style="margin:0">${new Date(cy,cm-1,1).toLocaleDateString(undefined,{month:"long",year:"numeric"})}</div>
@@ -2209,6 +2209,38 @@ function renderSchool(){
       <div class="cal">${["S","M","T","W","T","F","S"].map(x=>`<div class="dow">${x}</div>`).join("")}${cells}</div>
       <div class="legend">${classes.map(c=>`<span class="item"><span class="sw" style="background:${classColor(c.id)}"></span>${esc(c.name)}</span>`).join("")}<span class="item"><span class="sw" style="background:rgba(43,138,62,0.35)"></span>Day off</span></div>
     </div>`;
+
+    // ---- detail for the selected day (day off name, exams, tasks due) ----
+    let dayCard = "";
+    if (ui.schoolSel){
+      const sel = ui.schoolSel;
+      const offs = data.school.dates.filter(x=>x.kind==="dayoff" && x.date===sel);
+      const evs  = data.school.dates.filter(x=>x.kind!=="dayoff" && x.date===sel);
+      const tsks = data.school.tasks.filter(t=>!t.done && t.due===sel);
+      if (offs.length || evs.length || tsks.length){
+        dayCard = `<div class="card" style="border-left:4px solid ${offs.length?"#2B8A3E":"var(--ink)"}">
+          <div class="lbl" style="margin-bottom:8px">${prettyDate(sel)}</div>
+          ${offs.map(o=>{
+            const grp = o.groupId ? data.school.dates.filter(x=>x.groupId===o.groupId).map(x=>x.date).sort() : [o.date];
+            const span = grp.length>1 ? `${prettyDate(grp[0])} – ${prettyDate(grp[grp.length-1])} · ${grp.length} days` : "no school";
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0">
+              <div><div style="font-weight:700;font-size:15px">\u{1F334} ${esc(o.title)}</div>
+                <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${span}</div></div>
+              ${delBtn("sd-"+o.id, `App.delSchoolDate('${o.id}')`)}
+            </div>`;
+          }).join("")}
+          ${evs.map(e=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-top:1px solid var(--grid)">
+            <div><div style="font-weight:700;font-size:14px">${DATE_KINDS[e.kind]?.icon||"\u{1F4CC}"} ${esc(e.title)}</div>
+              <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(e.classId))}</div></div>
+            ${delBtn("sd-"+e.id, `App.delSchoolDate('${e.id}')`)}
+          </div>`).join("")}
+          ${tsks.map(t=>`<div style="padding:6px 0;border-top:1px solid var(--grid)">
+            <div style="font-weight:700;font-size:14px">\u2713 ${esc(t.text)}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(t.classId))} · task due</div>
+          </div>`).join("")}
+        </div>`;
+      }
+    }
     // ---- Upcoming: tasks + graded dates, soonest first, undated last ----
     const items = [
       ...data.school.tasks.filter(t=>!t.done).map(t=>({kind:"task", id:t.id, title:t.text, classId:t.classId, due:t.due||null, icon:"\u2713"})),
@@ -2222,7 +2254,7 @@ function renderSchool(){
       if (!b.due) return -1;
       return a.due < b.due ? -1 : 1;
     });
-    html += `<div class="lbl" style="margin:14px 0 6px">Upcoming</div>`;
+    html += `<div class="lbl" style="margin:2px 0 6px">Upcoming</div>`;
     if (!items.length){
       html += `<div class="card muted">Nothing coming up. Add tasks and dates below.</div>`;
     } else {
@@ -2239,6 +2271,8 @@ function renderSchool(){
         </div>`;
       }).join("");
     }
+
+    html += calCard + dayCard;
 
     // add form (collapsed)
     if (!ui.sdFormOpen){
@@ -2263,24 +2297,6 @@ function renderSchool(){
       </div>
       <button class="btn ink" onclick="App.addSchoolDate()">Add date</button>
     </div>`;
-    }
-    // days off, collapsed into ranges
-    const offs = data.school.dates.filter(x=>x.kind==="dayoff");
-    if (offs.length){
-      const groups = {};
-      offs.forEach(x=>{ const k = x.groupId || x.id; (groups[k] = groups[k] || []).push(x); });
-      const rows = Object.values(groups).map(g=>{
-        const sorted = g.sort((a,b)=>a.date<b.date?-1:1);
-        return { title:sorted[0].title, from:sorted[0].date, to:sorted[sorted.length-1].date, n:sorted.length, id:sorted[0].id };
-      }).filter(r=>r.to >= todayISO()).sort((a,b)=>a.from<b.from?-1:1);
-      if (rows.length){
-        html += `<div class="lbl" style="margin:14px 0 6px">Breaks & days off</div>`;
-        html += rows.map(r=>`<div class="card" style="padding:11px 14px;border-left:4px solid #2B8A3E;display:flex;justify-content:space-between;align-items:center">
-          <div><div style="font-weight:700;font-size:14px">\u{1F334} ${esc(r.title)}</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${r.n>1 ? `${prettyDate(r.from)} – ${prettyDate(r.to)} · ${r.n} days` : prettyDate(r.from)}</div></div>
-          ${delBtn("sd-"+r.id, `App.delSchoolDate('${r.id}')`)}
-        </div>`).join("");
-      }
     }
     return html;
   }
@@ -3206,7 +3222,7 @@ window.App = {
     toast("Class added \u2713"); render();
   },
   schoolMonth(m){ ui.schoolMonth = m; render(); },
-  schoolSelDay(iso){ ui.schoolSel = ui.schoolSel===iso ? null : iso; render(); },
+  schoolSelDay(iso){ ui.schoolSel = iso; render(); },
   sdKind(k){ ui.sdKind = k; render(); },
   sdForm(v){ ui.sdFormOpen = v; render(); },
   stForm(v){ ui.stFormOpen = v; render(); },
