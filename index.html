@@ -147,7 +147,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 60;
+const APP_VERSION = 61;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -174,10 +174,16 @@ const DEFAULT_EXERCISES = [
  "Chest Fly","Cable Crossover","Shrug","Ab Wheel","Cable Crunch"
 ];
 const SPLITS = {
-  push:{name:"Push",color:"var(--push)",soft:"rgba(232,89,12,0.16)",dsoft:"rgba(232,89,12,0.30)"},
-  pull:{name:"Pull",color:"var(--pull)",soft:"rgba(43,138,62,0.16)",dsoft:"rgba(63,178,92,0.30)"},
-  legs:{name:"Legs",color:"var(--legs)",soft:"rgba(112,72,232,0.16)",dsoft:"rgba(140,110,245,0.32)"}
+  push:{name:"Push",color:"var(--push)",soft:"rgba(232,89,12,0.16)",dsoft:"rgba(232,89,12,0.30)",cls:"p"},
+  pull:{name:"Pull",color:"var(--pull)",soft:"rgba(43,138,62,0.16)",dsoft:"rgba(63,178,92,0.30)",cls:"pl"},
+  legs:{name:"Legs",color:"var(--legs)",soft:"rgba(112,72,232,0.16)",dsoft:"rgba(140,110,245,0.32)",cls:"l"},
+  upper:{name:"Upper",color:"var(--push)",soft:"rgba(232,89,12,0.16)",dsoft:"rgba(232,89,12,0.30)",cls:"p"},
+  lower:{name:"Lower",color:"var(--legs)",soft:"rgba(112,72,232,0.16)",dsoft:"rgba(140,110,245,0.32)",cls:"l"}
 };
+const SPLIT_STYLES = { ppl:{label:"Push / Pull / Legs", keys:["push","pull","legs"]},
+                       ul:{label:"Upper / Lower",      keys:["upper","lower"]} };
+const splitStyle = () => SPLIT_STYLES[data.settings.splitStyle] ? data.settings.splitStyle : "ppl";
+const activeSplitKeys = () => SPLIT_STYLES[splitStyle()].keys;
 const UNTAGGED_SOFT = "rgba(102,115,138,0.14)";
 const isDark = () => document.body.classList.contains("dark");
 const softSplit = k => isDark() ? SPLITS[k].dsoft : SPLITS[k].soft;
@@ -199,6 +205,7 @@ if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalT
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
+if (!SPLIT_STYLES[data.settings.splitStyle]) data.settings.splitStyle = "ppl";
 if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] };
 for (const k of ["classes","tasks","dates","sessions","assignments","schedule"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
 if (!data.settings.xpStart){ // XP counts only from the first run of this version onward
@@ -928,7 +935,8 @@ function touchStreak(){
 function eventTextFor(item, kind, who){
   if (kind === "lift"){
     const sp = item.split && SPLITS[item.split] ? SPLITS[item.split].name + " " : "";
-    return { icon:"\u{1F3CB}\u{FE0F}", text:`${who} logged a ${sp}workout!` };
+    const art = /^[AEIOU]/i.test(sp) ? "an" : "a";
+    return { icon:"\u{1F3CB}\u{FE0F}", text:`${who} logged ${art} ${sp}workout!` };
   }
   const t = item.type, mi = item.distanceMi, dur = item.durationSec;
   const miTxt = mi ? `${mi} ${mi === 1 ? "mile" : "miles"}` : null;
@@ -1448,10 +1456,11 @@ function byDate(){
   return map;
 }
 function calendarLegend(){
+  // show whichever tags are actually in use, plus the current style's options
+  const used = new Set(data.lifts.map(w=>w.split).filter(Boolean));
+  const keys = [...new Set([...activeSplitKeys(), ...used])];
   return `<div class="legend">
-    <span class="item"><span class="sw" style="background:${softSplit("push")}"></span>Push</span>
-    <span class="item"><span class="sw" style="background:${softSplit("pull")}"></span>Pull</span>
-    <span class="item"><span class="sw" style="background:${softSplit("legs")}"></span>Legs</span>
+    ${keys.map(k=>`<span class="item"><span class="sw" style="background:${softSplit(k)}"></span>${SPLITS[k].name}</span>`).join("")}
     <span class="item"><span class="sw" style="background:${untaggedSoft()}"></span>Untagged</span>
     <span class="item"><span style="font-size:11px">🏃</span>Cardio</span>
   </div>`;
@@ -1650,9 +1659,7 @@ function renderLift(){
     <input type="date" value="${d.date}" onchange="App.draftDate(this.value)"></div>
     <div class="card"><div class="lbl">Split</div>
       <div class="seg" style="margin-bottom:0">
-        <button class="${d.split==="push"?"on p":""}" onclick="App.setSplit('push')">Push</button>
-        <button class="${d.split==="pull"?"on pl":""}" onclick="App.setSplit('pull')">Pull</button>
-        <button class="${d.split==="legs"?"on l":""}" onclick="App.setSplit('legs')">Legs</button>
+        ${activeSplitKeys().map(k=>`<button class="${d.split===k?"on "+SPLITS[k].cls:""}" onclick="App.setSplit('${k}')">${SPLITS[k].name}</button>`).join("")}
       </div></div>`;
   d.exercises.forEach((ex,ei)=>{
     html += `<div class="card" style="border-left:4px solid ${d.split?SPLITS[d.split].color:"var(--push)"}">
@@ -2381,6 +2388,13 @@ function renderSettings(){
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Appearance</div>
     ${setRow("Dark mode", "Easier on the eyes in the gym at 6am", !!s.darkMode, "App.setDark()")}
+  </div>
+  <div class="card">
+    <div class="lbl" style="margin-bottom:8px">Training split</div>
+    <div class="seg" style="margin-bottom:0">
+      ${Object.entries(SPLIT_STYLES).map(([k,v])=>`<button class="${splitStyle()===k?"on":""}" onclick="App.setSplitStyle('${k}')">${v.label}</button>`).join("")}
+    </div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">changes the tags offered when logging a workout · past workouts keep their original tag</div>
   </div>
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Features</div>
@@ -3602,6 +3616,12 @@ window.App = {
   },
 
   // settings
+  setSplitStyle(k){
+    if (!SPLIT_STYLES[k]) return;
+    data.settings.splitStyle = k;
+    if (ui.draft?.split && !SPLIT_STYLES[k].keys.includes(ui.draft.split)) ui.draft.split = "";
+    save(); render();
+  },
   setDark(){
     data.settings.darkMode = !data.settings.darkMode;
     save(); applyTheme(); render();
