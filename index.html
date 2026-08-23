@@ -112,6 +112,11 @@
   .switch.on::after{transform:translateX(20px)}
   .setrow{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--grid)}
   .setrow:last-child{border-bottom:none}
+  .wtbl{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+  .wtbl th{text-align:left;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--sub);font-weight:700;padding:6px 4px;border-bottom:1px solid var(--line)}
+  .wtbl td{padding:7px 4px;border-bottom:1px solid var(--grid);color:var(--ink)}
+  .wtbl tr:last-child td{border-bottom:none}
+  .wtbl .num{text-align:right;font-weight:600}
   .setrow .t{font-size:15px;font-weight:600;color:var(--ink)}
   .setrow .d{font-size:12px;color:var(--sub);margin-top:2px}
   body.dark{--paper:#12171F;--grid:#232B38;--ink:#E9EDF3;--sub:#8E99AC;--card:#1B2330;--line:#2C3646;--pushSoft:rgba(232,89,12,0.22);--cardioSoft:rgba(25,113,194,0.22)}
@@ -147,7 +152,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 61;
+const APP_VERSION = 62;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -1386,7 +1391,7 @@ const ui = {
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   crewEvents: null,
-  bkList: null, bkBusy: false,
+  bkList: null, bkBusy: false, wtTable: "daily",
   eventsOpen: false,
   schoolTab: "cal", sdFormOpen: false, stFormOpen: false, schoolMonth: null, schoolSel: todayISO(), schoolGradeClass: null, sdKind: "exam", schedDays: [], schedOpen: false, schedFormOpen: false,
   schoolShowDoneFlag: false, gradingId: null,
@@ -2722,6 +2727,59 @@ function renderProgress(){
       {emptyMsg:"Log at least two weigh-ins on the Weight tab to draw your trend.",
        overlay:{values:avg7arr, color:"#E8590C"}})}
       ${wRows.length>=2?`<div class="note" style="margin-top:6px">dashed orange line = 7-day average${avg7!=null?` (currently ${avg7} lb)`:""}</div>`:""}</div>`;
+
+    if (wRows.length){
+      const mode = ui.wtTable === "weekly" ? "weekly" : "daily";
+      html += `<div class="seg" style="margin-top:14px">
+        <button class="${mode==="daily"?"on":""}" onclick="App.wtTable('daily')">Daily</button>
+        <button class="${mode==="weekly"?"on":""}" onclick="App.wtTable('weekly')">Weekly avg</button>
+      </div>`;
+
+      if (mode === "daily"){
+        // newest first, with day-over-day change and the rolling average at that point
+        const rows = wRows.map((w,i)=>({ ...w, avg: avg7arr[i], prev: i>0 ? wRows[i-1].lbs : null })).reverse();
+        html += `<div class="card" style="padding:12px 14px">
+          <table class="wtbl">
+            <thead><tr><th>Date</th><th class="num">Weight</th><th class="num">Change</th><th class="num">7-day</th></tr></thead>
+            <tbody>${rows.map(r=>{
+              const ch = r.prev!=null ? Math.round((r.lbs-r.prev)*10)/10 : null;
+              return `<tr>
+                <td>${shortDateY(r.date)}</td>
+                <td class="num">${r.lbs}</td>
+                <td class="num" style="color:${ch==null?"var(--sub)":ch<0?"#2B8A3E":ch>0?"#C92A2A":"var(--sub)"}">${ch==null?"—":(ch>0?"+":"")+ch}</td>
+                <td class="num" style="color:var(--sub)">${r.avg ?? "—"}</td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">${wRows.length} weigh-in${wRows.length!==1?"s":""} logged</div>
+        </div>`;
+      } else {
+        // group every weigh-in into its week, average, then compare week to week
+        const buckets = {};
+        wRows.forEach(w=>{ const k = weekStartISO(w.date); (buckets[k] = buckets[k] || []).push(w.lbs); });
+        const weeks = Object.keys(buckets).sort().map(k=>({
+          week: k,
+          avg: Math.round(buckets[k].reduce((a,b)=>a+b,0)/buckets[k].length*10)/10,
+          n: buckets[k].length
+        }));
+        const rows = weeks.map((wk,i)=>({ ...wk, prev: i>0 ? weeks[i-1].avg : null })).reverse();
+        html += `<div class="card" style="padding:12px 14px">
+          <table class="wtbl">
+            <thead><tr><th>Week of</th><th class="num">Avg</th><th class="num">Change</th><th class="num">Weigh-ins</th></tr></thead>
+            <tbody>${rows.map(r=>{
+              const ch = r.prev!=null ? Math.round((r.avg-r.prev)*10)/10 : null;
+              return `<tr>
+                <td>${shortDateY(r.week)}</td>
+                <td class="num">${r.avg}</td>
+                <td class="num" style="color:${ch==null?"var(--sub)":ch<0?"#2B8A3E":ch>0?"#C92A2A":"var(--sub)"}">${ch==null?"—":(ch>0?"+":"")+ch}</td>
+                <td class="num" style="color:var(--sub)">${r.n}</td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>
+          <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">${weeks.length} week${weeks.length!==1?"s":""} · weeks start Sunday</div>
+        </div>`;
+      }
+    }
     return html;
   }
 
@@ -3193,6 +3251,7 @@ window.App = {
 
   // progress
   trendView(v){ ui.trendView=v; render(); },
+  wtTable(m){ ui.wtTable = m; render(); },
   openLeaderboard(){ ui.tab="progress"; ui.trendView="crew"; ui.confirmKey=null; render(); },
   progMode(m){ ui.progMode=m; render(); },
   progExercise(e){ ui.progExercise=e; render(); },
