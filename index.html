@@ -152,7 +152,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 62;
+const APP_VERSION = 64;
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -807,6 +807,7 @@ function letterGrade(p){
 }
 const DATE_KINDS = { exam:{label:"Exam", icon:"\u{1F4DD}"}, lab:{label:"Lab", icon:"\u{1F9EA}"}, quiz:{label:"Quiz", icon:"\u2753"}, project:{label:"Project", icon:"\u{1F4C1}"}, dayoff:{label:"Day Off", icon:"\u{1F334}"}, other:{label:"Other", icon:"\u{1F4CC}"} };
 const isDayOff = iso => (data.school.dates||[]).some(x=>x.kind==="dayoff" && x.date===iso);
+const dueLabelT = (iso, time) => dueLabel(iso) + (time ? ` \u00B7 ${fmtTime(time)}` : "");
 const dueLabel = iso => {
   const [y,m,d] = iso.split("-").map(Number);
   const dt = new Date(y, m-1, d);
@@ -1397,7 +1398,7 @@ const ui = {
   schoolShowDoneFlag: false, gradingId: null,
   classPick: {}, classPickerOpen: null, classSearch: "", focusClassSearch: false,
   groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false, groceryPick: [],
-  updateMsg: null,
+  updateMsg: null, updateReady: null,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
@@ -2150,9 +2151,12 @@ function renderSchool(){
         onkeydown="if(event.key==='Enter'){event.preventDefault();App.addSchoolTask();}">
       <div class="lbl">Class</div>
       <div style="margin:4px 0 8px">${classFieldHTML("task")}</div>
-      <div class="lbl">Due date</div>
-      <input type="date" id="stDue" style="margin:4px 0 8px"
-        value="${esc(ui.draftTask.due||"")}" oninput="App.draft('task','due',this.value)">
+      <div style="display:flex;gap:8px;margin:4px 0 8px">
+        <div style="flex:1"><div class="lbl">Due date</div>
+          <input type="date" id="stDue" value="${esc(ui.draftTask.due||"")}" oninput="App.draft('task','due',this.value)"></div>
+        <div style="flex:1"><div class="lbl">Time <span style="text-transform:none;letter-spacing:0">(optional)</span></div>
+          <input type="time" id="stTime" value="${esc(ui.draftTask.time||"")}" oninput="App.draft('task','time',this.value)"></div>
+      </div>
       <button class="btn ink" onclick="App.addSchoolTask()">Add task</button>
     </div>` : `<button class="btn soft" style="margin-top:12px" onclick="App.stForm(true)">+ Add a task</button>`;
     if (ui.schoolShowDone){
@@ -2178,7 +2182,7 @@ function renderSchool(){
         const soon = t.due && t.due === todayISO();
         return `<div class="todo-row">
           <button class="todo-check" onclick="App.toggleSchoolTask('${t.id}', true)"></button>
-          <span class="todo-text">${esc(t.text)}${t.due?`<div style="font-size:11px;font-family:var(--mono);font-weight:700;color:#C92A2A">${overdue?"overdue · ":""}${dueLabel(t.due)}</div>`:""}</span>
+          <span class="todo-text">${esc(t.text)}${t.due?`<div style="font-size:11px;font-family:var(--mono);font-weight:700;color:#C92A2A">${overdue?"overdue · ":""}${dueLabelT(t.due, t.dueTime)}</div>`:""}</span>
           <button class="todo-x" onclick="App.delSchoolTask('${t.id}')">✕</button>
         </div>`;
       }).join("");
@@ -2243,28 +2247,31 @@ function renderSchool(){
           }).join("")}
           ${evs.map(e=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-top:1px solid var(--grid)">
             <div><div style="font-weight:700;font-size:14px">${DATE_KINDS[e.kind]?.icon||"\u{1F4CC}"} ${esc(e.title)}</div>
-              <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(e.classId))}</div></div>
+              <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(e.classId))}${e.time?` \u00B7 ${fmtTime(e.time)}`:""}</div></div>
             ${delBtn("sd-"+e.id, `App.delSchoolDate('${e.id}')`)}
           </div>`).join("")}
           ${tsks.map(t=>`<div style="padding:6px 0;border-top:1px solid var(--grid)">
             <div style="font-weight:700;font-size:14px">\u2713 ${esc(t.text)}</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(t.classId))} · task due</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(t.classId))} · due${t.dueTime?` ${fmtTime(t.dueTime)}`:""}</div>
           </div>`).join("")}
         </div>`;
       }
     }
     // ---- Upcoming: tasks + graded dates, soonest first, undated last ----
     const items = [
-      ...data.school.tasks.filter(t=>!t.done).map(t=>({kind:"task", id:t.id, title:t.text, classId:t.classId, due:t.due||null, icon:"\u2713"})),
+      ...data.school.tasks.filter(t=>!t.done).map(t=>({kind:"task", id:t.id, title:t.text, classId:t.classId, due:t.due||null, time:t.dueTime||null, icon:"\u2713"})),
       ...data.school.dates.filter(x=>x.kind!=="dayoff" && x.date >= todayISO())
-        .map(x=>({kind:"date", id:x.id, title:x.title, classId:x.classId, due:x.date, icon:DATE_KINDS[x.kind]?.icon||"\u{1F4CC}"})),
+        .map(x=>({kind:"date", id:x.id, title:x.title, classId:x.classId, due:x.date, time:x.time||null, icon:DATE_KINDS[x.kind]?.icon||"\u{1F4CC}"})),
       ...data.school.assignments.filter(a=>a.earned==null && a.due && a.due >= todayISO())
-        .map(a=>({kind:"assign", id:a.id, title:a.name, classId:a.classId, due:a.due, icon:"\u{1F4C4}"})),
+        .map(a=>({kind:"assign", id:a.id, title:a.name, classId:a.classId, due:a.due, time:null, icon:"\u{1F4C4}"})),
     ].sort((a,b)=>{
       if (!a.due && !b.due) return 0;
       if (!a.due) return 1;          // undated go last
       if (!b.due) return -1;
-      return a.due < b.due ? -1 : 1;
+      if (a.due !== b.due) return a.due < b.due ? -1 : 1;
+      // same day: timed items first in clock order, untimed at the end of that day
+      const at = a.time || "99:99", bt = b.time || "99:99";
+      return at < bt ? -1 : at > bt ? 1 : 0;
     });
     html += `<div class="lbl" style="margin:2px 0 6px">Upcoming</div>`;
     if (!items.length){
@@ -2279,7 +2286,7 @@ function renderSchool(){
             <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(it.classId))}</div>
           </div>
           <div style="font-family:var(--mono);font-size:12px;font-weight:700;white-space:nowrap;color:${it.due?"#C92A2A":"var(--sub)"}">
-            ${it.due ? (overdue?"overdue · ":"") + dueLabel(it.due) : "no due date"}
+            ${it.due ? (overdue?"overdue · ":"") + dueLabelT(it.due, it.time) : "no due date"}
           </div>
         </div>`;
       }).join("");
@@ -2303,6 +2310,10 @@ function renderSchool(){
       <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end">
         <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${esc(ui.draftDate.from||ui.schoolSel||todayISO())}" oninput="App.draft('date','from',this.value)"></div>
         <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd" value="${esc(ui.draftDate.to||"")}" oninput="App.draft('date','to',this.value)"></div>
+      </div>
+      <div style="margin-bottom:8px">
+        <div class="lbl">Time <span style="text-transform:none;letter-spacing:0">(optional)</span></div>
+        <input type="time" id="sdTime" value="${esc(ui.draftDate.time||"")}" oninput="App.draft('date','time',this.value)">
       </div>
       <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-bottom:8px">set an end date to block off a whole break at once</div>
       <div id="sdClassWrap" style="${ui.sdKind==="dayoff"?"display:none":""}">
@@ -3044,6 +3055,8 @@ function renderProgress(){
     </div>
     <div style="text-align:center;margin-top:14px">
       <button id="updBtn" class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub);font-size:13px;padding:9px" onclick="App.checkUpdate()">Check for update</button>
+      ${ui.updateReady ? `<button class="btn ink" style="margin-top:8px" onclick="App.forceUpdate()">Update to v${ui.updateReady} now</button>
+        <div class="note" style="margin-top:6px">if it still shows the old version afterwards, force-close the app and reopen</div>` : ""}
       <div class="note" style="margin-top:8px">${ui.updateMsg || ("Training Log — v"+APP_VERSION)}</div>
     </div>`;
   return html;
@@ -3340,7 +3353,10 @@ window.App = {
     if (!text){ toast("Type the task first", true); return; }
     const classId = ui.classPick.task || null;
     if (!classId){ toast("Choose a class first", true); return; }
-    data.school.tasks.unshift({ id:uid(), text, classId, due:($("#stDue")?.value || ui.draftTask.due || null), done:false, createdAt:Date.now() });
+    data.school.tasks.unshift({ id:uid(), text, classId,
+      due:($("#stDue")?.value || ui.draftTask.due || null),
+      dueTime:($("#stTime")?.value || ui.draftTask.time || null),
+      done:false, createdAt:Date.now() });
     ui.draftTask = {};
     save(); toast("Task added \u2713"); render();
     setTimeout(()=>{ const el=$("#stText"); if(el) el.focus(); }, 40);
@@ -3375,7 +3391,9 @@ window.App = {
     const groupId = days > 1 ? uid() : null;
     for (let i=0;i<days;i++){
       const iso = isoFromDate(new Date(sy, sm-1, sd+i));
-      data.school.dates.push({ id:uid(), groupId, title, kind, date:iso, classId: kind==="dayoff" ? null : classId });
+      data.school.dates.push({ id:uid(), groupId, title, kind, date:iso,
+        time: ($("#sdTime")?.value || ui.draftDate.time || null),
+        classId: kind==="dayoff" ? null : classId });
     }
     ui.sdFormOpen = false; ui.draftDate = {};
     save(); toast(days>1 ? `Added ${days} days \u2713` : "Date added \u2713"); render();
@@ -3737,7 +3755,7 @@ window.App = {
 
   // update check
   async checkUpdate(){
-    ui.updateMsg = "Checking…"; render();
+    ui.updateMsg = "Checking…"; ui.updateReady = null; render();
     try {
       const url = location.pathname + "?v=" + Date.now();
       const res = await fetch(url, {cache:"no-store"});
@@ -3746,14 +3764,24 @@ window.App = {
       const latest = m ? +m[1] : null;
       if (latest == null){ ui.updateMsg = "Couldn't read latest version"; render(); return; }
       if (latest > APP_VERSION){
-        ui.updateMsg = `Update available: v${latest} (you're on v${APP_VERSION}). Force-close and reopen the app; if it sticks, delete the home-screen icon and re-add it.`;
+        ui.updateReady = latest;
+        ui.updateMsg = `Update available: v${latest} (you're on v${APP_VERSION})`;
       } else {
-        ui.updateMsg = `You're up to date — v${APP_VERSION} ✓`;
+        ui.updateReady = null;
+        ui.updateMsg = `You're up to date — v${APP_VERSION} \u2713`;
       }
       render();
     } catch(e){
       ui.updateMsg = "Check failed — need an internet connection"; render();
     }
+  },
+  async forceUpdate(){
+    ui.updateMsg = "Updating…"; render();
+    // clear anything cached by the browser that we're able to reach from here
+    try { if (window.caches){ const keys = await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k))); } } catch(e){}
+    try { if (navigator.serviceWorker){ const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r=>r.unregister())); } } catch(e){}
+    // load the page again under a URL the cache has never seen — forces a fresh download
+    location.replace(location.pathname + "?u=" + Date.now());
   },
 
   // backup
