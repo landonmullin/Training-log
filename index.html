@@ -156,7 +156,8 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 65;
+const APP_VERSION = 66;
+const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
@@ -224,6 +225,24 @@ if (!data.settings.xpStart){ // XP counts only from the first run of this versio
 if (!data.settings.cardioTypes) data.settings.cardioTypes = Object.fromEntries(Object.keys(TYPE_META).map(k=>[k,true]));
 for (const k of Object.keys(TYPE_META)) if (typeof data.settings.cardioTypes[k]==="undefined") data.settings.cardioTypes[k]=true;
 
+// the in-progress workout survives an accidental close / crash
+function persistDraft(){
+  try {
+    const d = ui.draft;
+    if (d && (d.exercises.length || (d.notes||"").trim() || d.split)) localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch(e){}
+}
+function clearDraft(){ try { localStorage.removeItem(DRAFT_KEY); } catch(e){} }
+function loadDraft(){
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || !Array.isArray(d.exercises)) return null;
+    return { date: d.date || todayISO(), split: d.split || "", exercises: d.exercises, notes: d.notes || "" };
+  } catch(e){ return null; }
+}
 let bkPushing = false;
 function save(){
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
@@ -1402,7 +1421,7 @@ const ui = {
   schoolShowDoneFlag: false, gradingId: null,
   classPick: {}, classPickerOpen: null, classSearch: "", focusClassSearch: false,
   groceryLists: null, groceryItems: null, groceryOpenId: null, groceryNewOpen: false, groceryPick: [],
-  updateMsg: null, updateReady: null,
+  updateMsg: null, updateReady: null, draftRestored: false,
   payPeriod: null, payHoursMode: "direct", payYtdOpen: false, payFormOpen: false,
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
@@ -1519,7 +1538,7 @@ function renderCalendar(){
       const open = ui.expandedLifts.has(w.id);
       detail += `<div class="card" style="border-left:4px solid ${sp?sp.color:"#9AA4B5"};padding:${open?"14px":"12px 14px"}">
         <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="App.toggleLift('${w.id}')">
-          <div class="h2" style="margin:0">${sp?sp.name.toUpperCase()+" DAY":"LIFTING SESSION"}</div>
+          <div class="h2" style="margin:0">${sp?sp.name.toUpperCase()+" DAY":"LIFTING SESSION"}${!w.split?` <span style="font-family:var(--mono);font-size:10px;font-weight:400;color:var(--sub);text-transform:none;letter-spacing:0">untagged</span>`:""}</div>
           <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${open?"▾ hide":`${w.exercises.length} movement${w.exercises.length>1?"s":""} ▸`}</span>
         </div>
         ${open?`
@@ -1527,6 +1546,14 @@ function renderCalendar(){
           ${ex.sets.map(s=>`<div style="font-family:var(--mono);font-size:13px;padding:2px 0 0 10px">${s.weight} lb × ${s.reps}${s.rpe?`<span style="color:var(--sub)"> @ RPE ${s.rpe}</span>`:""}</div>`).join("")}
         </div>`).join("")}
         ${w.notes?`<div style="margin-top:10px;font-size:13px;color:var(--sub);font-style:italic">${esc(w.notes)}</div>`:""}
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--grid)">
+          <div class="lbl" style="margin-bottom:6px">${w.split?"Change tag":"Tag this workout"}</div>
+          <div class="seg" style="margin-bottom:0">
+            ${activeSplitKeys().map(k=>`<button class="${w.split===k?"on "+SPLITS[k].cls:""}" onclick="App.tagLift('${w.id}','${k}')">${SPLITS[k].name}</button>`).join("")}
+            ${w.split?`<button onclick="App.tagLift('${w.id}','')">Clear</button>`:""}
+          </div>
+          ${w.split && !activeSplitKeys().includes(w.split) ? `<div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">currently tagged ${SPLITS[w.split].name} — from your other split style</div>` : ""}
+        </div>
         <div style="text-align:right;margin-top:10px">${delBtn(`L${w.id}`, `App.delLift('${w.id}')`, "delete session")}</div>
         `:""}
       </div>`;
@@ -1665,6 +1692,10 @@ function lastPerfHTML(name){
 }
 function renderLift(){
   const d = ui.draft;
+  const restoreNote = ui.draftRestored && d.exercises.length ? `<div class="card" style="background:#FFF8E6;border-color:#E0C878;display:flex;justify-content:space-between;align-items:center;gap:10px">
+    <div style="font-size:13px;color:#7a5c00">Picked up your unsaved workout from ${d.date===todayISO()?"earlier":shortDate(d.date)}.</div>
+    <button style="background:none;border:none;color:#7a5c00;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" onclick="App.dismissRestore()">got it</button>
+  </div>` : "";
   let html = `<div class="card"><div class="lbl">Date</div>
     <input type="date" value="${d.date}" onchange="App.draftDate(this.value)"></div>
     <div class="card"><div class="lbl">Split</div>
@@ -1672,7 +1703,7 @@ function renderLift(){
         ${activeSplitKeys().map(k=>`<button class="${d.split===k?"on "+SPLITS[k].cls:""}" onclick="App.setSplit('${k}')">${SPLITS[k].name}</button>`).join("")}
       </div></div>`;
   d.exercises.forEach((ex,ei)=>{
-    html += `<div class="card" style="border-left:4px solid ${d.split?SPLITS[d.split].color:"var(--push)"}">
+    html += restoreNote + `<div class="card" style="border-left:4px solid ${d.split?SPLITS[d.split].color:"var(--push)"}">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
         <div class="h2" style="margin:0">${esc(ex.name)}</div>
         <button class="del" onclick="App.rmExercise(${ei})">remove</button>
@@ -1701,7 +1732,8 @@ function renderLift(){
   if (d.exercises.length){
     html += `<div class="card"><div class="lbl">Session notes (optional)</div>
       <input value="${esc(d.notes)}" placeholder="Felt strong, slept 8 hrs…" oninput="App.draftNotes(this.value)"></div>
-      <button class="btn" style="background:${d.split?SPLITS[d.split].color:"var(--push)"};color:#fff" onclick="App.saveLift()">Save workout</button>`;
+      <button class="btn" style="background:${d.split?SPLITS[d.split].color:"var(--push)"};color:#fff" onclick="App.saveLift()">Save workout</button>
+      ${d.exercises.length?`<div style="text-align:center;margin-top:8px">${delBtn("discard-draft","App.discardDraft()","discard this workout")}</div>`:""}`;
   }
   return html;
 }
@@ -3191,23 +3223,31 @@ window.App = {
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
 
   // lift
-  draftDate(v){ ui.draft.date=v; },
-  draftNotes(v){ ui.draft.notes=v; },
-  setSplit(s){ ui.draft.split = ui.draft.split===s ? "" : s; render(); },
+  dismissRestore(){ ui.draftRestored = false; render(); },
+  discardDraft(){
+    if (!confirmDel("discard-draft")) return;
+    ui.draft = {date:todayISO(), split:"", exercises:[], notes:""};
+    ui.draftRestored = false;
+    clearDraft(); toast("Draft cleared"); render();
+  },
+  draftDate(v){ ui.draft.date=v; persistDraft(); },
+  draftNotes(v){ ui.draft.notes=v; persistDraft(); },
+  setSplit(s){ ui.draft.split = ui.draft.split===s ? "" : s; persistDraft(); render(); },
   openPicker(){ ui.pickerOpen=true; ui.search=""; ui.focusSearch=true; render(); },
   closePicker(){ ui.pickerOpen=false; ui.search=""; render(); },
   searchEx(v){ ui.search=v; $("#exMatches").innerHTML = matchesHTML(); },
-  addExercise(name){ ui.draft.exercises.push({name, sets:[{w:"",r:"",rpe:""}]}); ui.pickerOpen=false; ui.search=""; render(); },
+  addExercise(name){ ui.draft.exercises.push({name, sets:[{w:"",r:"",rpe:""}]}); ui.pickerOpen=false; ui.search=""; persistDraft(); render(); },
   addCustom(){
     const name = ui.search.trim(); if(!name) return;
     data.customExercises.push(name); save();
     App.addExercise(name);
   },
-  setField(ei,si,f,v){ ui.draft.exercises[ei].sets[si][f]=v; },
-  addSet(ei){ const sets=ui.draft.exercises[ei].sets; sets.push({...sets[sets.length-1]}); render(); },
+  setField(ei,si,f,v){ ui.draft.exercises[ei].sets[si][f]=v; persistDraft(); },
+  addSet(ei){ const sets=ui.draft.exercises[ei].sets; sets.push({...sets[sets.length-1]}); persistDraft(); render(); },
   rmSet(ei,si){
     ui.draft.exercises[ei].sets.splice(si,1);
     if (!ui.draft.exercises[ei].sets.length) ui.draft.exercises.splice(ei,1);
+    persistDraft();
     render();
   },
   rmExercise(ei){ ui.draft.exercises.splice(ei,1); render(); },
@@ -3221,7 +3261,16 @@ window.App = {
     data.lifts.push({id:uid(), date:d.date, split:d.split||null, exercises:cleaned, notes:d.notes.trim()});
     save();
     ui.draft = {date:todayISO(), split:"", exercises:[], notes:""};
+    clearDraft();
     toast("Workout saved ✓"); render();
+  },
+  tagLift(id, split){
+    const w = data.lifts.find(x=>x.id===id);
+    if (!w) return;
+    w.split = split || null;
+    save();
+    toast(split ? `Tagged as ${SPLITS[split].name} \u2713` : "Tag removed");
+    render();
   },
   delLift(id){ if(!confirmDel("L"+id))return; data.lifts=data.lifts.filter(w=>w.id!==id); save(); toast("Session deleted"); render(); },
 
@@ -3966,6 +4015,8 @@ $("#importFile").addEventListener("change", async e=>{
   e.target.value = "";
 });
 
+const restoredDraft = loadDraft();
+if (restoredDraft){ ui.draft = restoredDraft; ui.draftRestored = true; }
 touchStreak();
 applyTheme();
 render();
