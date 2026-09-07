@@ -156,7 +156,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 66;
+const APP_VERSION = 68;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
@@ -229,7 +229,8 @@ for (const k of Object.keys(TYPE_META)) if (typeof data.settings.cardioTypes[k]=
 function persistDraft(){
   try {
     const d = ui.draft;
-    if (d && (d.exercises.length || (d.notes||"").trim() || d.split)) localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+    if (d && (d.exercises.length || (d.notes||"").trim() || d.split))
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...d, savedAt: Date.now() }));
     else localStorage.removeItem(DRAFT_KEY);
   } catch(e){}
 }
@@ -239,8 +240,12 @@ function loadDraft(){
     const raw = localStorage.getItem(DRAFT_KEY);
     if (!raw) return null;
     const d = JSON.parse(raw);
-    if (!d || !Array.isArray(d.exercises)) return null;
-    return { date: d.date || todayISO(), split: d.split || "", exercises: d.exercises, notes: d.notes || "" };
+    if (!d || !Array.isArray(d.exercises) || !d.exercises.length) { localStorage.removeItem(DRAFT_KEY); return null; }
+    // an unfinished workout is only meaningful for a little while — drop anything older than a day
+    if (!d.savedAt || Date.now() - d.savedAt > 24*3600*1000){ localStorage.removeItem(DRAFT_KEY); return null; }
+    // never inherit a stale date: a workout you're finishing now belongs to today
+    const staleDate = d.date && d.date !== todayISO() ? d.date : null;
+    return { date: todayISO(), split: d.split || "", exercises: d.exercises, notes: d.notes || "", _staleDate: staleDate };
   } catch(e){ return null; }
 }
 let bkPushing = false;
@@ -1256,6 +1261,19 @@ async function crewFetchStats(){
   ui.crewStats = snap.docs.map(d=>({uid:d.id, ...d.data()}));
   ui.crewStatsAt = Date.now();
 }
+// pull an event back out of the feed (local + crew) when the thing it announced is deleted
+async function removeEventFor(eid){
+  const had = (data.events || []).some(e => e.eid === eid);
+  if (had){ data.events = data.events.filter(e => e.eid !== eid); save(); }
+  if (!data.crew?.code) return;
+  try {
+    const {db} = await fbInit();
+    const snap = await db.collection("crews").doc(data.crew.code).collection("events")
+      .where("eid","==",eid).get();
+    for (const doc of snap.docs) await doc.ref.delete();
+    ui.crewEvents = (ui.crewEvents||[]).filter(e => e.eid !== eid);
+  } catch(e){}
+}
 async function crewPushEvents(){
   if (!data.crew?.code) return;
   const pending = (data.events || []).filter(e => !e.pushed && !e.local);
@@ -1287,12 +1305,6 @@ async function crewFetchGroceryItems(listId){
     .doc(listId).collection("items").orderBy("createdAt","asc").limit(300).get();
   ui.groceryItems = snap.docs.map(d=>({id:d.id, ...d.data()}));
 }
-async function crewFetchTodos(){
-  const {db} = await fbInit();
-  const snap = await db.collection("crews").doc(data.crew.code).collection("todos")
-    .orderBy("createdAt","desc").limit(50).get();
-  ui.crewTodos = snap.docs.map(d=>({id:d.id, ...d.data()}));
-}
 async function crewSync(manual){
   if (!data.crew?.code) return;
   try {
@@ -1301,7 +1313,6 @@ async function crewSync(manual){
     await crewPushEvents();
     await crewFetchStats();
     await crewFetchEvents();
-    if (ui.tab==="todo" && ui.todoTab!=="grocery") await crewFetchTodos();
     if (ui.tab==="todo" && ui.todoTab==="grocery"){
       await crewFetchGrocery();
       if (ui.groceryOpenId) await crewFetchGroceryItems(ui.groceryOpenId);
@@ -1413,7 +1424,7 @@ const ui = {
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
   todoTab: "open",
   openMaps: new Set(),
-  crewStats: null, crewStatsAt: null, crewTodos: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
+  crewStats: null, crewStatsAt: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
   crewEvents: null,
   bkList: null, bkBusy: false, wtTable: "daily",
   eventsOpen: false,
@@ -1542,8 +1553,9 @@ function renderCalendar(){
           <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${open?"▾ hide":`${w.exercises.length} movement${w.exercises.length>1?"s":""} ▸`}</span>
         </div>
         ${open?`
-        ${w.exercises.map(ex=>`<div style="margin-top:10px"><div style="font-weight:700;font-size:14px">${esc(ex.name)}</div>
-          ${ex.sets.map(s=>`<div style="font-family:var(--mono);font-size:13px;padding:2px 0 0 10px">${s.weight} lb × ${s.reps}${s.rpe?`<span style="color:var(--sub)"> @ RPE ${s.rpe}</span>`:""}</div>`).join("")}
+        ${w.exercises.map((ex,exi)=>`<div style="margin-top:10px">
+          <div style="font-weight:700;font-size:14px">${esc(ex.name)}${exi>0 && w.exercises[exi-1].ss?` <span style="font-family:var(--mono);font-size:10px;font-weight:400;color:var(--sub)">superset</span>`:""}</div>
+          ${ex.sets.map(s=>`<div style="font-family:var(--mono);font-size:13px;padding:2px 0 0 ${s.drop?"22px":"10px"};color:${s.drop?"var(--sub)":"var(--ink)"}">${s.drop?"\u21B3 ":""}${s.weight} lb × ${s.reps}${s.rpe?`<span style="color:var(--sub)"> @ RPE ${s.rpe}</span>`:""}</div>`).join("")}
         </div>`).join("")}
         ${w.notes?`<div style="margin-top:10px;font-size:13px;color:var(--sub);font-style:italic">${esc(w.notes)}</div>`:""}
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--grid)">
@@ -1692,9 +1704,11 @@ function lastPerfHTML(name){
 }
 function renderLift(){
   const d = ui.draft;
-  const restoreNote = ui.draftRestored && d.exercises.length ? `<div class="card" style="background:#FFF8E6;border-color:#E0C878;display:flex;justify-content:space-between;align-items:center;gap:10px">
-    <div style="font-size:13px;color:#7a5c00">Picked up your unsaved workout from ${d.date===todayISO()?"earlier":shortDate(d.date)}.</div>
-    <button style="background:none;border:none;color:#7a5c00;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" onclick="App.dismissRestore()">got it</button>
+  const restoreNote = ui.draftRestored && d.exercises.length ? `<div class="card" style="background:#FFF8E6;border-color:#E0C878">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div style="font-size:13px;color:#7a5c00">Picked up an unsaved workout${d._staleDate?` you started ${shortDate(d._staleDate)}`:""} — it'll save as <b>today</b> unless you change the date.</div>
+      <button style="background:none;border:none;color:#7a5c00;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" onclick="App.dismissRestore()">got it</button>
+    </div>
   </div>` : "";
   let html = `<div class="card"><div class="lbl">Date</div>
     <input type="date" value="${d.date}" onchange="App.draftDate(this.value)"></div>
@@ -1702,23 +1716,30 @@ function renderLift(){
       <div class="seg" style="margin-bottom:0">
         ${activeSplitKeys().map(k=>`<button class="${d.split===k?"on "+SPLITS[k].cls:""}" onclick="App.setSplit('${k}')">${SPLITS[k].name}</button>`).join("")}
       </div></div>`;
+  html += restoreNote;
   d.exercises.forEach((ex,ei)=>{
-    html += restoreNote + `<div class="card" style="border-left:4px solid ${d.split?SPLITS[d.split].color:"var(--push)"}">
+    html += `<div class="card" style="border-left:4px solid ${d.split?SPLITS[d.split].color:"var(--push)"}">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
-        <div class="h2" style="margin:0">${esc(ex.name)}</div>
-        <button class="del" onclick="App.rmExercise(${ei})">remove</button>
+        <div class="h2" style="margin:0">${esc(ex.name)}${ei>0 && d.exercises[ei-1].ss?` <span style="font-family:var(--mono);font-size:10px;font-weight:400;color:var(--sub);text-transform:none;letter-spacing:0">superset</span>`:""}</div>
+        <div style="display:flex;gap:12px;align-items:baseline">
+          ${ei < d.exercises.length-1 ? `<button class="del" style="color:${ex.ss?"var(--cardio)":"var(--sub)"}" onclick="App.toggleSuperset(${ei})">${ex.ss?"\u21C4 superset":"superset"}</button>` : ""}
+          <button class="del" onclick="App.rmExercise(${ei})">remove</button>
+        </div>
       </div>
       ${lastPerfHTML(ex.name)}
       <div class="setgrid">
         <div class="hd">SET</div><div class="hd">WEIGHT (LB)</div><div class="hd">REPS</div><div class="hd">RPE</div><div></div>
         ${ex.sets.map((s,si)=>`
-          <div style="font-size:13px;color:var(--sub)">${si+1}</div>
+          <div style="font-size:13px;color:${s.drop?"var(--push)":"var(--sub)"}" onclick="App.toggleDrop(${ei},${si})" title="tap to mark a drop set">${s.drop?"\u21B3":ex.sets.slice(0,si+1).filter(x=>!x.drop).length}</div>
           <input type="number" inputmode="decimal" value="${s.w}" placeholder="185" oninput="App.setField(${ei},${si},'w',this.value)">
           <input type="number" inputmode="numeric" value="${s.r}" placeholder="5" oninput="App.setField(${ei},${si},'r',this.value)">
           <input type="number" inputmode="decimal" value="${s.rpe}" placeholder="8" min="1" max="10" step="0.5" oninput="App.setField(${ei},${si},'rpe',this.value)">
           <button class="xbtn" onclick="App.rmSet(${ei},${si})">×</button>`).join("")}
       </div>
-      <button class="btn soft" style="margin-top:10px" onclick="App.addSet(${ei})">+ Add set</button>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn soft" style="flex:2" onclick="App.addSet(${ei})">+ Add set</button>
+        <button class="btn soft" style="flex:1;font-size:13px" onclick="App.addDropSet(${ei})">+ Drop</button>
+      </div>
     </div>`;
   });
   if (!ui.pickerOpen)
@@ -2164,22 +2185,11 @@ function classMatchesHTML(ctx){
   if (!list.length && !q) h += `<div style="font-size:12px;color:var(--sub);padding:8px 4px">No classes yet — type a name above to create your first one.</div>`;
   return h;
 }
-function renderSchool(){
-  const tab = ui.schoolTab || "tasks";
-  const classes = schoolClasses();
-  let html = `<div class="seg">
-    <button class="${tab==="cal"?"on":""}" onclick="App.schoolTab('cal')">Upcoming</button>
-    <button class="${tab==="tasks"?"on":""}" onclick="App.schoolTab('tasks')">Tasks</button>
-    <button class="${tab==="grades"?"on":""}" onclick="App.schoolTab('grades')">Grades</button>
-  </div>`;
-
-  // ================= TASKS =================
-  if (tab === "tasks"){
-    const open = data.school.tasks.filter(t=>!t.done);
-    const done = data.school.tasks.filter(t=>t.done).sort((a,b)=>(b.doneAt||"")<(a.doneAt||"")?-1:1);
-    const taskForm = ui.stFormOpen ? `<div class="card" style="border-left:4px solid var(--ink);margin-top:12px">
+function taskFormHTML(){
+  const editing = !!ui.draftTask.id;
+  return `<div class="card" style="border-left:4px solid var(--ink);margin:${editing?"-2px 0 10px":"0 0 12px"}">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span class="lbl" style="margin:0">${ui.draftTask.id?"Edit task":"New task"}</span>
+        <span class="lbl" style="margin:0">${editing?"Edit task":"New task"}</span>
         <button onclick="App.stForm(false)" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
       </div>
       <input id="stText" placeholder="e.g. Read chapter 4" enterkeyhint="done" style="margin:6px 0 8px"
@@ -2193,8 +2203,51 @@ function renderSchool(){
         <div style="flex:1"><div class="lbl">Time <span style="text-transform:none;letter-spacing:0">(optional)</span></div>
           <input type="time" id="stTime" value="${esc(ui.draftTask.time||"")}" oninput="App.draft('task','time',this.value)"></div>
       </div>
-      <button class="btn ink" onclick="App.addSchoolTask()">${ui.draftTask.id?"Save changes":"Add task"}</button>
-    </div>` : `<button class="btn soft" style="margin-top:12px" onclick="App.stForm(true)">+ Add a task</button>`;
+      <button class="btn ink" onclick="App.addSchoolTask()">${editing?"Save changes":"Add task"}</button>
+    </div>`;
+}
+function dateFormHTML(){
+  const editing = !!ui.draftDate.id;
+  return `<div class="card" style="border-left:4px solid var(--ink);margin:${editing?"-2px 0 10px":"0 0 12px"}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span class="lbl" style="margin:0">${editing?"Edit date":"Add an important date"}</span>
+        <button onclick="App.sdForm(false)" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
+      </div>
+      <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px"
+        value="${esc(ui.draftDate.title||"")}" oninput="App.draft('date','title',this.value)">
+      <select id="sdKind" onchange="App.sdKind(this.value)" style="margin-bottom:8px">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}" ${ui.sdKind===k?"selected":""}>${v.icon} ${v.label}</option>`).join("")}</select>
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${esc(ui.draftDate.from||ui.schoolSel||todayISO())}" oninput="App.draft('date','from',this.value)"></div>
+        <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd" value="${esc(ui.draftDate.to||"")}" oninput="App.draft('date','to',this.value)"></div>
+      </div>
+      <div style="margin-bottom:8px">
+        <div class="lbl">Time <span style="text-transform:none;letter-spacing:0">(optional)</span></div>
+        <input type="time" id="sdTime" value="${esc(ui.draftDate.time||"")}" oninput="App.draft('date','time',this.value)">
+      </div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-bottom:8px">set an end date to block off a whole break at once</div>
+      <div id="sdClassWrap" style="${ui.sdKind==="dayoff"?"display:none":""}">
+        <div class="lbl">Class</div>
+        <div style="margin:4px 0 10px">${classFieldHTML("date")}</div>
+      </div>
+      <button class="btn ink" onclick="App.addSchoolDate()">${editing?"Save changes":"Add date"}</button>
+    </div>`;
+}
+// the edit form for a specific item renders directly under that item
+const inlineTaskEdit = id => (ui.stFormOpen && ui.draftTask.id === id) ? taskFormHTML() : "";
+const inlineDateEdit = id => (ui.sdFormOpen && ui.draftDate.id === id) ? dateFormHTML() : "";
+function renderSchool(){
+  const tab = ui.schoolTab || "tasks";
+  const classes = schoolClasses();
+  let html = `<div class="seg">
+    <button class="${tab==="cal"?"on":""}" onclick="App.schoolTab('cal')">Upcoming</button>
+    <button class="${tab==="tasks"?"on":""}" onclick="App.schoolTab('tasks')">Tasks</button>
+    <button class="${tab==="grades"?"on":""}" onclick="App.schoolTab('grades')">Grades</button>
+  </div>`;
+
+  // ================= TASKS =================
+  if (tab === "tasks"){
+    const open = data.school.tasks.filter(t=>!t.done);
+    const done = data.school.tasks.filter(t=>t.done).sort((a,b)=>(b.doneAt||"")<(a.doneAt||"")?-1:1);
     if (ui.schoolShowDone){
       html += `<div class="lbl" style="margin:12px 0 6px">Completed (${done.length})</div>`;
       html += done.slice(0,40).map(t=>`<div class="todo-row completed">
@@ -2205,11 +2258,14 @@ function renderSchool(){
       html += `<div style="text-align:center;margin-top:8px"><button style="background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer" onclick="App.schoolShowDone(false)">← back to open tasks</button></div>`;
       return html;
     }
+    // add button / new-task form at the top (hidden while editing an existing one inline)
+    if (ui.stFormOpen && !ui.draftTask.id) html += taskFormHTML();
+    else if (!ui.stFormOpen) html += `<button class="btn soft" style="margin-bottom:12px" onclick="App.stForm(true)">+ Add a task</button>`;
     // group open tasks by class, sorted by due date
     const byClass = {};
     open.forEach(t=>{ (byClass[t.classId||""] = byClass[t.classId||""] || []).push(t); });
     const order = Object.keys(byClass).sort((a,b)=>className(a).localeCompare(className(b)));
-    if (!open.length) html += `<div class="card muted">No open tasks. Add one above.</div>`;
+    if (!open.length && !ui.stFormOpen) html += `<div class="card muted">No open tasks.</div>`;
     order.forEach(cid=>{
       const list = byClass[cid].sort((a,b)=>(a.due||"9999")<(b.due||"9999")?-1:1);
       html += `<div class="lbl" style="margin:14px 0 6px;color:${classColor(cid)}">${esc(className(cid))}</div>`;
@@ -2223,10 +2279,9 @@ function renderSchool(){
           </div>`,
           `<button style="background:var(--cardio)" onclick="App.editTask('${t.id}')">Edit</button>
            <button style="background:var(--danger)" onclick="App.delSchoolTask('${t.id}')">Delete</button>`
-        );
+        ) + inlineTaskEdit(t.id);
       }).join("");
     });
-    html += taskForm;
     html += `<div style="text-align:center;margin-top:12px"><button style="background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer" onclick="App.schoolShowDone(true)">completed tasks (${done.length}) →</button></div>`;
     return html;
   }
@@ -2288,13 +2343,16 @@ function renderSchool(){
             </div>`;
           }).join("")}
           ${evs.map(e=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-top:1px solid var(--grid)">
-            <div><div style="font-weight:700;font-size:14px">${DATE_KINDS[e.kind]?.icon||"\u{1F4CC}"} ${esc(e.title)}</div>
-              <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(e.classId))}${e.time?` \u00B7 ${fmtTime(e.time)}`:""}</div></div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <button class="todo-check" style="width:22px;height:22px;font-size:12px;${e.done?"background:#2B8A3E;border-color:#2B8A3E":""}" onclick="App.toggleSchoolDate('${e.id}', ${e.done?"false":"true"})">${e.done?"\u2713":""}</button>
+              <div><div style="font-weight:700;font-size:14px;${e.done?"text-decoration:line-through;color:var(--sub)":""}">${DATE_KINDS[e.kind]?.icon||"\u{1F4CC}"} ${esc(e.title)}</div>
+                <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(e.classId))}${e.time?` \u00B7 ${fmtTime(e.time)}`:""}${e.done?" \u00B7 done":""}</div></div>
+            </div>
             <div style="display:flex;gap:10px;align-items:center">
               <button style="background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer" onclick="App.editDate('${e.id}')">edit</button>
               ${delBtn("sd-"+e.id, `App.delSchoolDate('${e.id}')`)}
             </div>
-          </div>`).join("")}
+          </div>${inlineDateEdit(e.id)}`).join("")}
           ${tsks.map(t=>`<div style="padding:6px 0;border-top:1px solid var(--grid)">
             <div style="font-weight:700;font-size:14px">\u2713 ${esc(t.text)}</div>
             <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(t.classId))} · due${t.dueTime?` ${fmtTime(t.dueTime)}`:""}</div>
@@ -2305,7 +2363,7 @@ function renderSchool(){
     // ---- Upcoming: tasks + graded dates, soonest first, undated last ----
     const items = [
       ...data.school.tasks.filter(t=>!t.done).map(t=>({kind:"task", id:t.id, title:t.text, classId:t.classId, due:t.due||null, time:t.dueTime||null, icon:"\u2713"})),
-      ...data.school.dates.filter(x=>x.kind!=="dayoff" && x.date >= todayISO())
+      ...data.school.dates.filter(x=>x.kind!=="dayoff" && !x.done && x.date >= todayISO())
         .map(x=>({kind:"date", id:x.id, title:x.title, classId:x.classId, due:x.date, time:x.time||null, icon:DATE_KINDS[x.kind]?.icon||"\u{1F4CC}"})),
       ...data.school.assignments.filter(a=>a.earned==null && a.due && a.due >= todayISO())
         .map(a=>({kind:"assign", id:a.id, title:a.name, classId:a.classId, due:a.due, time:null, icon:"\u{1F4C4}"})),
@@ -2318,6 +2376,9 @@ function renderSchool(){
       const at = a.time || "99:99", bt = b.time || "99:99";
       return at < bt ? -1 : at > bt ? 1 : 0;
     });
+    // add-date button / new-date form at the top (hidden while editing inline)
+    if (ui.sdFormOpen && !ui.draftDate.id) html += dateFormHTML();
+    else if (!ui.sdFormOpen) html += `<button class="btn soft" style="margin-bottom:12px" onclick="App.sdForm(true)">+ Add an important date</button>`;
     html += `<div style="display:flex;justify-content:space-between;align-items:baseline;margin:2px 0 6px">
       <span class="lbl" style="margin:0">Upcoming</span>
       <span style="font-family:var(--mono);font-size:10px;color:var(--sub)">swipe a row to edit</span>
@@ -2328,7 +2389,8 @@ function renderSchool(){
       html += items.slice(0,20).map(it=>{
         const overdue = it.due && it.due < todayISO();
         const inner = `<div style="padding:11px 14px;border-left:4px solid ${classColor(it.classId)};display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--line);border-left-width:4px;border-radius:12px">
-          ${it.kind==="task" ? `<button class="todo-check" style="width:24px;height:24px;font-size:13px" onclick="App.toggleSchoolTask('${it.id}', true)"></button>` : ""}
+          ${it.kind==="task" ? `<button class="todo-check" style="width:24px;height:24px;font-size:13px" onclick="App.toggleSchoolTask('${it.id}', true)"></button>`
+            : it.kind==="date" ? `<button class="todo-check" style="width:24px;height:24px;font-size:13px" onclick="App.toggleSchoolDate('${it.id}', true)"></button>` : ""}
           <div style="flex:1;min-width:0">
             <div style="font-weight:700;font-size:14px">${it.kind==="task"?"":it.icon+" "}${esc(it.title)}</div>
             <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(className(it.classId))}</div>
@@ -2340,43 +2402,15 @@ function renderSchool(){
         if (it.kind === "assign") return `<div style="margin-bottom:8px">${inner}</div>`;
         const fn = it.kind==="task" ? "editTask" : "editDate";
         const del = it.kind==="task" ? "delSchoolTask" : "delSchoolDate";
+        const inlineEdit = it.kind==="task" ? inlineTaskEdit(it.id) : inlineDateEdit(it.id);
         return swipeRow(inner,
           `<button style="background:var(--cardio)" onclick="App.${fn}('${it.id}')">Edit</button>
-           <button style="background:var(--danger)" onclick="App.${del}('${it.id}')">Delete</button>`);
+           <button style="background:var(--danger)" onclick="App.${del}('${it.id}')">Delete</button>`) + inlineEdit;
       }).join("");
     }
 
     html += calCard + dayCard;
 
-    // add form (collapsed)
-    if (!ui.sdFormOpen){
-      html += `<button class="btn soft" style="margin-top:12px" onclick="App.sdForm(true)">+ Add an important date</button>`;
-      html += `<div style="height:4px"></div>`;
-    } else {
-    html += `<div class="card" style="border-left:4px solid var(--ink);margin-top:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span class="lbl" style="margin:0">${ui.draftDate.id?"Edit date":"Add an important date"}</span>
-        <button onclick="App.sdForm(false)" style="background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer">cancel</button>
-      </div>
-      <input id="sdTitle" placeholder="e.g. Midterm 1" style="margin:6px 0 8px"
-        value="${esc(ui.draftDate.title||"")}" oninput="App.draft('date','title',this.value)">
-      <select id="sdKind" onchange="App.sdKind(this.value)" style="margin-bottom:8px">${Object.entries(DATE_KINDS).map(([k,v])=>`<option value="${k}" ${ui.sdKind===k?"selected":""}>${v.icon} ${v.label}</option>`).join("")}</select>
-      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:flex-end">
-        <div style="flex:1"><div class="lbl">${ui.sdKind==="dayoff"?"From":"Date"}</div><input type="date" id="sdDate" value="${esc(ui.draftDate.from||ui.schoolSel||todayISO())}" oninput="App.draft('date','from',this.value)"></div>
-        <div style="flex:1"><div class="lbl">To <span style="text-transform:none;letter-spacing:0">(optional)</span></div><input type="date" id="sdEnd" value="${esc(ui.draftDate.to||"")}" oninput="App.draft('date','to',this.value)"></div>
-      </div>
-      <div style="margin-bottom:8px">
-        <div class="lbl">Time <span style="text-transform:none;letter-spacing:0">(optional)</span></div>
-        <input type="time" id="sdTime" value="${esc(ui.draftDate.time||"")}" oninput="App.draft('date','time',this.value)">
-      </div>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-bottom:8px">set an end date to block off a whole break at once</div>
-      <div id="sdClassWrap" style="${ui.sdKind==="dayoff"?"display:none":""}">
-        <div class="lbl">Class</div>
-        <div style="margin:4px 0 10px">${classFieldHTML("date")}</div>
-      </div>
-      <button class="btn ink" onclick="App.addSchoolDate()">${ui.draftDate.id?"Save changes":"Add date"}</button>
-    </div>`;
-    }
     return html;
   }
 
@@ -2615,15 +2649,14 @@ function renderTodo(){
   const open = data.todos.filter(t=>!t.done);
   const done = data.todos.filter(t=>t.done).sort((a,b)=>(b.doneAt||0)-(a.doneAt||0));
   const inCrew = !!data.crew?.code;
-  let html = (ui.todoTab!=="crew" && ui.todoTab!=="grocery") ? `<div class="card" style="border-left:4px solid var(--ink)">
+  let html = (ui.todoTab!=="grocery") ? `<div class="card" style="border-left:4px solid var(--ink)">
     <div class="lbl">Add tasks — press return to add and keep typing</div>
     <input id="todoInput" placeholder="What do you need to do?" enterkeyhint="done"
       onkeydown="if(event.key==='Enter'){event.preventDefault();App.addTodo(this);}">
   </div>` : "";
   html += `<div class="seg">
-    <button class="${ui.todoTab!=="done"&&ui.todoTab!=="crew"&&ui.todoTab!=="grocery"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
+    <button class="${ui.todoTab!=="done"&&ui.todoTab!=="grocery"?"on":""}" onclick="App.todoTab('open')">To do${open.length?` (${open.length})`:""}</button>
     <button class="${ui.todoTab==="done"?"on":""}" onclick="App.todoTab('done')">Completed${done.length?` (${done.length})`:""}</button>
-    ${inCrew?`<button class="${ui.todoTab==="crew"?"on":""}" onclick="App.todoTab('crew')">Crew</button>`:""}
     ${inCrew?`<button class="${ui.todoTab==="grocery"?"on":""}" onclick="App.todoTab('grocery')">Grocery</button>`:""}
   </div>`;
   if (ui.todoTab==="grocery"){
@@ -2708,34 +2741,6 @@ function renderTodo(){
         </button>`;
       }).join("");
     }
-    html += `<button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="App.crewSyncNow()">Refresh</button>`;
-    return html;
-  }
-  if (ui.todoTab==="crew"){
-    if (!ui.crewTodos){ crewFetchTodos().then(()=>render()).catch(()=>{ ui.crewTodos=[]; render(); }); }
-    const members = (ui.crewStats||[]).filter(s=>s.uid!==myUid());
-    html += `<div class="card" style="border-left:4px solid #B08D2F">
-      <div class="lbl">Assign a task</div>
-      <input id="crewTodoInput" placeholder="What needs doing?" enterkeyhint="done" style="margin-bottom:8px"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();App.crewAddTodo(this);}">
-      <select id="crewAssign">
-        <option value="all">Everyone</option>
-        ${myUid()?`<option value="${myUid()}">Me (${esc(data.crew.name)})</option>`:""}
-        ${members.map(m=>`<option value="${m.uid}">${esc(m.name||"?")}</option>`).join("")}
-      </select>
-    </div>`;
-    const ct = ui.crewTodos || [];
-    const openC = ct.filter(t=>!t.done), doneC = ct.filter(t=>t.done).slice(0,10);
-    html += openC.map(t=>`<div class="todo-row" id="ctodo-${t.id}">
-      <button class="todo-check" onclick="App.crewToggleTodo('${t.id}', true)"></button>
-      <span class="todo-text">${esc(t.text)}<div style="font-size:11px;color:var(--sub);font-family:var(--mono)">${esc(t.createdByName||"?")} → ${esc(t.assignedToName||"Everyone")}</div></span>
-    </div>`).join("");
-    if (ui.crewTodos && !openC.length) html += `<div class="card muted">No open crew tasks.</div>`;
-    if (!ui.crewTodos) html += `<div class="card muted">Loading crew tasks…</div>`;
-    html += doneC.map(t=>`<div class="todo-row completed">
-      <button class="todo-check" onclick="App.crewToggleTodo('${t.id}', false)">✓</button>
-      <span class="todo-text">${esc(t.text)}<div style="font-size:11px;color:var(--sub);font-family:var(--mono);text-decoration:none">done by ${esc(t.doneBy||"?")}</div></span>
-    </div>`).join("");
     html += `<button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-top:8px" onclick="App.crewSyncNow()">Refresh</button>`;
     return html;
   }
@@ -3243,7 +3248,15 @@ window.App = {
     App.addExercise(name);
   },
   setField(ei,si,f,v){ ui.draft.exercises[ei].sets[si][f]=v; persistDraft(); },
-  addSet(ei){ const sets=ui.draft.exercises[ei].sets; sets.push({...sets[sets.length-1]}); persistDraft(); render(); },
+  addSet(ei){ const sets=ui.draft.exercises[ei].sets; sets.push({...sets[sets.length-1], drop:false}); persistDraft(); render(); },
+  addDropSet(ei){
+    const sets = ui.draft.exercises[ei].sets;
+    const prev = sets[sets.length-1] || {w:"",r:"",rpe:""};
+    sets.push({ w:prev.w, r:"", rpe:"", drop:true });   // same weight to start; you drop it from there
+    persistDraft(); render();
+  },
+  toggleDrop(ei,si){ const s=ui.draft.exercises[ei].sets[si]; s.drop=!s.drop; persistDraft(); render(); },
+  toggleSuperset(ei){ const ex=ui.draft.exercises[ei]; ex.ss=!ex.ss; persistDraft(); render(); },
   rmSet(ei,si){
     ui.draft.exercises[ei].sets.splice(si,1);
     if (!ui.draft.exercises[ei].sets.length) ui.draft.exercises.splice(ei,1);
@@ -3255,7 +3268,8 @@ window.App = {
     const d = ui.draft;
     const cleaned = d.exercises.map(ex=>({
       name: ex.name,
-      sets: ex.sets.filter(s=>s.w!==""&&s.r!=="").map(s=>({weight:+s.w, reps:+s.r, rpe:s.rpe===""?null:+s.rpe}))
+      ss: !!ex.ss,
+      sets: ex.sets.filter(s=>s.w!==""&&s.r!=="").map(s=>({weight:+s.w, reps:+s.r, rpe:s.rpe===""?null:+s.rpe, drop:!!s.drop}))
     })).filter(ex=>ex.sets.length);
     if (!cleaned.length){ toast("Add at least one set with weight and reps", true); return; }
     data.lifts.push({id:uid(), date:d.date, split:d.split||null, exercises:cleaned, notes:d.notes.trim()});
@@ -3272,7 +3286,13 @@ window.App = {
     toast(split ? `Tagged as ${SPLITS[split].name} \u2713` : "Tag removed");
     render();
   },
-  delLift(id){ if(!confirmDel("L"+id))return; data.lifts=data.lifts.filter(w=>w.id!==id); save(); toast("Session deleted"); render(); },
+  delLift(id){
+    if(!confirmDel("L"+id))return;
+    data.lifts=data.lifts.filter(w=>w.id!==id);
+    save(); removeEventFor(id);
+    if (data.crew?.code) crewPushStats().catch(()=>{});
+    toast("Session deleted"); render();
+  },
 
   // cardio
   cardioList(v){ ui.cardioList=v; render(); },
@@ -3338,7 +3358,7 @@ window.App = {
     data.settings.maxHr = (isFinite(v) && v>=120 && v<=230) ? v : null;
     save(); toast(data.settings.maxHr ? "Max HR saved ✓" : "Max HR cleared"); render();
   },
-  delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); toast("Activity deleted"); render(); },
+  delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); removeEventFor(id); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Activity deleted"); render(); },
 
   // food
   toggleFoodManual(){ ui.foodManualOpen=!ui.foodManualOpen; render(); },
@@ -3429,13 +3449,12 @@ window.App = {
     const key = which==="task" ? "draftTask" : which==="date" ? "draftDate" : "draftSched";
     ui[key][field] = val;   // stored without re-rendering, so typing is never interrupted
   },
-  sdForm(v){ ui.sdFormOpen = v; ui.draftDate = {}; render(); },
-  stForm(v){ ui.stFormOpen = v; ui.draftTask = {}; render(); },
+  sdForm(v){ ui.sdFormOpen = v; ui.draftDate = {}; if(v) ui.stFormOpen=false; render(); },
+  stForm(v){ ui.stFormOpen = v; ui.draftTask = {}; if(v) ui.sdFormOpen=false; render(); },
   editTask(id){
     const t = data.school.tasks.find(x=>x.id===id);
     if (!t) return;
-    ui.schoolTab = "tasks";
-    ui.stFormOpen = true;
+    ui.stFormOpen = true; ui.sdFormOpen = false;
     ui.draftTask = { id:t.id, text:t.text, due:t.due||"", time:t.dueTime||"" };
     if (t.classId) ui.classPick.task = t.classId; else delete ui.classPick.task;
     render();
@@ -3445,8 +3464,7 @@ window.App = {
     const x = data.school.dates.find(y=>y.id===id);
     if (!x) return;
     const grp = x.groupId ? data.school.dates.filter(y=>y.groupId===x.groupId).map(y=>y.date).sort() : [x.date];
-    ui.schoolTab = "cal";
-    ui.sdFormOpen = true;
+    ui.sdFormOpen = true; ui.stFormOpen = false;
     ui.sdKind = x.kind;
     ui.draftDate = { id:x.id, groupId:x.groupId||null, title:x.title, from:grp[0], to:grp.length>1?grp[grp.length-1]:"", time:x.time||"" };
     if (x.classId) ui.classPick.date = x.classId; else delete ui.classPick.date;
@@ -3515,6 +3533,13 @@ window.App = {
     render();
   },
   delSchoolTask(id){ data.school.tasks = data.school.tasks.filter(x=>x.id!==id); save(); render(); },
+  toggleSchoolDate(id, done){
+    const x = data.school.dates.find(y=>y.id===id);
+    if (!x) return;
+    x.done = !!done;
+    if (done){ x.doneAt = todayISO(); ding(); } else delete x.doneAt;
+    save(); render();
+  },
   addSchoolDate(){
     const title = (($("#sdTitle")?.value ?? ui.draftDate.title) || "").trim();
     if (!title){ toast("Name the date first", true); return; }
@@ -3664,7 +3689,7 @@ window.App = {
   },
   crewLeave(){
     if (!confirmDel("crew-leave")) return;
-    delete data.crew.code; ui.crewStats = null; ui.crewTodos = null;
+    delete data.crew.code; ui.crewStats = null;
     save(); toast("Left crew"); render();
   },
   crewSyncNow(){ crewSync(true); },
@@ -3690,22 +3715,6 @@ window.App = {
   },
   crewMetric(m){ ui.crewMetric = m; render(); },
   crewPeriod(p){ ui.crewPeriod = p; render(); },
-  async crewAddTodo(inputEl){
-    const text = inputEl.value.trim();
-    if (!text) return;
-    const assignedTo = $("#crewAssign").value;
-    try {
-      const {db, uid} = await fbInit();
-      await db.collection("crews").doc(data.crew.code).collection("todos").add({
-        text, createdBy: uid, createdByName: data.crew.name,
-        assignedTo, assignedToName: assignedTo==="all" ? "Everyone" : (ui.crewStats?.find(s=>s.uid===assignedTo)?.name || "?"),
-        done:false, createdAt: Date.now()
-      });
-      inputEl.value = ""; inputEl.focus();
-      await crewFetchTodos(); render();
-      setTimeout(()=>{ const el=$("#crewTodoInput"); if(el) el.focus(); }, 50);
-    } catch(e){ toast("Couldn't add — check connection", true); }
-  },
   // grocery lists (shared with chosen crew members)
   groceryNew(){ ui.groceryNewOpen = !ui.groceryNewOpen; ui.groceryPick = []; render(); },
   groceryTogglePick(u){
@@ -3801,15 +3810,6 @@ window.App = {
     } catch(e){ toast("Couldn't clear — check connection", true); }
   },
 
-  async crewToggleTodo(id, done){
-    try {
-      const {db} = await fbInit();
-      if (done) ding();
-      await db.collection("crews").doc(data.crew.code).collection("todos").doc(id)
-        .update({ done, doneBy: done ? data.crew.name : null, doneAt: done ? Date.now() : null });
-      await crewFetchTodos(); render();
-    } catch(e){ toast("Couldn't update — check connection", true); }
-  },
 
   // pay
   payNav(startIso){ ui.payPeriod = payPeriodStart(startIso); render(); },
