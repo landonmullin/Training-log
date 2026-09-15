@@ -21,9 +21,18 @@ function localHour(tz) {
 const fmtTime = t => {
   if (!t) return "";
   const [h, m] = t.split(":").map(Number);
-  return ` ${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, "0")}${h >= 12 ? "pm" : "am"}`;
+  const hh = h % 12 === 0 ? 12 : h % 12;
+  return `${hh}${m ? ":" + String(m).padStart(2, "0") : ""}${h >= 12 ? "pm" : "am"}`;
 };
-const line = it => `${it.title} (${it.cls})${fmtTime(it.time)}`;
+// "Homework 1 - 10am"; timed items first in clock order, untimed after
+const sortByTime = items => [...items].sort((a, b) => {
+  if (!a.time && !b.time) return 0;
+  if (!a.time) return 1;
+  if (!b.time) return -1;
+  return a.time < b.time ? -1 : a.time > b.time ? 1 : 0;
+});
+const line = it => it.time ? `${it.title} - ${fmtTime(it.time)}` : it.title;
+const section = items => sortByTime(items).map(line).join("\n");
 
 const SEND_HOUR = 8;               // local time to deliver
 const FORCE = process.env.FORCE === "1";   // manual test run: ignore the hour + once-a-day guard, send to everyone
@@ -47,26 +56,18 @@ for (const doc of snap.docs) {
   const dueTomorrow = items.filter(i => i.date === tomorrow);
   if (!FORCE && !dueToday.length && !dueTomorrow.length) { await doc.ref.set({ lastSent: today }, { merge: true }); skipped++; continue; }
 
-  const parts = [];
-  if (dueToday.length) parts.push("Today: " + dueToday.map(line).join(" · "));
-  if (dueTomorrow.length) parts.push("Tomorrow: " + dueTomorrow.map(line).join(" · "));
-  const n = dueToday.length + dueTomorrow.length;
-  const payload = JSON.stringify(n ? {
-    title: `📚 ${n} thing${n > 1 ? "s" : ""} coming up`,
-    body: parts.join("\n"),
-    tag: "school-" + today,
-    url: "./"
-  } : {
-    title: "📚 Training Log",
-    body: "Test from the server: reminders are wired up. Nothing due today or tomorrow.",
-    tag: "test-" + Date.now(),
-    url: "./"
-  });
+  // one notification per day that has something due, in the user's clean format
+  const sends = [];
+  if (dueToday.length)    sends.push({ title: "Due today:",    body: section(dueToday),    tag: "due-today-" + today });
+  if (dueTomorrow.length) sends.push({ title: "Due tomorrow:", body: section(dueTomorrow), tag: "due-tomorrow-" + today });
+  if (!sends.length) sends.push({ title: "Training Log", body: "Reminders are working. Nothing due today or tomorrow.", tag: "test-" + Date.now() });
 
   try {
-    await webpush.sendNotification(u.sub, payload, { TTL: 6 * 3600 });
+    for (const n of sends) {
+      await webpush.sendNotification(u.sub, JSON.stringify({ ...n, url: "./" }), { TTL: 6 * 3600 });
+    }
     if (!FORCE) await doc.ref.set({ lastSent: today }, { merge: true });   // a test run never uses up the real 8am send
-    console.log("  → sent ✓"); sent++;
+    console.log(`  → sent ✓ (${sends.map(x => x.title).join(" + ")})`); sent++;
   } catch (err) {
     if (err.statusCode === 404 || err.statusCode === 410) { await doc.ref.delete(); removed++; } // subscription expired
     else { console.error("  → send FAILED:", err.statusCode, err.body || err.message); skipped++; }
