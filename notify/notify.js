@@ -26,41 +26,50 @@ const fmtTime = t => {
 const line = it => `${it.title} (${it.cls})${fmtTime(it.time)}`;
 
 const SEND_HOUR = 8;               // local time to deliver
+const FORCE = process.env.FORCE === "1";   // manual test run: ignore the hour + once-a-day guard, send to everyone
 const snap = await db.collection("push").get();
 let sent = 0, skipped = 0, removed = 0;
 
+console.log(`FORCE=${FORCE} · ${snap.size} subscriber doc(s)`);
 for (const doc of snap.docs) {
   const u = doc.data();
-  if (!u.sub || !u.sub.endpoint) { skipped++; continue; }
+  const hasSub = !!(u.sub && u.sub.endpoint);
+  console.log(`- ${doc.id}: name=${u.name||"?"} tz=${u.tz||"?"} sub=${hasSub?"yes":"MISSING"} items=${Array.isArray(u.items)?u.items.length:0} lastSent=${u.lastSent||"never"} keys=[${Object.keys(u).join(",")}]`);
+  if (!hasSub) { console.log("  → skipped: no push subscription stored (enable reminders in the app)"); skipped++; continue; }
   const tz = u.tz || "America/Chicago";
   const today = localDate(tz, 0), tomorrow = localDate(tz, 1);
   const hour = localHour(tz);
   // only deliver in the target hour, once per day
-  if (hour !== SEND_HOUR || u.lastSent === today) { skipped++; continue; }
+  if (!FORCE && (hour !== SEND_HOUR || u.lastSent === today)) { console.log(`  → skipped: local hour ${hour} (sends at ${SEND_HOUR}), lastSent=${u.lastSent||"never"}`); skipped++; continue; }
 
   const items = Array.isArray(u.items) ? u.items : [];
   const dueToday = items.filter(i => i.date === today);
   const dueTomorrow = items.filter(i => i.date === tomorrow);
-  if (!dueToday.length && !dueTomorrow.length) { await doc.ref.set({ lastSent: today }, { merge: true }); skipped++; continue; }
+  if (!FORCE && !dueToday.length && !dueTomorrow.length) { await doc.ref.set({ lastSent: today }, { merge: true }); skipped++; continue; }
 
   const parts = [];
   if (dueToday.length) parts.push("Today: " + dueToday.map(line).join(" · "));
   if (dueTomorrow.length) parts.push("Tomorrow: " + dueTomorrow.map(line).join(" · "));
   const n = dueToday.length + dueTomorrow.length;
-  const payload = JSON.stringify({
+  const payload = JSON.stringify(n ? {
     title: `📚 ${n} thing${n > 1 ? "s" : ""} coming up`,
     body: parts.join("\n"),
     tag: "school-" + today,
+    url: "./"
+  } : {
+    title: "📚 Training Log",
+    body: "Test from the server: reminders are wired up. Nothing due today or tomorrow.",
+    tag: "test-" + Date.now(),
     url: "./"
   });
 
   try {
     await webpush.sendNotification(u.sub, payload, { TTL: 6 * 3600 });
-    await doc.ref.set({ lastSent: today }, { merge: true });
-    sent++;
+    if (!FORCE) await doc.ref.set({ lastSent: today }, { merge: true });   // a test run never uses up the real 8am send
+    console.log("  → sent ✓"); sent++;
   } catch (err) {
     if (err.statusCode === 404 || err.statusCode === 410) { await doc.ref.delete(); removed++; } // subscription expired
-    else { console.error("send failed for", doc.id, err.statusCode, err.body || err.message); skipped++; }
+    else { console.error("  → send FAILED:", err.statusCode, err.body || err.message); skipped++; }
   }
 }
 console.log(`sent ${sent}, skipped ${skipped}, removed ${removed}`);
