@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F7F9FB">
 <link rel="apple-touch-icon" sizes="180x180" href="icon.png">
+<link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <title>Training Log</title>
@@ -156,7 +157,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 68;
+const APP_VERSION = 70;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
@@ -248,10 +249,14 @@ function loadDraft(){
     return { date: todayISO(), split: d.split || "", exercises: d.exercises, notes: d.notes || "", _staleDate: staleDate };
   } catch(e){ return null; }
 }
-let bkPushing = false;
+let bkPushing = false, pushItemsTimer = null;
 function save(){
   try { localStorage.setItem(KEY, JSON.stringify(data)); }
   catch(e){ toast("Couldn't save — storage full?", true); }
+  if (data.settings?.pushEnabled){
+    clearTimeout(pushItemsTimer);
+    pushItemsTimer = setTimeout(pushSyncItems, 4000); // one small write after you stop editing
+  }
 }
 // identity that survives a restore onto another device
 function myUid(){ return data.settings.userId || fb?.uid || null; }
@@ -767,12 +772,13 @@ function computeShift(s){
   const sales = +s.sales || 0;
   const tips = +s.tips || 0;
   const hourly = Math.round(hours*rate*100)/100;
+  const tipRate = sales > 0 ? Math.round(tips/sales*1000)/10 : null;   // tips as % of sales
   const tipout = Math.round(sales*0.02*100)/100;
   const finalTips = Math.round((tips - tipout)*100)/100;
   const gross = Math.round((hourly + finalTips)*100)/100;
   const taxes = Math.round(gross*0.20*100)/100;
   const net = Math.round((gross - taxes)*100)/100;
-  return { rate, hours, sales, tips, hourly, tipout, finalTips, gross, taxes, net };
+  return { rate, hours, sales, tips, hourly, tipout, finalTips, gross, taxes, net, tipRate };
 }
 function hoursBetween(inT, outT){
   if (!inT || !outT) return null;
@@ -1319,6 +1325,7 @@ async function crewSync(manual){
     }
     const lastBk = data.settings.cloudBackup?.at || 0;
     if (Date.now() - lastBk > 20*3600*1000) cloudBackup(false);
+    pushSyncItems();
     repairBirthdayEvents();
     if (manual) toast("Crew synced ✓");
     render();
@@ -1326,6 +1333,84 @@ async function crewSync(manual){
   } catch(e){ if (manual) toast("Crew sync failed — check connection", true); }
 }
 
+
+
+// ================= reminders (web push) =================
+const VAPID_PUBLIC = "BNAdUWt7aajWIowZt3k3vwiSVi9iQIhFs3JXXuuQZJyKs_-8RhvHU2U14XiIqeDuD3iwJgA82J7clLLK4-ISmE8";
+function b64ToU8(b64){
+  const pad = "=".repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g,"+").replace(/_/g,"/"));
+  return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+}
+function pushSupported(){
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+function pushStandalone(){
+  if (window.navigator.standalone === true) return true;
+  try { return !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches); } catch(e){ return false; }
+}
+async function pushRegisterSW(){
+  if (!("serviceWorker" in navigator)) return null;
+  try { return await navigator.serviceWorker.register("sw.js"); } catch(e){ return null; }
+}
+// what the sender needs: everything due in the next 14 days, in this user's timezone
+function reminderItems(){
+  const today = todayISO();
+  const [y,m,d] = today.split("-").map(Number);
+  const limit = isoFromDate(new Date(y, m-1, d+14));
+  const items = [];
+  (data.school.tasks||[]).filter(t=>!t.done && t.due && t.due >= today && t.due <= limit)
+    .forEach(t=>items.push({ title:t.text, date:t.due, time:t.dueTime||null, cls:className(t.classId), kind:"task" }));
+  (data.school.dates||[]).filter(x=>x.kind!=="dayoff" && !x.done && x.date >= today && x.date <= limit)
+    .forEach(x=>items.push({ title:x.title, date:x.date, time:x.time||null, cls:className(x.classId), kind:x.kind }));
+  (data.school.assignments||[]).filter(a=>a.earned==null && a.due && a.due >= today && a.due <= limit)
+    .forEach(a=>items.push({ title:a.name, date:a.due, time:null, cls:className(a.classId), kind:"assignment" }));
+  return items.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+}
+async function pushSyncItems(){
+  if (!data.settings.pushEnabled || !data.crew?.config) return;
+  try {
+    const {db} = await fbInit();
+    await db.collection("push").doc(myUid()).set({
+      items: reminderItems(),
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      name: data.crew?.name || "",
+      updatedAt: Date.now()
+    }, { merge: true });
+  } catch(e){}
+}
+async function pushEnable(){
+  if (!pushSupported()) { toast("Notifications aren't available in this browser", true); return false; }
+  if (!pushStandalone()) { toast("Add the app to your home screen first, then enable from there", true); return false; }
+  if (!data.crew?.config) { toast("Set up crew sync first (reminders use the same project)", true); return false; }
+  const reg = await pushRegisterSW();
+  if (!reg) { toast("Couldn't set up notifications", true); return false; }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("Notifications were blocked — allow them in iOS Settings", true); return false; }
+  try {
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:b64ToU8(VAPID_PUBLIC) });
+    const {db} = await fbInit();
+    await db.collection("push").doc(myUid()).set({
+      sub: JSON.parse(JSON.stringify(sub)),
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      name: data.crew?.name || "",
+      items: reminderItems(),
+      updatedAt: Date.now()
+    }, { merge: true });
+    data.settings.pushEnabled = true; save();
+    return true;
+  } catch(e){ toast("Subscription failed — check connection", true); return false; }
+}
+async function pushDisable(){
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe();
+    const {db} = await fbInit();
+    await db.collection("push").doc(myUid()).delete();
+  } catch(e){}
+  data.settings.pushEnabled = false; save();
+}
 
 // ================= cloud backup (uses the crew's Firebase project) =================
 const BK_CHUNK_BYTES = 350000; // well under Firestore's 1MB per-document ceiling
@@ -1418,7 +1503,7 @@ const ui = {
   selected: todayISO(),
   draft: { date: todayISO(), split:"", exercises:[], notes:"" },
   pickerOpen: false, search: "",
-  pending: [], manualOpen: false,
+  pending: [], manualOpen: false, manualType: "run",
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
@@ -1579,6 +1664,7 @@ function renderCalendar(){
         <div style="font-size:13px;color:var(--sub);margin-bottom:8px">${esc(c.name)}</div>
         <div class="stats">
           ${c.distanceMi>0?stat("dist", c.distanceMi+" mi"):""}${stat("time", fmtDur(c.durationSec))}${cardioPaceStat(c)}
+          ${c.speedMph?stat("speed", c.speedMph+" mph"):""}${c.inclinePct!=null?stat("incline", c.inclinePct+"%"):""}
           ${c.avgHr?stat("avg hr", c.avgHr):""}${c.maxHr?stat("max hr", c.maxHr):""}
         </div>
         ${c.hrHist?zoneBar(c.hrHist):""}
@@ -1804,10 +1890,16 @@ function renderCardio(){
   if (ui.manualOpen){
     html += `<div class="card">
       <div style="display:flex;gap:8px;margin-bottom:8px">
-        <select id="mType">${Object.entries(TYPE_META).filter(([k])=>data.settings.cardioTypes[k]).map(([k,v])=>`<option value="${k}">${v.emoji} ${v.label}</option>`).join("")}</select>
+        <select id="mType" onchange="App.manualType(this.value)">${Object.entries(TYPE_META).filter(([k])=>data.settings.cardioTypes[k]).map(([k,v])=>`<option value="${k}" ${ui.manualType===k?"selected":""}>${v.emoji} ${v.label}</option>`).join("")}</select>
         <input type="date" id="mDate" value="${todayISO()}">
       </div>
-      <div class="lbl">Distance (miles — optional for gym cardio)</div>
+      ${ui.manualType==="treadmill" ? `
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div style="flex:1"><div class="lbl">Speed (mph)</div><input class="mono" type="number" inputmode="decimal" id="mSpeed" placeholder="6.0" step="0.1"></div>
+        <div style="flex:1"><div class="lbl">Incline (%)</div><input class="mono" type="number" inputmode="decimal" id="mIncline" placeholder="1.0" step="0.5"></div>
+      </div>
+      <div class="lbl">Distance (miles — auto from speed × time if blank)</div>` : `
+      <div class="lbl">Distance (miles — optional for gym cardio)</div>`}
       <input class="mono" type="number" inputmode="decimal" id="mDist" placeholder="3.1" style="margin-bottom:8px">
       <div class="lbl">Time (h / m / s)</div>
       <div style="display:flex;gap:8px;margin-bottom:12px">
@@ -1832,7 +1924,7 @@ function renderCardio(){
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center">
             <div><div style="font-weight:700;font-size:14px">${tmeta(c.type).emoji} ${esc(c.name)}</div>
-              <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)}${c.distanceMi>0?` · ${c.distanceMi} mi`:""} · ${fmtDur(c.durationSec)}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
+              <div style="font-family:var(--mono);font-size:12px;color:var(--sub)">${shortDate(c.date)}${c.distanceMi>0?` · ${c.distanceMi} mi`:""} · ${fmtDur(c.durationSec)}${c.speedMph?` · ${c.speedMph} mph`:""}${c.inclinePct!=null?` · ${c.inclinePct}%`:""}${c.avgHr?` · ♥ ${c.avgHr}`:""}</div></div>
             <div style="font-family:var(--mono);font-size:13px;color:var(--cardio);font-weight:600">${cardioRight(c)}</div>
           </div>
           ${c.hrHist && data.settings.maxHr ? zoneBar(c.hrHist) : ""}
@@ -2052,8 +2144,9 @@ function renderPay(){
   const defaultShiftDate = (payPeriodStart(todayISO())===startIso) ? todayISO() : startIso;
   const shifts = data.shifts.filter(s=>payPeriodStart(s.date)===startIso).sort((a,b)=>a.date<b.date?-1:1);
   const tot = shifts.reduce((t,s)=>{ const c=computeShift(s);
-    t.hours+=c.hours; t.hourly+=c.hourly; t.finalTips+=c.finalTips; t.gross+=c.gross; t.taxes+=c.taxes; t.net+=c.net; return t;
-  }, {hours:0,hourly:0,finalTips:0,gross:0,taxes:0,net:0});
+    t.hours+=c.hours; t.hourly+=c.hourly; t.finalTips+=c.finalTips; t.gross+=c.gross; t.taxes+=c.taxes; t.net+=c.net; t.sales+=c.sales; t.tips+=c.tips; return t;
+  }, {hours:0,hourly:0,finalTips:0,gross:0,taxes:0,net:0,sales:0,tips:0});
+  tot.tipRate = tot.sales > 0 ? Math.round(tot.tips/tot.sales*1000)/10 : null;
   const [sy,sm,sd] = startIso.split("-").map(Number);
   const prev = isoFromDate(new Date(sy, sm-1, sd - 14));
   const nextStart = isoFromDate(new Date(sy, sm-1, sd + 14));
@@ -2061,8 +2154,9 @@ function renderPay(){
   // year-to-date totals across all shifts in the current calendar year
   const yr = new Date().getFullYear();
   const ytd = data.shifts.filter(s=>s.date.startsWith(yr+"-")).reduce((t,s)=>{
-    const c=computeShift(s); t.net+=c.net; t.gross+=c.gross; t.hours+=c.hours; t.finalTips+=c.finalTips; t.taxes+=c.taxes; t.shifts++; return t;
-  }, {net:0,gross:0,hours:0,finalTips:0,taxes:0,shifts:0});
+    const c=computeShift(s); t.net+=c.net; t.gross+=c.gross; t.hours+=c.hours; t.finalTips+=c.finalTips; t.taxes+=c.taxes; t.sales+=c.sales; t.tips+=c.tips; t.shifts++; return t;
+  }, {net:0,gross:0,hours:0,finalTips:0,taxes:0,sales:0,tips:0,shifts:0});
+  ytd.tipRate = ytd.sales > 0 ? Math.round(ytd.tips/ytd.sales*1000)/10 : null;
   let html = `<div class="card">
     <button onclick="App.payToggleYtd()" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:none;border:none;cursor:pointer;padding:0">
       <span style="font-size:14px;font-weight:600;color:var(--ink)">${yr} year to date</span>
@@ -2075,7 +2169,7 @@ function renderPay(){
       ${stat("hours", Math.round(ytd.hours*10)/10)}
       ${stat("taxes", money(ytd.taxes))}
     </div>
-    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${ytd.shifts} shift${ytd.shifts!==1?"s":""}${ytd.hours>0?` · effective ${money(ytd.net/ytd.hours)}/hr take-home`:""}</div>`:""}
+    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">${ytd.shifts} shift${ytd.shifts!==1?"s":""}${ytd.hours>0?` · effective ${money(ytd.net/ytd.hours)}/hr take-home`:""}${ytd.tipRate!=null?` · ${ytd.tipRate}% avg tip rate`:""}</div>`:""}
   </div>
   <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -2096,6 +2190,7 @@ function renderPay(){
       ${stat("gross", money(tot.gross))}
       ${stat("hours", (Math.round(tot.hours*10)/10))}
       ${stat("tips", money(tot.finalTips))}
+      ${tot.tipRate!=null?stat("tip rate", tot.tipRate+"%"):""}
       ${stat("taxes", money(tot.taxes))}
     </div>
   </div>`;
@@ -2143,7 +2238,7 @@ function renderPay(){
         <span style="font-family:var(--mono);font-weight:700;color:var(--pull)">${money(c.net)}</span>
       </div>
       <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:6px;line-height:1.7">
-        hourly ${money(c.hourly)} · sales ${money(c.sales)} · tips ${money(c.tips)} − tip-out ${money(c.tipout)} = ${money(c.finalTips)}<br>
+        hourly ${money(c.hourly)} · sales ${money(c.sales)} · tips ${money(c.tips)}${c.tipRate!=null?` <b style="color:${c.tipRate>=20?"#2B8A3E":c.tipRate>=15?"var(--ink)":"#E8590C"}">(${c.tipRate}%)</b>`:""} − tip-out ${money(c.tipout)} = ${money(c.finalTips)}<br>
         gross ${money(c.gross)} − tax ${money(c.taxes)} = <b style="color:var(--ink)">net ${money(c.net)}</b>
       </div>
       <div style="text-align:right;margin-top:6px">${delBtn("shift-"+s.id, `App.delShift('${s.id}')`)}</div>
@@ -2526,6 +2621,18 @@ function renderSettings(){
     `}
   </div>
   ${s.schoolEnabled ? `<div class="card">
+    <div class="lbl" style="margin-bottom:8px">Reminders</div>
+    <div style="font-size:13px;color:var(--sub);line-height:1.5;margin-bottom:10px">A morning notification listing anything due today and tomorrow — tasks, exams, quizzes, labs, assignments.</div>
+    ${s.pushEnabled ? `
+      <div style="font-size:14px;font-weight:600;color:#2B8A3E;margin-bottom:8px">\u2713 Reminders on</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">arrives around 8:30am · ${reminderItems().length} item${reminderItems().length!==1?"s":""} in the next two weeks</div>
+      <button class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pushToggle(false)">Turn off</button>
+    ` : `
+      <button class="btn ink" onclick="App.pushToggle(true)">Enable reminders</button>
+      ${!pushStandalone()?`<div style="font-family:var(--mono);font-size:10px;color:#E8590C;margin-top:8px">open from your home-screen icon to enable — Safari tabs can't receive notifications</div>`:""}
+    `}
+  </div>
+  <div class="card">
     <button onclick="App.schedSection()" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:none;border:none;cursor:pointer;padding:0">
       <span style="font-size:14px;font-weight:600;color:var(--ink)">Class schedule</span>
       <span style="font-family:var(--mono);font-size:12px;color:var(--sub)">${ui.schedOpen?"\u25BE hide":`${(data.school.schedule||[]).length} classes \u25B8`}</span>
@@ -3344,12 +3451,21 @@ window.App = {
     data.cardio.push({id:uid(), date:p.date, type:p.type, name:p.name, distanceMi:p.distanceMi, durationSec:p.durationSec, elevGainFt:p.elevGainFt, avgHr:p.avgHr||null, maxHr:p.maxHr||null, hrHist:p.hrHist||null, splits:p.splits||null, route:p.route||null, source:"strava-gpx"});
     save(); ui.pending.splice(i,1); toast("Activity saved ✓"); render();
   },
+  manualType(t){ ui.manualType = t; render(); },
   saveManual(){
-    const dist = parseFloat($("#mDist").value);
+    let dist = parseFloat($("#mDist").value);
     const dur = (+$("#mH").value||0)*3600 + (+$("#mM").value||0)*60 + (+$("#mS").value||0);
-    if (!(dist>0) && !(dur>0)){ toast("Enter a time or a distance", true); return; }
     const type = $("#mType").value;
-    data.cardio.push({id:uid(), date:$("#mDate").value, type, name:tmeta(type).label+" (manual)", distanceMi:dist>0?Math.round(dist*100)/100:0, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual"});
+    const extra = {};
+    if (type === "treadmill"){
+      const speed = parseFloat($("#mSpeed")?.value), incline = parseFloat($("#mIncline")?.value);
+      if (speed > 0) extra.speedMph = Math.round(speed*10)/10;
+      if (!isNaN(incline)) extra.inclinePct = Math.round(incline*10)/10;
+      if (!(dist>0) && speed > 0 && dur > 0) dist = speed * (dur/3600); // distance = speed × hours
+    }
+    if (!(dist>0) && !(dur>0)){ toast("Enter a time or a distance", true); return; }
+    data.cardio.push({id:uid(), date:$("#mDate").value, type, name:tmeta(type).label+" (manual)",
+      distanceMi:dist>0?Math.round(dist*100)/100:0, durationSec:dur>0?dur:null, elevGainFt:null, source:"manual", ...extra});
     save(); ui.manualOpen=false; toast("Activity saved ✓"); render();
   },
   toggleTargets(){ ui.targetsOpen=!ui.targetsOpen; render(); },
@@ -3421,6 +3537,12 @@ window.App = {
       toast("Birthday saved \u2713");
       render();
     } catch(e){ toast("Saved locally — couldn't reach the crew", true); }
+  },
+
+  async pushToggle(on){
+    if (on){ toast("Setting up…"); const ok = await pushEnable(); if (ok) toast("Reminders on \u2713"); }
+    else { await pushDisable(); toast("Reminders off"); }
+    render();
   },
 
   // school
@@ -4018,6 +4140,7 @@ $("#importFile").addEventListener("change", async e=>{
 const restoredDraft = loadDraft();
 if (restoredDraft){ ui.draft = restoredDraft; ui.draftRestored = true; }
 touchStreak();
+if (pushSupported()) pushRegisterSW();
 applyTheme();
 render();
 setTimeout(checkBirthdayCelebration, 900); // after crew data has a chance to load
