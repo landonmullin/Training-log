@@ -157,7 +157,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 70;
+const APP_VERSION = 71;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
@@ -2626,7 +2626,10 @@ function renderSettings(){
     ${s.pushEnabled ? `
       <div style="font-size:14px;font-weight:600;color:#2B8A3E;margin-bottom:8px">\u2713 Reminders on</div>
       <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:10px">arrives around 8:30am · ${reminderItems().length} item${reminderItems().length!==1?"s":""} in the next two weeks</div>
-      <button class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pushToggle(false)">Turn off</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="flex:1;background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.pushTest()">Send test</button>
+        <button class="btn" style="flex:1;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pushToggle(false)">Turn off</button>
+      </div>
     ` : `
       <button class="btn ink" onclick="App.pushToggle(true)">Enable reminders</button>
       ${!pushStandalone()?`<div style="font-family:var(--mono);font-size:10px;color:#E8590C;margin-top:8px">open from your home-screen icon to enable — Safari tabs can't receive notifications</div>`:""}
@@ -3539,6 +3542,17 @@ window.App = {
     } catch(e){ toast("Saved locally — couldn't reach the crew", true); }
   },
 
+  async pushTest(){
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg){ toast("Service worker not ready — reopen the app", true); return; }
+      if (Notification.permission !== "granted"){ toast("Notifications aren't allowed", true); return; }
+      const items = reminderItems();
+      const body = items.length ? "Next up: " + items.slice(0,3).map(i=>i.title).join(" · ") : "Notifications are working. Reminders arrive around 8am.";
+      await reg.showNotification("📚 Training Log test", { body, icon:"icon.png", badge:"icon.png", tag:"test" });
+      toast("Test sent — check your notifications");
+    } catch(e){ toast("Couldn't show a notification", true); }
+  },
   async pushToggle(on){
     if (on){ toast("Setting up…"); const ok = await pushEnable(); if (ok) toast("Reminders on \u2713"); }
     else { await pushDisable(); toast("Reminders off"); }
