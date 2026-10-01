@@ -1,0 +1,6 @@
+{"fdcId":2646170,"dataType":"Foundation","description":"Chicken, breast, boneless, skinless, raw",
+ "foodPortions":[
+  {"id":1,"amount":1,"gramWeight":140,"modifier":"","measureUnit":{"name":"cup","abbreviation":"cup"},"sequenceNumber":2},
+  {"id":2,"amount":1,"gramWeight":174,"modifier":"breast, bone and skin removed","measureUnit":{"name":"undetermined","abbreviation":"undetermined"},"sequenceNumber":1},
+  {"id":3,"amount":1,"gramWeight":0,"modifier":"","measureUnit":{"name":"undetermined"},"portionDescription":"Quantity not specified","sequenceNumber":3}
+ ]}

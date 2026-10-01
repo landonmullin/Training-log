@@ -26,6 +26,8 @@ def router(offline):
         url = route.request.url
         if url.startswith("http://127.0.0.1"): return route.continue_()
         if offline: return route.abort()
+        if "api.nal.usda.gov/fdc/v1/food/" in url:
+            return route.fulfill(status=200, content_type="application/json", body=fixture("usda-food-details.json"), headers=CORS)
         if "api.nal.usda.gov" in url:
             return route.fulfill(status=200, content_type="application/json", body=fixture("usda-search.json"), headers=CORS)
         if "openfoodfacts.org/cgi/search.pl" in url:
@@ -301,6 +303,56 @@ def deleted_food_entries_stay_editable(pw, url):
         pg.fill("#faQty", "100"); pg.click("#faSave")
         s = stored(pg)
         assert s["foodLog"][0]["kcal"] == 144 and s["foods"] == []
+
+@test
+def food_tab_charts_calories_only(pw, url):
+    seed = base(nutrition=[{"id": "n1", "date": "2026-09-27", "kcal": 2100, "protein": 150, "carbs": 200, "fat": 70, "fiber": 30, "source": "cronometer"},
+                           {"id": "n2", "date": "2026-09-28", "kcal": 2300, "protein": 160, "carbs": 210, "fat": 75, "fiber": 32, "source": "cronometer"}])
+    with app(pw, url, seed) as pg:
+        segs = " ".join(pg.locator("#view .seg").all_inner_texts())
+        assert "Protein" not in segs and "Carbs" not in segs
+        assert pg.locator("#view svg").count() >= 1
+        assert "recent days" in pg.inner_text("#view").lower()
+
+@test
+def search_input_stays_put_when_results_load(pw, url):
+    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed) as pg:
+        pg.click("#fdAdd")
+        y0 = pg.locator("#fdQuery").bounding_box()["y"]
+        pg.keyboard.type("yogurt")
+        pg.wait_for_selector("#fdResults :text('Nutella')")
+        box = pg.locator("#fdQuery").bounding_box()
+        assert abs(box["y"] - y0) < 1, (y0, box["y"])
+        assert box["y"] >= 0
+        assert pg.locator("#fdQuickLink").bounding_box()["y"] < pg.locator("#fdResults").bounding_box()["y"]
+
+@test
+def usda_food_without_servings_loads_them(pw, url):
+    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed) as pg:
+        pg.click("#fdAdd"); pg.keyboard.type("chicken")
+        pg.wait_for_selector("#fdResults :text('Chicken, breast')")
+        pg.click("#fdResults .fd-res:has-text('Chicken, breast')")
+        pg.wait_for_function("document.querySelectorAll('#faUnit option').length > 2")
+        opts = pg.locator("#faUnit option").all_inner_texts()
+        assert opts[:2] == ["1 breast, bone and skin removed", "1 cup"], opts
+        assert pg.input_value("#faUnit") == "p0" and pg.input_value("#faQty") == "1"
+        pg.click("#faSave")
+        s = stored(pg)
+        assert s["foodLog"][0]["kcal"] == 184 and len(s["foods"][0]["portions"]) == 2
+
+@test
+def push_sync_skips_unchanged_reminders(pw, url):
+    seed = base(); seed["settings"]["pushEnabled"] = True; seed["crew"] = {"config": {"apiKey": "x", "projectId": "p", "appId": "a"}}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("""() => { window.__writes = 0;
+          fbInit = async () => ({ db: { collection: () => ({ doc: () => ({ set: async () => { window.__writes++; } }) }) } }); }""")
+        pg.evaluate("pushSyncItems()"); pg.evaluate("pushSyncItems()")
+        assert pg.evaluate("window.__writes") == 1
+        pg.evaluate("data.school.tasks.push({id:'t1', text:'Lab report', due: todayISO(), done:false})")
+        pg.evaluate("pushSyncItems()")
+        assert pg.evaluate("window.__writes") == 2
 
 # --- tests above this line ---
 

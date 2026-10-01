@@ -73,3 +73,20 @@ test("URL builders encode the query and key", () => {
   assert.ok(C.offSearchURL("greek yogurt").includes("search_terms=greek%20yogurt"));
   assert.equal(C.offProductURL("0049000028911"), `https://world.openfoodfacts.org/api/v2/product/0049000028911.json?fields=${C.OFF_FIELDS}`);
 });
+
+test("parseUsdaPortions builds labels from a Foundation detail record", () => {
+  assert.deepEqual(C.parseUsdaPortions(fx("usda-food-details.json")), [
+    { label: "1 breast, bone and skin removed", grams: 174 }, { label: "1 cup", grams: 140 }]);
+});
+test("parseUsdaPortions handles SR Legacy modifiers, FNDDS descriptions and fractions", () => {
+  assert.deepEqual(C.parseUsdaPortions({ foodPortions: [
+    { amount: 1, modifier: "large", measureUnit: { name: "undetermined" }, gramWeight: 50, sequenceNumber: 1 },
+    { amount: 1, portionDescription: "1 hash brown", modifier: "", measureUnit: { name: "undetermined" }, gramWeight: 53, sequenceNumber: 2 },
+    { amount: 0.5, modifier: "", measureUnit: { name: "cup" }, gramWeight: 61, sequenceNumber: 3 },
+  ] }), [{ label: "1 large", grams: 50 }, { label: "1 hash brown", grams: 53 }, { label: "0.5 cup", grams: 61 }]);
+  assert.deepEqual(C.parseUsdaPortions({}), []);
+  assert.deepEqual(C.parseUsdaPortions(null), []);
+});
+test("usdaFoodURL points at the detail endpoint", () => {
+  assert.equal(C.usdaFoodURL("2646170", "k/1"), "https://api.nal.usda.gov/fdc/v1/food/2646170?api_key=k%2F1");
+});

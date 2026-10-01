@@ -135,6 +135,10 @@
   body.dark .leaflet-container{background:#1B2330}
   .fsheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,0.45);display:flex;align-items:flex-end}
   .fsheet .panel{background:var(--paper);width:100%;max-width:560px;margin:0 auto;max-height:88vh;overflow-y:auto;border-radius:16px 16px 0 0;padding:10px 14px calc(18px + env(safe-area-inset-bottom))}
+  /* search sheet: pinned to the top at a fixed height so loading results never moves the search box */
+  .fsheet.top{align-items:flex-start}
+  .fsheet .panel.tall{height:88vh;height:88dvh;max-height:none;display:flex;flex-direction:column;overflow:hidden;border-radius:0 0 16px 16px;padding-top:calc(10px + env(safe-area-inset-top))}
+  .fsheet .panel.tall #fdResults{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
   .fd-x{background:none;border:none;color:var(--sub);font-size:18px;padding:4px 8px;cursor:pointer}
   .fd-nav{background:none;border:1px solid var(--line);border-radius:8px;width:40px;height:34px;font-size:20px;line-height:1;color:var(--ink);cursor:pointer}
   .fd-nav:disabled{opacity:.3}
@@ -172,7 +176,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 72;
+const APP_VERSION = 73;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1382,16 +1386,18 @@ function reminderItems(){
     .forEach(a=>items.push({ title:a.name, date:a.due, time:null, cls:className(a.classId), kind:"assignment" }));
   return items.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
 }
+let pushLastSent = null; // skip the Firestore write when reminders haven't changed (most saves aren't school edits)
 async function pushSyncItems(){
   if (!data.settings.pushEnabled || !data.crew?.config) return;
+  const items = reminderItems();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const name = data.crew?.name || "";
+  const sig = JSON.stringify([items, tz, name]);
+  if (sig === pushLastSent) return;
   try {
     const {db} = await fbInit();
-    await db.collection("push").doc(myUid()).set({
-      items: reminderItems(),
-      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      name: data.crew?.name || "",
-      updatedAt: Date.now()
-    }, { merge: true });
+    await db.collection("push").doc(myUid()).set({ items, tz, name, updatedAt: Date.now() }, { merge: true });
+    pushLastSent = sig;
   } catch(e){}
 }
 async function pushEnable(){
@@ -1521,7 +1527,7 @@ const ui = {
   pending: [], manualOpen: false, manualType: "run",
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
-  foodMetric: "kcal", cardioList: "recent", targetsOpen: false,
+  cardioList: "recent", targetsOpen: false,
   foodDay: todayISO(), foodSheet: null, foodQuery: "", foodFocus: false, foodListMode: "recent", foodResults: [],
   foodRemote: { q: "", usda: [], off: [], status: "" }, foodPick: null, foodAmt: null, foodEdit: null,
   foodQuickPrefill: null, foodPrefill: null, foodEditFoodId: null, scanStatus: "",
@@ -2117,6 +2123,25 @@ function prefillFrom(food, barcode){
     servingLabel: p ? p.label : "100 g", servingGrams: food.servingOnly ? "" : grams,
     kcal: food.per100g.kcal == null ? "" : m.kcal, protein: m.protein, carbs: m.carbs, fat: m.fat, fiber: m.fiber };
 }
+function parseUsdaPortions(detail){
+  const out = [];
+  const list = [...((detail && detail.foodPortions) || [])].sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+  for (const p of list){
+    const g = fNum(p.gramWeight);
+    if (!(g > 0)) continue;
+    const desc = String(p.portionDescription || "").trim();
+    let label = desc && desc.toLowerCase() !== "quantity not specified" ? desc : "";
+    if (!label){
+      const unit = String(p.measureUnit?.name || "").trim();
+      label = [r1(fNum(p.amount) || 1), unit && unit !== "undetermined" ? unit : "", String(p.modifier || "").trim()].filter(Boolean).join(" ");
+    }
+    if (out.length < 8) out.push({ label, grams: r1(g) });
+  }
+  return out;
+}
+function usdaFoodURL(id, key){
+  return `https://api.nal.usda.gov/fdc/v1/food/${encodeURIComponent(id)}?api_key=${encodeURIComponent(key)}`;
+}
 // @food-core-end
 // ----- food log: app-level (reads/writes `data`) -----
 function refreshFoodDay(date){ data.nutrition = rebuildNutritionDay(data.nutrition, data.foodLog, date, uid); }
@@ -2238,11 +2263,11 @@ const foodSheetBodies = {
   search(){
     return `<div class="lbl">Add food · ${ui.foodDay === todayISO() ? "today" : esc(shortDate(ui.foodDay))}</div>
       <input id="fdQuery" value="${esc(ui.foodQuery)}" placeholder="Search foods…" autocomplete="off" autocorrect="off" oninput="App.foodQuery(this.value)">
-      <div id="fdResults">${foodResultsHTML()}</div>
-      <div id="fdLinks" style="display:flex;gap:16px;justify-content:center;margin-top:12px">
+      <div id="fdLinks" style="display:flex;gap:16px;justify-content:center;margin:4px 0">
         <button class="linkbtn" id="fdQuickLink" onclick="App.foodOpen('quick')">Quick add</button>
         <button class="linkbtn" id="fdCreateLink" onclick="App.foodOpen('create')">Create food</button>
-      </div>`;
+      </div>
+      <div id="fdResults">${foodResultsHTML()}</div>`;
   },
   amount(){
     const f = ui.foodPick, a = ui.foodAmt;
@@ -2308,9 +2333,26 @@ foodSheetBodies.create = function(){
 function foodSheetHTML(){
   const body = ui.foodSheet && foodSheetBodies[ui.foodSheet];
   if (!body) return "";
-  return `<div class="fsheet" onclick="if(event.target===this)App.foodClose()"><div class="panel" id="fdSheet">
+  const tall = ui.foodSheet === "search";
+  return `<div class="fsheet${tall ? " top" : ""}" onclick="if(event.target===this)App.foodClose()"><div class="panel${tall ? " tall" : ""}" id="fdSheet">
     <div style="display:flex;justify-content:flex-end"><button class="fd-x" onclick="App.foodClose()" aria-label="Close">✕</button></div>
     ${body()}</div></div>`;
+}
+// Search results omit serving sizes for some USDA foods; the detail record has them.
+async function loadUsdaPortions(f){
+  const key = (data.settings.usdaKey || "").trim();
+  if (!key || !f.sourceId) return;
+  let portions;
+  try { portions = parseUsdaPortions(await fetchJSON(usdaFoodURL(f.sourceId, key))); } catch (_) { return; }
+  if (!portions.length) return;
+  f.portions = portions.map(p => ({ ...p }));
+  const lib = data.foods.find(x => x.source === "usda" && x.sourceId === f.sourceId);
+  if (lib){ if (lib !== f) lib.portions = portions.map(p => ({ ...p })); save(); }
+  if (ui.foodSheet !== "amount" || ui.foodPick !== f) return;
+  const a = ui.foodAmt;
+  if (!ui.foodEdit && a.unit === "g" && a.qty === "100"){ a.unit = "p0"; a.qty = "1"; render(); return; }
+  const sel = $("#faUnit");
+  if (sel) sel.innerHTML = unitOptions(f).map(o => `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("");
 }
 async function fetchJSON(url, signal){
   const ctl = new AbortController();
@@ -2501,13 +2543,9 @@ function renderFood(){
       <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px">latest: ${prettyDate(latest.date)} — <span style="color:${kcalColor(latest.kcal)};font-weight:600">${latest.kcal} kcal</span> · P${latest.protein} C${latest.carbs} F${latest.fat}${s.kcalTarget?` · ${kcalDelta(latest.kcal)}`:""}</div>
     </div>`;
   }
-  html += `<div class="seg">
-    ${[["kcal","Calories"],["protein","Protein"],["carbs","Carbs"],["fat","Fat"]].map(([k,l])=>
-      `<button class="${ui.foodMetric===k?"on":""}" onclick="App.foodMetric('${k}')">${l}</button>`).join("")}
-  </div>`;
-  const chartRows = sorted.slice(-30).map(d=>({label:shortDate(d.date), value:d[ui.foodMetric]}));
-  const ref = ui.foodMetric==="kcal" ? s.kcalTarget : ui.foodMetric==="protein" ? s.proteinTarget : null;
-  html += `<div class="card">${lineChart(chartRows, "#2B8A3E",
+  const chartRows = sorted.slice(-30).map(d=>({label:shortDate(d.date), value:d.kcal}));
+  const ref = s.kcalTarget;
+  html += `<div class="card"><div class="lbl">Calories · last 30 logged days</div>${lineChart(chartRows, "#2B8A3E",
     {fmt:v=>Math.round(v), refLine:ref||null, emptyMsg:"Log foods on two days to draw a trend. Chart shows the last 30 logged days."})}</div>`;
   if (sorted.length){
     html += `<div class="h2">Recent days</div>` + [...sorted].reverse().slice(0,7).map(d=>`
@@ -3937,7 +3975,6 @@ window.App = {
   delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); removeEventFor(id); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Activity deleted"); render(); },
 
   // food
-  foodMetric(m){ ui.foodMetric=m; render(); },
   foodOpen(kind){
     ui.foodSheet = kind; ui.confirmKey = null;
     if (kind === "search"){ ui.foodQuery = ""; ui.foodFocus = true; ui.foodEdit = null; }
@@ -3955,6 +3992,7 @@ window.App = {
     ui.foodPick = f; ui.foodEdit = null;
     ui.foodAmt = { qty: first.key === "g" ? "100" : "1", unit: first.key, time: hhmmOf(new Date()) };
     ui.foodSheet = "amount"; render();
+    if (f.source === "usda" && !(f.portions || []).length) loadUsdaPortions(f);
   },
   foodAmt(field, value){
     ui.foodAmt[field] = value;
