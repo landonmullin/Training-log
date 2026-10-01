@@ -179,6 +179,51 @@ def edit_quick_add_entry(pw, url):
         s = stored(pg)
         assert len(s["foodLog"]) == 1 and s["foodLog"][0]["kcal"] == 450 and s["nutrition"][0]["kcal"] == 450
 
+@test
+def remote_search_merges_and_ranks(pw, url):
+    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed) as pg:
+        pg.click("#fdAdd"); pg.keyboard.type("yogurt")
+        pg.wait_for_selector("#fdResults :text('Nutella')")
+        names = pg.locator("#fdResults .fd-res").all_inner_texts()
+        joined = "\n".join(names)
+        assert "Greek Nonfat Yogurt, Plain" in joined and "Total 0% Greek Yogurt" not in joined
+        assert "Mystery bar" not in joined
+        assert names[0].startswith("Chicken") or names[0].startswith("Egg, whole, raw")
+        pg.click("#fdResults .fd-res:has-text('Nutella')")
+        pg.select_option("#faUnit", "p0"); pg.click("#faSave")
+        s = stored(pg)
+        assert s["foodLog"][0]["kcal"] == 81 and any(f["name"] == "Nutella" for f in s["foods"])
+
+@test
+def search_without_key_uses_off_and_explains(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdAdd"); pg.keyboard.type("nutella")
+        pg.wait_for_selector("#fdResults :text('Nutella')")
+        assert "add your free key in Settings" in pg.inner_text("#fdResults")
+        assert "Greek Nonfat Yogurt" not in pg.inner_text("#fdResults")
+        pg.click("#fdResults .linkbtn")
+        assert pg.evaluate("ui.tab") == "settings" and pg.locator("#usdaKey").count() == 1
+        pg.fill("#usdaKey", "  KEY123 "); pg.dispatch_event("#usdaKey", "change")
+        assert stored(pg)["settings"]["usdaKey"] == "KEY123"
+
+@test
+def offline_search_shows_saved_foods(pw, url):
+    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed, offline=True) as pg:
+        pg.click("#fdAdd"); pg.keyboard.type("egg")
+        pg.wait_for_selector("#fdResults :text('Offline')")
+        assert "Egg, whole" in pg.inner_text("#fdResults")
+
+@test
+def stale_search_result_is_ignored(pw, url):
+    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed) as pg:
+        pg.click("#fdAdd")
+        pg.evaluate("ui.foodQuery = 'chicken'")
+        pg.evaluate("runRemoteSearch('egg')")  # finishes after the user has moved on
+        assert pg.evaluate("ui.foodRemote.q") != "egg"
+
 # --- tests above this line ---
 
 def main():

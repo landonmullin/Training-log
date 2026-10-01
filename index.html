@@ -2126,7 +2126,11 @@ function foodForEntry(e){
 function nutritionSettingsHTML(){
   return `<div class="card" id="nutritionSettings">
     <div class="lbl" style="margin-bottom:8px">Nutrition</div>
-    <!-- usda-key -->
+    <div style="font-size:14px;font-weight:600;margin-bottom:4px">USDA food database key</div>
+    <div style="font-size:13px;color:var(--sub);margin-bottom:8px;line-height:1.45">Free key that turns on USDA results in food search. Open Food Facts works without one.</div>
+    <input id="usdaKey" class="mono" value="${esc(data.settings.usdaKey || "")}" placeholder="paste your key" autocomplete="off" autocapitalize="off" spellcheck="false" onchange="App.setUsdaKey(this.value)">
+    <a class="weblink pull" href="https://api.data.gov/signup/" target="_blank" rel="noopener">Get a free key <span class="ext">↗</span></a>
+    <div style="height:1px;background:var(--grid);margin:14px 0"></div>
     <div style="font-size:14px;font-weight:600;margin-bottom:4px">Import from Cronometer</div>
     <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">Back-fill past days from a Cronometer <b>Daily Nutrition</b> export (website: Account → Export Data). Days that already have foods logged here are skipped.</div>
     <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
@@ -2257,6 +2261,46 @@ function foodSheetHTML(){
   return `<div class="fsheet" onclick="if(event.target===this)App.foodClose()"><div class="panel" id="fdSheet">
     <div style="display:flex;justify-content:flex-end"><button class="fd-x" onclick="App.foodClose()" aria-label="Close">✕</button></div>
     ${body()}</div></div>`;
+}
+async function fetchJSON(url, signal){
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  const relay = () => ctl.abort();
+  signal?.addEventListener("abort", relay);
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", relay); }
+}
+let foodSearchTimer = null, foodSearchCtl = null;
+function scheduleRemoteSearch(q){
+  clearTimeout(foodSearchTimer);
+  if (foodSearchCtl){ foodSearchCtl.abort(); foodSearchCtl = null; }
+  q = q.trim();
+  if (q.length < 3){ ui.foodRemote = { q: "", usda: [], off: [], status: "" }; return; }
+  foodSearchTimer = setTimeout(() => runRemoteSearch(q), 500);
+}
+async function runRemoteSearch(q){
+  if (!navigator.onLine){ ui.foodRemote = { q, usda: [], off: [], status: "offline" }; updateFoodResults(); return; }
+  const ctl = new AbortController(); foodSearchCtl = ctl;
+  const key = (data.settings.usdaKey || "").trim();
+  if (ui.foodQuery.trim() === q){ ui.foodRemote = { q, usda: [], off: [], status: "loading" }; updateFoodResults(); }
+  const usdaP = key
+    ? fetchJSON(usdaSearchURL(q, key), ctl.signal).then(j => (j.foods || []).map(parseUsdaFood).filter(Boolean))
+    : Promise.resolve(null);
+  const offP = fetchJSON(offSearchURL(q), ctl.signal).then(j => (j.products || []).map(parseOffProduct).filter(Boolean));
+  const [u, o] = await Promise.allSettled([usdaP, offP]);
+  if (ctl.signal.aborted || ui.foodQuery.trim() !== q) return; // a newer search replaced this one
+  if (foodSearchCtl === ctl) foodSearchCtl = null;
+  const usda = u.status === "fulfilled" && u.value ? u.value : [];
+  const off = o.status === "fulfilled" ? o.value : [];
+  const usdaFailed = u.status === "rejected", offFailed = o.status === "rejected";
+  const status = (offFailed && (usdaFailed || !key)) ? "offline"
+    : !key ? "nokey"
+    : (usdaFailed || offFailed) ? "partial" : "done";
+  ui.foodRemote = { q, usda, off, status };
+  updateFoodResults();
 }
 // deficit/surplus vs saved calorie goal: green under, red over
 function kcalColor(kcal){
@@ -3793,7 +3837,7 @@ window.App = {
     render();
   },
   foodClose(){ ui.foodSheet = null; ui.foodEdit = null; ui.foodPrefill = null; ui.foodEditFoodId = null; ui.confirmKey = null; render(); },
-  foodQuery(v){ ui.foodQuery = v; updateFoodResults(); },
+  foodQuery(v){ ui.foodQuery = v; scheduleRemoteSearch(v); updateFoodResults(); },
   foodListMode(m){ ui.foodListMode = m; updateFoodResults(); },
   foodPickResult(i){ const f = ui.foodResults[i]; if (f) App.foodPickFood(f); },
   foodPickFood(f){
@@ -3861,6 +3905,11 @@ window.App = {
     ui.foodSheet = null; ui.foodEdit = null; toast("Entry deleted"); render();
   },
   foodDayShift(n){ const d = shiftISO(ui.foodDay, n); if (d > todayISO()) return; ui.foodDay = d; render(); },
+  setUsdaKey(v){ data.settings.usdaKey = String(v || "").trim(); save(); toast(data.settings.usdaKey ? "USDA key saved ✓" : "USDA key removed"); },
+  foodGoUsdaKey(){
+    ui.foodSheet = null; ui.tab = "settings"; render();
+    const el = $("#usdaKey"); if (el){ el.scrollIntoView({ block: "center" }); el.focus(); }
+  },
   foodDayToday(){ ui.foodDay = todayISO(); render(); },
   foodScan(){ toast("Barcode scanning arrives in the next step", true); },
   saveTargets(){
