@@ -368,6 +368,38 @@ def usda_search_sends_forgiving_and_literal_queries(pw, url):
         names = pg.locator("#fdResults .fd-res").all_inner_texts()
         assert sum("Egg, whole, raw" in n for n in names) == 1  # merged without duplicates
 
+@test
+def calendar_marks_calorie_goal_and_shows_food_first(pw, url):
+    with app(pw, url, base()) as pg:
+        ym = pg.evaluate("shiftISO(todayISO().slice(0,8) + '01', -1).slice(0,7)")  # last month: all days are in the past
+    d1, d2, d3 = f"{ym}-02", f"{ym}-03", f"{ym}-04"
+    seed = base(
+        nutrition=[{"id": "n1", "date": d1, "kcal": 2200, "protein": 150, "carbs": 200, "fat": 70, "fiber": 30, "source": "log"},
+                   {"id": "n2", "date": d2, "kcal": 2900, "protein": 150, "carbs": 300, "fat": 90, "fiber": 20, "source": "cronometer"}],
+        foodLog=[{"id": "e1", "date": d1, "time": "07:30", "foodId": None, "name": "Overnight oats", "grams": None, "qty": None,
+                  "unit": None, "label": "", "kcal": 600, "protein": 30, "carbs": 80, "fat": 15, "fiber": 10},
+                 {"id": "e2", "date": d1, "time": "12:10", "foodId": None, "name": "Chicken bowl", "grams": None, "qty": None,
+                  "unit": None, "label": "", "kcal": 1600, "protein": 120, "carbs": 120, "fat": 55, "fiber": 20}],
+        lifts=[{"id": "l1", "date": d1, "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
+        weights=[{"id": "w1", "date": d3, "lbs": 180}])
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('calendar')"); pg.evaluate("App.month(-1)")
+        assert pg.locator(".cal .day .kbar.under").count() == 1
+        assert pg.locator(".cal .day .kbar.over").count() == 1
+        assert pg.locator(".cal .day .kbar").count() == 2  # weigh-in-only day gets no bar
+        pg.evaluate(f"App.selDay('{d1}')")
+        cards = pg.locator("#view .card").all_inner_texts()
+        food_i = next(i for i, c in enumerate(cards) if "Overnight oats" in c)
+        lift_i = next(i for i, c in enumerate(cards) if "PUSH DAY" in c.upper())
+        assert food_i < lift_i, (food_i, lift_i)
+        assert "Chicken bowl" in cards[food_i] and "2200" in cards[food_i]
+        assert not any("NUTRITION" in c for c in cards)  # old totals-only card replaced
+        pg.evaluate(f"App.selDay('{d2}')")
+        assert any("2900" in c for c in pg.locator("#view .card").all_inner_texts())  # Cronometer day: totals only
+        pg.evaluate(f"App.selDay('{d1}')")
+        pg.click("#calFoodOpen")
+        assert pg.evaluate("ui.tab") == "food" and pg.evaluate("ui.foodDay") == d1
+
 # --- tests above this line ---
 
 def main():

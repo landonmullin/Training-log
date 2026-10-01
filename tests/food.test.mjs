@@ -159,3 +159,10 @@ test("searchSaved ignores case and apostrophes", () => {
   assert.deepEqual(C.searchSaved(foods, "mcdonalds mcgriddle").map(f => f.id), ["m"]);
   assert.deepEqual(C.searchSaved(foods, "MCDONALD'S").map(f => f.id), ["m"]);
 });
+test("kcalGoalState compares a day's calories to the goal", () => {
+  assert.equal(C.kcalGoalState(2300, 2400), "under");
+  assert.equal(C.kcalGoalState(2400, 2400), "under");
+  assert.equal(C.kcalGoalState(2401, 2400), "over");
+  assert.equal(C.kcalGoalState(2300, null), null);
+  assert.equal(C.kcalGoalState(2300, 0), null);
+});

@@ -59,6 +59,9 @@
   .cal .day{aspect-ratio:1;border:1px solid var(--grid);border-radius:8px;background:transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;padding:0}
   .cal .day.has{background:#fff}
   .cal .day.sel{border:2px solid var(--ink)}
+  .cal .day .kbar{width:16px;height:3px;border-radius:2px;background:var(--sub);opacity:.7}
+  .cal .day .kbar.under{background:#2B8A3E;opacity:1}
+  .cal .day .kbar.over{background:var(--danger);opacity:1}
   .cal .day.today{border:2px solid var(--ink)}
   .cal .day.today .num{font-weight:700}
   .cal .day.sel:not(.today){border:2px solid var(--sub)}
@@ -176,7 +179,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 74;
+const APP_VERSION = 75;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1612,6 +1615,8 @@ function calendarLegend(){
     ${keys.map(k=>`<span class="item"><span class="sw" style="background:${softSplit(k)}"></span>${SPLITS[k].name}</span>`).join("")}
     <span class="item"><span class="sw" style="background:${untaggedSoft()}"></span>Untagged</span>
     <span class="item"><span style="font-size:11px">🏃</span>Cardio</span>
+    ${data.settings.kcalTarget?`<span class="item"><span style="width:12px;height:3px;border-radius:2px;background:#2B8A3E"></span>Under kcal goal</span>
+    <span class="item"><span style="width:12px;height:3px;border-radius:2px;background:var(--danger)"></span>Over</span>`:""}
   </div>`;
 }
 function renderCalendar(){
@@ -1638,7 +1643,11 @@ function renderCalendar(){
   for (let d=1; d<=dim; d++){
     const iso = `${y}-${pad(m+1)}-${pad(d)}`;
     const has = map[iso];
-    let marks = "", bg = "";
+    let marks = "", bg = "", kbar = "";
+    if (has && has.nutrition.length){
+      const gs = kcalGoalState(has.nutrition[0].kcal, data.settings.kcalTarget);
+      kbar = `<span class="kbar ${gs || "logged"}"></span>`;
+    }
     if (has){
       const splits = [...new Set(has.lifts.map(w=>w.split).filter(Boolean))];
       if (splits.length) bg = softSplit(splits[0]);
@@ -1647,12 +1656,13 @@ function renderCalendar(){
       [...new Set(has.cardio.map(c=>c.type))].forEach(t=> marks += `<span class="runner">${tmeta(t).emoji}</span>`);
     }
     cells += `<button class="day ${iso===ui.selected?"sel":""} ${iso===todayISO()?"today":""}" ${bg?`style="background:${bg}"`:""} onclick="App.selDay('${iso}')">
-      <span class="num">${d}</span><span class="marks">${marks}</span></button>`;
+      <span class="num">${d}</span><span class="marks">${marks}</span>${kbar}</button>`;
   }
   const sel = map[ui.selected];
   let detail = "";
   if (!sel) detail = `<div class="card muted">Rest day — nothing logged. Use the Lift or Cardio tab to add a workout.</div>`;
   else {
+    detail += calFoodCardHTML(ui.selected, sel.nutrition || []);
     (sel.lifts||[]).forEach(w=>{
       const sp = w.split ? SPLITS[w.split] : null;
       const open = ui.expandedLifts.has(w.id);
@@ -1699,17 +1709,6 @@ function renderCalendar(){
       detail += `<div class="card" style="border-left:4px solid var(--ink);display:flex;justify-content:space-between;align-items:center">
         <div><div class="h2" style="margin:0">BODYWEIGHT</div><div style="font-family:var(--mono);font-size:15px;font-weight:600">${w.lbs} lb</div></div>
         ${delBtn(`W${w.id}`, `App.delWeight('${w.id}')`)}</div>`;
-    });
-    (sel.nutrition||[]).forEach(n=>{
-      detail += `<div class="card" style="border-left:4px solid var(--pull)">
-        <div class="h2" style="margin:0 0 6px">NUTRITION</div>
-        <div class="stats">
-          <div class="stat"><div class="k">kcal</div><div class="v" style="color:${kcalColor(n.kcal)}">${n.kcal}</div></div>
-          ${stat("protein", n.protein+"g")}${stat("carbs", n.carbs+"g")}${stat("fat", n.fat+"g")}
-          ${n.fiber?stat("fiber", n.fiber+"g"):""}
-        </div>
-        ${data.settings.kcalTarget?`<div style="font-size:12px;margin-top:8px">vs ${data.settings.kcalTarget} kcal goal: ${kcalDelta(n.kcal)}</div>`:""}
-        </div>`;
     });
   }
   const xp = activityXP();
@@ -2149,6 +2148,7 @@ function usdaStrictQuery(q){
   return String(q ?? "").toLowerCase().replace(/['’]/g, "").split(/[^a-z0-9]+/).filter(Boolean)
     .map(w => "+" + (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w) + "*").join(" ");
 }
+function kcalGoalState(kcal, target){ return target > 0 ? (fNum(kcal) <= target ? "under" : "over") : null; }
 // @food-core-end
 // ----- food log: app-level (reads/writes `data`) -----
 function refreshFoodDay(date){ data.nutrition = rebuildNutritionDay(data.nutrition, data.foodLog, date, uid); }
@@ -2220,6 +2220,28 @@ function foodDayCardHTML(){
       <button class="btn" id="fdAdd" style="background:var(--pull);color:#fff" onclick="App.foodOpen('search')">+ Add food</button>
       <button class="btn" id="fdScan" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="App.foodScan()">Scan</button>
     </div>
+  </div>`;
+}
+// calendar day detail: the day's food, shown above workouts
+function calFoodCardHTML(date, rows){
+  const n = rows[0];
+  if (!n) return "";
+  const entries = foodEntriesFor(date), t = data.settings.kcalTarget;
+  return `<div class="card" style="border-left:4px solid var(--pull)">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <div class="h2" style="margin:0">FOOD</div>
+      <button class="linkbtn" id="calFoodOpen" style="padding:0;font-size:13px" onclick="App.foodGoDay('${date}')">${entries.length ? "edit" : "open"} ›</button>
+    </div>
+    <div class="stats" style="margin-top:6px">
+      <div class="stat"><div class="k">kcal</div><div class="v" style="color:${kcalColor(n.kcal)}">${n.kcal}</div></div>
+      ${stat("protein", n.protein + "g")}${stat("carbs", n.carbs + "g")}${stat("fat", n.fat + "g")}
+    </div>
+    ${t ? `<div style="font-size:12px;margin-top:6px">vs ${t} kcal goal: ${kcalDelta(n.kcal)}</div>` : ""}
+    ${entries.length ? `<div style="margin-top:8px">${entries.map(e => `<div class="fd-row" style="cursor:default">
+        <span class="t">${fdTime(e.time)}</span>
+        <span class="n">${esc(e.name)}${e.label ? ` <span class="a">${esc(e.label)}</span>` : ""}</span>
+        <span class="k">${e.kcal} kcal</span></div>`).join("")}</div>`
+      : n.source === "cronometer" ? `<div class="note" style="text-align:left;margin-top:6px">imported from Cronometer</div>` : ""}
   </div>`;
 }
 function foodDefaultServing(f){
@@ -4079,6 +4101,7 @@ window.App = {
     if (!confirmDel("MF" + id)) return;
     data.foods = data.foods.filter(f => f.id !== id); save(); toast("Food removed — past entries keep their numbers"); render();
   },
+  foodGoDay(iso){ const t = todayISO(); ui.foodDay = iso > t ? t : iso; App.tab("food"); },
   foodDayToday(){ ui.foodDay = todayISO(); render(); },
   foodScan(){ ui.foodSheet = "scan"; ui.scanStatus = ""; ui.foodEdit = null; render(); startScan(); },
   foodCreateSave(){
