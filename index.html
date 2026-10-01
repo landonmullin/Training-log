@@ -160,7 +160,7 @@
 const APP_VERSION = 71;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[],
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
@@ -1507,6 +1507,9 @@ const ui = {
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
   foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
+  foodDay: todayISO(), foodSheet: null, foodQuery: "", foodFocus: false, foodListMode: "recent", foodResults: [],
+  foodRemote: { q: "", usda: [], off: [], status: "" }, foodPick: null, foodAmt: null, foodEdit: null,
+  foodQuickPrefill: null, foodPrefill: null, foodEditFoodId: null, scanStatus: "",
   todoTab: "open",
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
@@ -2092,6 +2095,32 @@ function offProductURL(code){
   return `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(String(code).replace(/\D/g, ""))}.json?fields=${OFF_FIELDS}`;
 }
 // @food-core-end
+// ----- food log: app-level (reads/writes `data`) -----
+function refreshFoodDay(date){ data.nutrition = rebuildNutritionDay(data.nutrition, data.foodLog, date, uid); }
+function upsertFood(food){
+  let f = food.id ? data.foods.find(x => x.id === food.id) : null;
+  if (!f && food.source !== "custom" && food.sourceId) f = data.foods.find(x => x.source === food.source && x.sourceId === food.sourceId);
+  if (!f && food.barcode) f = data.foods.find(x => x.barcode && x.barcode === food.barcode);
+  if (!f){ f = toSavedFood(food, uid); data.foods.push(f); }
+  return f;
+}
+function foodForEntry(e){
+  const lib = data.foods.find(f => f.id === e.foodId);
+  if (lib) return lib;
+  const g = fNum(e.grams) || 100, k = 100 / g;
+  return { name: e.name, brand: "", barcode: "", portions: [], servingOnly: false, source: "custom", sourceId: "",
+    per100g: { kcal: e.kcal * k, protein: e.protein * k, carbs: e.carbs * k, fat: e.fat * k, fiber: e.fiber * k } };
+}
+function nutritionSettingsHTML(){
+  return `<div class="card" id="nutritionSettings">
+    <div class="lbl" style="margin-bottom:8px">Nutrition</div>
+    <!-- usda-key -->
+    <div style="font-size:14px;font-weight:600;margin-bottom:4px">Import from Cronometer</div>
+    <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">Back-fill past days from a Cronometer <b>Daily Nutrition</b> export (website: Account → Export Data). Days that already have foods logged here are skipped.</div>
+    <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
+    <!-- my-foods -->
+  </div>`;
+}
 // deficit/surplus vs saved calorie goal: green under, red over
 function kcalColor(kcal){
   const t = data.settings.kcalTarget;
@@ -2894,6 +2923,7 @@ function renderSettings(){
     ${Object.entries(TYPE_META).map(([k,v])=>setRow(`${v.emoji} ${v.label}`, "", !!s.cardioTypes[k], `App.toggleCardioType('${k}')`)).join("")}
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
   </div>`;
+  html += nutritionSettingsHTML();
   return html;
 }
 
@@ -3654,7 +3684,9 @@ window.App = {
   },
   delFood(key){
     if(!confirmDel("F"+key))return;
+    const row = data.nutrition.find(d=>d.id===key || d.date===key);
     data.nutrition = data.nutrition.filter(d=>d.id!==key && d.date!==key);
+    if (row) data.foodLog = data.foodLog.filter(e=>e.date!==row.date); // or the day would rebuild from its entries
     save(); toast("Day deleted"); render();
   },
 
@@ -4281,14 +4313,16 @@ $("#gpxFile").addEventListener("change", async e=>{
 $("#csvFile").addEventListener("change", async e=>{
   const f = e.target.files?.[0]; if(!f) return;
   try {
-    const parsed = parseCronometerCSV(await f.text());
-    if (!parsed.length) throw new Error("No daily rows found in file");
+    const parsedAll = parseCronometerCSV(await f.text());
+    if (!parsedAll.length) throw new Error("No daily rows found in file");
+    const { kept: parsed, skipped } = skipLoggedDates(parsedAll, data.foodLog);
+    if (!parsed.length) throw new Error(`All ${skipped} day${skipped>1?"s":""} already have foods logged here — nothing imported`);
     const dates = new Set(parsed.map(p=>p.date));
     data.nutrition = data.nutrition.filter(d=>!dates.has(d.date));
     parsed.forEach(p=>data.nutrition.push({id:uid(), ...p, source:"cronometer"}));
     save();
     const ds = [...dates].sort();
-    toast(`Imported ${parsed.length} day${parsed.length>1?"s":""} (${shortDate(ds[0])}–${shortDate(ds[ds.length-1])}) ✓`);
+    toast(`Imported ${parsed.length} day${parsed.length>1?"s":""} (${shortDate(ds[0])}–${shortDate(ds[ds.length-1])})${skipped?` · ${skipped} logged day${skipped>1?"s":""} kept`:""} ✓`);
     render();
   } catch(err){ toast(err.message, true); }
   e.target.value = "";
