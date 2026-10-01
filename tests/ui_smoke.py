@@ -21,11 +21,16 @@ def start_server():
 
 def fixture(name): return (FIX / name).read_text()
 
-def router(offline):
+def router(offline, gemini=None):
     def handle(route):
         url = route.request.url
         if url.startswith("http://127.0.0.1"): return route.continue_()
         if offline: return route.abort()
+        if "generativelanguage.googleapis.com" in url:
+            if gemini is None: return route.abort()
+            status, body = gemini(route.request)
+            return route.fulfill(status=status, content_type="application/json", body=body,
+                                 headers={**CORS, "Access-Control-Allow-Headers": "*"})
         if "api.nal.usda.gov/fdc/v1/food/" in url:
             return route.fulfill(status=200, content_type="application/json", body=fixture("usda-food-details.json"), headers=CORS)
         if "api.nal.usda.gov" in url:
@@ -51,7 +56,7 @@ EGG = {"id": "f-egg", "name": "Egg, whole", "brand": "", "barcode": "",
        "source": "usda", "sourceId": "171287", "uses": 3, "lastUsed": 1}
 
 @contextlib.contextmanager
-def app(pw, url, seed=None, offline=False):
+def app(pw, url, seed=None, offline=False, gemini=None):
     b = pw.chromium.launch(executable_path=CHROME)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     if seed is not None:
@@ -60,7 +65,7 @@ def app(pw, url, seed=None, offline=False):
             "sessionStorage.setItem('seeded','1');}")
     pg = ctx.new_page(); errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.route("**/*", router(offline))
+    pg.route("**/*", router(offline, gemini))
     pg.goto(url); pg.evaluate("App.tab('food')")
     try:
         yield pg
@@ -399,6 +404,129 @@ def calendar_marks_calorie_goal_and_shows_food_first(pw, url):
         pg.evaluate(f"App.selDay('{d1}')")
         pg.click("#calFoodOpen")
         assert pg.evaluate("ui.tab") == "food" and pg.evaluate("ui.foodDay") == d1
+
+import datetime as _dt
+FUTURE = (_dt.date.today() + _dt.timedelta(days=10)).isoformat()
+def gem_text(t): return 200, json.dumps({"candidates": [{"content": {"role": "model", "parts": [{"text": t}]}}]})
+def gem_call(name, args): return 200, json.dumps({"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": name, "args": args}}]}}]})
+def scripted(*replies):
+    """Gemini stand-in: returns replies in order and records each request body."""
+    seen = []
+    def respond(req):
+        seen.append({"body": req.post_data_json, "headers": req.headers})
+        return replies[min(len(seen), len(replies)) - 1]
+    respond.seen = seen
+    return respond
+def school_seed(**over):
+    d = base(**over)
+    d["school"] = {"classes": [{"id": "c1", "name": "ENGR 3413 Materials Science"}, {"id": "c2", "name": "Modern Physics"}],
+                   "tasks": [], "sessions": [], "assignments": [], "schedule": [],
+                   "dates": [{"id": "d1", "title": "Exam 2", "kind": "exam", "date": FUTURE, "time": "10:00", "classId": "c1"},
+                             {"id": "d2", "title": "Quiz 3", "kind": "quiz", "date": FUTURE, "classId": "c2"}]}
+    d["settings"].update({"aiEnabled": True, "aiKey": "GEMKEY", "schoolEnabled": True})
+    return d
+def last_tool_result(body):
+    for c in reversed(body["contents"]):
+        for part in c.get("parts", []):
+            if "functionResponse" in part: return part["functionResponse"]["response"]["result"]
+def ask(pg, text):
+    pg.click("#aiBtn"); pg.fill("#aiInput", text); pg.click("#aiSend")
+    pg.wait_for_function("!ui.aiBusy")
+
+@test
+def assistant_is_off_by_default(pw, url):
+    with app(pw, url, base()) as pg:
+        assert not pg.locator("#aiBtn").is_visible()
+        assert pg.locator("#appTitle").is_visible()
+        pg.evaluate("App.tab('settings')")
+        pg.click("button.switch[aria-label='AI assistant']")
+        assert pg.locator("#aiBtn").is_visible() and not pg.locator("#appTitle").is_visible()
+        assert pg.locator("#aiKey").count() == 1
+        assert stored(pg)["settings"]["aiEnabled"] is True
+
+@test
+def assistant_answers_next_exam_from_app_data(pw, url):
+    g = scripted(gem_call("get_school", {"class_name": "materials"}), gem_text(f"Your next **Materials Science** exam is Exam 2 on {FUTURE} at 10:00."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "When is my next materials science exam?")
+        assert "Exam 2" in pg.inner_text("#aiLog") and "<strong>" in pg.inner_html("#aiLog")
+        assert len(g.seen) == 2 and g.seen[0]["headers"].get("x-goog-api-key") == "GEMKEY"
+        first = g.seen[0]["body"]
+        assert first["contents"][-1]["parts"][0]["text"] == "When is my next materials science exam?"
+        assert any(f["name"] == "add_school_task" for f in first["tools"][0]["functionDeclarations"])
+        assert "Materials Science" in first["systemInstruction"]["parts"][0]["text"]
+        result = json.dumps(last_tool_result(g.seen[1]["body"]))
+        assert "Exam 2" in result and "Quiz 3" not in result
+
+@test
+def assistant_adds_school_task(pw, url):
+    g = scripted(gem_call("add_school_task", {"text": "Lab report", "class_name": "materials science", "due": FUTURE, "time": "23:59"}),
+                 gem_text("Added Lab report for Materials Science."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "add lab report due in ten days for materials science")
+        t = stored(pg)["school"]["tasks"]
+        assert len(t) == 1 and t[0]["text"] == "Lab report" and t[0]["classId"] == "c1" and t[0]["due"] == FUTURE and t[0]["dueTime"] == "23:59"
+        assert last_tool_result(g.seen[1]["body"])["ok"] is True
+
+@test
+def assistant_unknown_class_adds_nothing(pw, url):
+    g = scripted(gem_call("add_school_task", {"text": "Homework 4", "class_name": "chemistry"}), gem_text("I don't see a chemistry class."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "add homework 4 for chemistry")
+        assert stored(pg)["school"]["tasks"] == []
+        r = last_tool_result(g.seen[1]["body"])
+        assert "error" in r and "Modern Physics" in r["classes"]
+
+@test
+def assistant_reads_a_day_and_logs_food(pw, url):
+    seed = school_seed(lifts=[{"id": "l1", "date": "2026-09-28", "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
+                       nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 2350, "protein": 170, "carbs": 220, "fat": 75, "fiber": 30, "source": "cronometer"}])
+    g = scripted(gem_call("get_day", {"date": "2026-09-28"}), gem_call("log_food", {"name": "Protein shake", "kcal": 160, "protein": 30}), gem_text("Done."))
+    with app(pw, url, seed, gemini=g) as pg:
+        ask(pg, "what did I eat and lift on 9/28, and log a protein shake")
+        day = last_tool_result(g.seen[1]["body"])
+        assert day["food"]["kcal"] == 2350 and day["lifting"][0]["exercises"][0]["sets"] == "185x5"
+        s = stored(pg); e = s["foodLog"][0]
+        assert e["name"] == "Protein shake" and e["kcal"] == 160 and e["date"] == pg.evaluate("todayISO()")
+        assert any(r["date"] == e["date"] and r["source"] == "log" for r in s["nutrition"])
+
+@test
+def assistant_adds_todo(pw, url):
+    g = scripted(gem_call("add_todo", {"text": "Call the dentist"}), gem_text("Added."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "remind me to call the dentist")
+        assert stored(pg)["todos"][0]["text"] == "Call the dentist"
+
+@test
+def assistant_explains_bad_key_and_missing_key(pw, url):
+    g = scripted((400, json.dumps({"error": {"code": 400, "message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}})))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "hi")
+        assert "key" in pg.inner_text("#aiLog").lower() and "settings" in pg.inner_text("#aiLog").lower()
+    seed = school_seed(); seed["settings"]["aiKey"] = ""
+    with app(pw, url, seed, gemini=scripted(gem_text("unused"))) as pg:
+        ask(pg, "hi")
+        assert "settings" in pg.inner_text("#aiLog").lower()
+
+@test
+def assistant_survives_rerender_and_tab_change(pw, url):
+    g = scripted(gem_text("Hello there."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "hi")
+        pg.evaluate("render()")
+        assert "Hello there." in pg.inner_text("#aiLog")
+
+@test
+def assistant_switches_to_available_model_when_default_is_gone(pw, url):
+    def g(req):
+        if req.method == "GET":
+            return 200, json.dumps({"models": [{"name": "models/gemini-9.0-flash", "supportedGenerationMethods": ["generateContent"]}]})
+        if "gemini-9.0-flash:generateContent" in req.url: return gem_text("Hi from the new model.")
+        return 404, json.dumps({"error": {"code": 404, "message": "models/gemini-3.5-flash is not found", "status": "NOT_FOUND"}})
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "hi")
+        assert "Hi from the new model." in pg.inner_text("#aiLog")
+        assert stored(pg)["settings"]["aiModel"] == "gemini-9.0-flash"
 
 # --- tests above this line ---
 

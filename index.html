@@ -100,6 +100,18 @@
   .hdrbtn{position:relative;background:var(--card);border:1px solid var(--line);border-radius:10px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink)}
   .hdrbtn.on{background:var(--ink);color:var(--card);border-color:var(--ink)}
   .hdrbtn svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  .aibtn{width:auto;padding:0 14px;gap:6px;font-weight:700;font-size:15px;font-family:var(--body)}
+  .ai-log{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:4px 0 8px}
+  .ai-msg{max-width:86%;padding:9px 12px;border-radius:14px;margin:6px 0;font-size:15px;line-height:1.4;word-wrap:break-word}
+  .ai-msg.user{margin-left:auto;background:var(--ink);color:var(--card);border-bottom-right-radius:4px}
+  .ai-msg.bot{background:var(--card);border:1px solid var(--line);border-bottom-left-radius:4px}
+  .ai-msg.err{border-color:var(--danger);color:var(--danger)}
+  .ai-row{display:flex;gap:8px;align-items:center;padding-top:8px;border-top:1px solid var(--grid)}
+  .ai-row input{flex:1}
+  .ai-ico{flex:none;width:44px;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .ai-ico svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .ai-ico.send{background:var(--ink);color:var(--card);border-color:var(--ink)}
+  .ai-ico.rec{background:var(--danger);color:#fff;border-color:var(--danger)}
   .hdrbtn .badge{position:absolute;top:-6px;right:-7px;background:var(--push);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 5px;font-family:var(--mono)}
   .todo-row{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;transition:transform .45s ease,opacity .45s ease}
   .todo-check{width:26px;height:26px;border-radius:50%;border:2px solid var(--line);background:var(--card);flex:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;padding:0;transition:background .2s,border-color .2s}
@@ -160,7 +172,8 @@
 <body>
 <header>
   <div style="display:flex;justify-content:space-between;align-items:center">
-    <h1>TRAINING LOG</h1>
+    <h1 id="appTitle">TRAINING LOG</h1>
+    <button id="aiBtn" class="hdrbtn aibtn" onclick="App.aiOpen()" aria-label="Assistant" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg><span>Ask</span></button>
     <div style="display:flex;gap:8px">
       <button id="payBtn" class="hdrbtn" onclick="App.tab('pay')" aria-label="Pay tracker" style="display:none"></button>
       <button id="schoolBtn" class="hdrbtn" onclick="App.tab('school')" aria-label="School"></button>
@@ -171,6 +184,7 @@
   </div>
 </header>
 <div id="view"></div>
+<div id="aiRoot"></div>
 <nav class="navbar" id="navbar"></nav>
 <input type="file" id="gpxFile" multiple style="display:none">
 <input type="file" id="importFile" accept=".json,application/json" style="display:none">
@@ -179,7 +193,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 75;
+const APP_VERSION = 76;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1534,6 +1548,7 @@ const ui = {
   foodDay: todayISO(), foodSheet: null, foodQuery: "", foodFocus: false, foodListMode: "recent", foodResults: [],
   foodRemote: { q: "", usda: [], off: [], status: "" }, foodPick: null, foodAmt: null, foodEdit: null,
   foodQuickPrefill: null, foodPrefill: null, foodEditFoodId: null, scanStatus: "",
+  aiOpen: false, aiMsgs: [], aiBusy: false, aiListening: false,
   todoTab: "open",
   openMaps: new Set(),
   crewStats: null, crewStatsAt: null, crewMetric: "miles", crewPeriod: "week", crewBusy: false,
@@ -1571,6 +1586,9 @@ function renderNav(){
   $("#navbar").innerHTML = tabs.map(([id,l]) =>
     `<button class="${ui.tab===id?"on":""}" onclick="App.tab('${id}')"><div class="ic">${NAV_ICONS[id]}</div><div class="tl">${l}</div><div class="bar"></div></button>`).join("");
   const open = data.todos.filter(t=>!t.done).length;
+  const aiOn = !!data.settings.aiEnabled;
+  $("#aiBtn").style.display = aiOn ? "flex" : "none";
+  $("#appTitle").style.display = aiOn ? "none" : "";
   const tb = $("#todoBtn");
   tb.style.display = data.settings.todoEnabled ? "flex" : "none";
   tb.className = "hdrbtn" + (ui.tab==="todo" ? " on" : "");
@@ -2149,6 +2167,32 @@ function usdaStrictQuery(q){
     .map(w => "+" + (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w) + "*").join(" ");
 }
 function kcalGoalState(kcal, target){ return target > 0 ? (fNum(kcal) <= target ? "under" : "over") : null; }
+// ----- assistant helpers -----
+function matchClass(classes, name){
+  const norm = x => String(x ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const q = norm(name);
+  if (!q) return null;
+  const qt = q.split(" ");
+  let best = null, bestScore = 0;
+  for (const c of classes || []){
+    const n = norm(c.name), words = n.split(" ");
+    const score = n === q ? 4 : n.includes(q) ? 3 : qt.every(t => words.some(w => w.startsWith(t))) ? 2 : 0;
+    if (score > bestScore){ best = c; bestScore = score; }
+  }
+  return best;
+}
+function aiTextHTML(t){
+  return String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
+}
+function pickFlashModel(list){
+  const ver = n => n.match(/^gemini-([\d.]+)-flash$/)?.[1].split(".").map(Number) || null;
+  const names = ((list && list.models) || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
+    .map(m => String(m.name || "").replace(/^models\//, "")).filter(n => ver(n));
+  names.sort((a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < Math.max(x.length, y.length); i++){ const d = (y[i] || 0) - (x[i] || 0); if (d) return d; } return 0; });
+  return names[0] || null;
+}
 // @food-core-end
 // ----- food log: app-level (reads/writes `data`) -----
 function refreshFoodDay(date){ data.nutrition = rebuildNutritionDay(data.nutrition, data.foodLog, date, uid); }
@@ -2382,6 +2426,201 @@ async function loadUsdaPortions(f){
   if (!ui.foodEdit && a.unit === "g" && a.qty === "100"){ a.unit = "p0"; a.qty = "1"; render(); return; }
   const sel = $("#faUnit");
   if (sel) sel.innerHTML = unitOptions(f).map(o => `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("");
+}
+// ================= assistant (Gemini) =================
+const AI_DEFAULT_MODEL = "gemini-3.5-flash";
+const AI_TOOLS = [
+  { name: "get_day", description: "Everything logged on one date: food (calorie and macro totals plus each item), lifting (exercises with sets), cardio, and bodyweight.",
+    parameters: { type: "OBJECT", properties: { date: { type: "STRING", description: "YYYY-MM-DD" } }, required: ["date"] } },
+  { name: "get_days", description: "One-line summary per day (calories, workouts, bodyweight) for a date range of up to 31 days. Use for weekly totals, averages and streaks.",
+    parameters: { type: "OBJECT", properties: { start: { type: "STRING", description: "YYYY-MM-DD" }, end: { type: "STRING", description: "YYYY-MM-DD" } }, required: ["start", "end"] } },
+  { name: "get_school", description: "The user's classes and school items with dates: exams, quizzes, labs, projects, tasks and assignments. Upcoming only unless include_past is true. Optionally filter to one class by name.",
+    parameters: { type: "OBJECT", properties: { class_name: { type: "STRING" }, include_past: { type: "BOOLEAN" } } } },
+  { name: "add_school_task", description: "Add a task to the school to-do list for one of the user's classes.",
+    parameters: { type: "OBJECT", properties: { text: { type: "STRING" }, class_name: { type: "STRING" }, due: { type: "STRING", description: "YYYY-MM-DD, optional" }, time: { type: "STRING", description: "HH:MM 24-hour, optional" } }, required: ["text", "class_name"] } },
+  { name: "add_todo", description: "Add an item to the general (non-school) to-do list.",
+    parameters: { type: "OBJECT", properties: { text: { type: "STRING" } }, required: ["text"] } },
+  { name: "add_grocery_item", description: "Add an item to a shared grocery list. Uses the most recent list unless list_name is given.",
+    parameters: { type: "OBJECT", properties: { item: { type: "STRING" }, list_name: { type: "STRING" } }, required: ["item"] } },
+  { name: "log_food", description: "Log a food with known calories as a quick-add entry. Only use when the user gives or clearly implies the calories.",
+    parameters: { type: "OBJECT", properties: { name: { type: "STRING" }, kcal: { type: "NUMBER" }, protein: { type: "NUMBER" }, carbs: { type: "NUMBER" }, fat: { type: "NUMBER" }, date: { type: "STRING", description: "YYYY-MM-DD, default today" } }, required: ["name", "kcal"] } },
+];
+const isISO = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+const weekdayOf = iso => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("en-US", { weekday: "long" }); };
+function aiDay(date){
+  if (!isISO(date)) return { error: "date must be YYYY-MM-DD" };
+  const n = data.nutrition.find(x => x.date === date);
+  return { date, weekday: weekdayOf(date),
+    food: n ? { kcal: n.kcal, protein: n.protein, carbs: n.carbs, fat: n.fat, fiber: n.fiber, goal: data.settings.kcalTarget || null,
+      items: foodEntriesFor(date).map(e => ({ time: e.time, name: e.name, amount: e.label || null, kcal: e.kcal, protein: e.protein })) } : null,
+    lifting: data.lifts.filter(w => w.date === date).map(w => ({ split: w.split ? SPLITS[w.split].name : "untagged",
+      exercises: w.exercises.map(ex => ({ name: ex.name, sets: ex.sets.map(x => `${x.weight}x${x.reps}`).join(", ") })), notes: w.notes || null })),
+    cardio: data.cardio.filter(c => c.date === date).map(c => ({ type: tmeta(c.type).label, name: c.name || null, miles: c.distanceMi || null,
+      minutes: Math.round((c.durationSec || 0) / 60), avg_hr: c.avgHr || null })),
+    weight_lb: data.weights.find(w => w.date === date)?.lbs ?? null };
+}
+function aiDays(start, end){
+  if (!isISO(start) || !isISO(end)) return { error: "start and end must be YYYY-MM-DD" };
+  if (start > end) [start, end] = [end, start];
+  const out = [];
+  for (let d = start; d <= end && out.length < 31; d = shiftISO(d, 1)){
+    const n = data.nutrition.find(x => x.date === d);
+    const work = [...data.lifts.filter(w => w.date === d).map(w => w.split ? SPLITS[w.split].name : "Lift"),
+      ...data.cardio.filter(c => c.date === d).map(c => tmeta(c.type).label + (c.distanceMi ? ` ${c.distanceMi} mi` : ""))];
+    out.push({ date: d, kcal: n ? n.kcal : null, protein: n ? n.protein : null, workouts: work, weight_lb: data.weights.find(w => w.date === d)?.lbs ?? null });
+  }
+  return { goal_kcal: data.settings.kcalTarget || null, days: out };
+}
+function aiSchool(wanted, includePast){
+  const sc = data.school, today = todayISO();
+  const cls = wanted ? matchClass(sc.classes, wanted) : null;
+  if (wanted && !cls) return { error: `No class matches "${wanted}"`, classes: sc.classes.map(c => c.name) };
+  const keep = (cid, date) => (!cls || cid === cls.id) && (includePast || !date || date >= today);
+  const items = [
+    ...sc.dates.filter(x => x.kind !== "dayoff" && keep(x.classId, x.date)).map(x => ({ kind: x.kind, title: x.title, class: className(x.classId), date: x.date, time: x.time || null, done: !!x.done })),
+    ...sc.tasks.filter(t => keep(t.classId, t.due)).map(t => ({ kind: "task", title: t.text, class: className(t.classId), date: t.due || null, time: t.dueTime || null, done: !!t.done })),
+    ...sc.assignments.filter(a => keep(a.classId, a.due)).map(a => ({ kind: "assignment", title: a.name, class: className(a.classId), date: a.due || null, graded: a.earned != null })),
+  ].sort((a, b) => (a.date || "9999") < (b.date || "9999") ? -1 : 1).slice(0, 40);
+  return { today, classes: sc.classes.map(c => c.name), filtered_to: cls ? cls.name : null, items };
+}
+async function aiGrocery(item, listName){
+  if (!data.crew?.code) return { error: "Grocery lists need crew sync set up in Settings" };
+  await crewFetchGrocery();
+  const lists = ui.groceryLists || [];
+  const list = listName ? lists.find(l => String(l.name || "").toLowerCase().includes(String(listName).toLowerCase())) : lists[0];
+  if (!list) return { error: listName ? `No grocery list named "${listName}"` : "No grocery lists yet", lists: lists.map(l => l.name) };
+  const fbu = await fbInit();
+  await fbu.db.collection("crews").doc(data.crew.code).collection("grocery").doc(list.id).collection("items")
+    .add({ text: String(item).trim(), done: false, addedBy: myUid(), addedByName: data.crew.name, createdAt: Date.now() });
+  return { ok: true, item, list: list.name };
+}
+async function aiRunTool(name, a){
+  switch (name){
+    case "get_day": return aiDay(a.date);
+    case "get_days": return aiDays(a.start, a.end);
+    case "get_school": return aiSchool(a.class_name, !!a.include_past);
+    case "add_school_task": {
+      const text = String(a.text || "").trim();
+      if (!text) return { error: "task text is empty" };
+      const cls = matchClass(data.school.classes, a.class_name);
+      if (!cls) return { error: `No class matches "${a.class_name}" — nothing added`, classes: data.school.classes.map(c => c.name) };
+      const due = isISO(a.due) ? a.due : null, dueTime = /^\d{2}:\d{2}$/.test(a.time || "") ? a.time : null;
+      data.school.tasks.unshift({ id: uid(), text, classId: cls.id, due, dueTime, done: false, createdAt: Date.now() });
+      save(); return { ok: true, added: { text, class: cls.name, due, time: dueTime } };
+    }
+    case "add_todo": {
+      const text = String(a.text || "").trim();
+      if (!text) return { error: "to-do text is empty" };
+      data.todos.unshift({ id: uid(), text, created: Date.now(), done: false });
+      save(); return { ok: true, added: text, note: data.settings.todoEnabled ? undefined : "the to-do list feature is turned off in Settings" };
+    }
+    case "add_grocery_item": return aiGrocery(a.item, a.list_name);
+    case "log_food": {
+      const kcal = parseFloat(a.kcal);
+      if (!(kcal >= 0)) return { error: "kcal is required" };
+      const date = isISO(a.date) && a.date <= todayISO() ? a.date : todayISO();
+      const m = k => r1(Math.max(0, fNum(a[k])));
+      data.foodLog.push({ id: uid(), date, time: hhmmOf(new Date()), foodId: null, name: String(a.name || "Quick add").trim() || "Quick add",
+        grams: null, qty: null, unit: null, label: "", kcal: Math.round(kcal), protein: m("protein"), carbs: m("carbs"), fat: m("fat"), fiber: 0 });
+      refreshFoodDay(date); save(); return { ok: true, date, kcal: Math.round(kcal) };
+    }
+  }
+  return { error: "unknown tool " + name };
+}
+function aiSystemPrompt(){
+  const t = todayISO();
+  return `You are the assistant inside Training Log, the user's personal fitness, nutrition and school tracker app. Today is ${weekdayOf(t)}, ${t}. Resolve relative dates ("yesterday", "Friday", "next week") from today. Always use the tools to read or change data; never invent numbers or dates. Reply in 1-3 short plain sentences without tables or headings. After adding something, say exactly what was added. If a tool returns an error, explain it briefly and say what is needed.
+The user's classes: ${data.school.classes.map(c => c.name).join("; ") || "none yet"}. Daily calorie goal: ${data.settings.kcalTarget || "not set"}.`;
+}
+async function aiCall(contents){
+  const key = (data.settings.aiKey || "").trim();
+  const go = async model => {
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 30000);
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST", signal: ctl.signal, headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: aiSystemPrompt() }] }, contents, tools: [{ functionDeclarations: AI_TOOLS }] }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok){ const e = new Error(j.error?.message || "HTTP " + r.status); e.status = r.status; throw e; }
+      return j;
+    } finally { clearTimeout(timer); }
+  };
+  const model = (data.settings.aiModel || AI_DEFAULT_MODEL).trim();
+  try { return await go(model); }
+  catch (e) {
+    if (e.status !== 404) throw e;
+    // model retired or renamed: pick the newest Flash model this key can use, remember it
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": key } });
+    const picked = pickFlashModel(await r.json().catch(() => ({})));
+    if (!picked || picked === model) throw e;
+    data.settings.aiModel = picked; save();
+    return await go(picked);
+  }
+}
+function aiErrorText(e){
+  const m = String(e && e.message || "");
+  if (e && e.name === "AbortError") return "Gemini took too long to answer — try again.";
+  if (e && (e.status === 400 || e.status === 401 || e.status === 403) && /key|permission|credential|auth/i.test(m)) return "Gemini rejected the API key — check it in Settings → Assistant.";
+  if (e && e.status === 429) return "Hit the free-tier limit — wait a minute and try again.";
+  if (e instanceof TypeError) return "Couldn't reach Gemini — you may be offline, or it's blocking requests from the app.";
+  return "Gemini error: " + (m || "unknown");
+}
+function aiLogHTML(){
+  const msgs = ui.aiMsgs.length ? ui.aiMsgs : [{ role: "bot", text: "Ask about your calories, workouts or classes — or tell me to add a task, to-do or grocery item." }];
+  return msgs.map(m => `<div class="ai-msg ${m.role}${m.error ? " err" : ""}">${aiTextHTML(m.text)}</div>`).join("")
+    + (ui.aiBusy ? `<div class="ai-msg bot" style="color:var(--sub)">…</div>` : "");
+}
+function aiRenderLog(){ const el = $("#aiLog"); if (el){ el.innerHTML = aiLogHTML(); el.scrollTop = el.scrollHeight; } }
+function renderAi(){
+  const root = $("#aiRoot");
+  if (!root) return;
+  if (!ui.aiOpen){ root.innerHTML = ""; return; }
+  const hasMic = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  root.innerHTML = `<div class="fsheet top" onclick="if(event.target===this)App.aiClose()"><div class="panel tall" id="aiSheet">
+    <div style="display:flex;justify-content:space-between;align-items:center"><div class="lbl" style="margin:0">Assistant</div>
+      <button class="fd-x" onclick="App.aiClose()" aria-label="Close">✕</button></div>
+    <div class="ai-log" id="aiLog">${aiLogHTML()}</div>
+    <div class="ai-row">
+      ${hasMic ? `<button class="ai-ico${ui.aiListening ? " rec" : ""}" id="aiMic" onclick="App.aiMic()" aria-label="Speak"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>` : ""}
+      <input id="aiInput" placeholder="Ask or tell me to add…" autocomplete="off" enterkeyhint="send" onkeydown="if(event.key==='Enter'){event.preventDefault();App.aiSend();}">
+      <button class="ai-ico send" id="aiSend" onclick="App.aiSend()" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </div></div></div>`;
+  const el = $("#aiLog"); if (el) el.scrollTop = el.scrollHeight;
+}
+let aiRec = null;
+async function aiAsk(text){
+  ui.aiMsgs.push({ role: "user", text });
+  if (!(data.settings.aiKey || "").trim()){
+    ui.aiMsgs.push({ role: "bot", error: true, text: "Add your Gemini API key in Settings → Assistant first." });
+    aiRenderLog(); return;
+  }
+  ui.aiBusy = true; aiRenderLog();
+  const contents = ui.aiMsgs.filter(m => !m.error).slice(-10).map(m => ({ role: m.role === "user" ? "user" : "model", parts: [{ text: m.text }] }));
+  let changed = false;
+  try {
+    for (let round = 0; ; round++){
+      if (round === 6){ ui.aiMsgs.push({ role: "bot", error: true, text: "That took too many steps — try asking more simply." }); break; }
+      const res = await aiCall(contents);
+      const cand = res.candidates?.[0], parts = cand?.content?.parts || [];
+      const calls = parts.filter(x => x.functionCall);
+      if (!calls.length){
+        ui.aiMsgs.push({ role: "bot", text: parts.map(x => x.text || "").join("").trim() || "I don't have an answer for that." });
+        break;
+      }
+      contents.push(cand.content);
+      const responses = [];
+      for (const c of calls){
+        let out;
+        try { out = await aiRunTool(c.functionCall.name, c.functionCall.args || {}); } catch (e) { out = { error: e.message || "failed" }; }
+        if (out && out.ok) changed = true;
+        responses.push({ functionResponse: { name: c.functionCall.name, response: { result: out } } });
+      }
+      contents.push({ role: "user", parts: responses });
+    }
+  } catch (e) { ui.aiMsgs.push({ role: "bot", error: true, text: aiErrorText(e) }); }
+  ui.aiBusy = false;
+  if (changed) render();
+  aiRenderLog();
 }
 async function fetchJSON(url, signal){
   const ctl = new AbortController();
@@ -3127,7 +3366,17 @@ function renderSettings(){
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
     ${setRow("Pay tracker", "Log restaurant shifts & pay periods", !!s.payEnabled, "App.togglePayFeature()")}
     ${setRow("School", "Classes, assignments, grades & study log", !!s.schoolEnabled, "App.toggleSchoolFeature()")}
+    ${setRow("AI assistant", "Ask questions or add tasks by voice or text — replaces the title", !!s.aiEnabled, "App.toggleAiFeature()")}
   </div>
+  ${s.aiEnabled ? `<div class="card" id="aiSettings">
+    <div class="lbl" style="margin-bottom:8px">Assistant</div>
+    <div style="font-size:13px;color:var(--sub);margin-bottom:8px;line-height:1.45">Uses Google Gemini's free tier. Paste a key from AI Studio (personal Google account). On the free tier Google may use your questions, and the app data the assistant looks up, to improve its products.</div>
+    <div class="lbl">Gemini API key</div>
+    <input id="aiKey" class="mono" value="${esc(s.aiKey || "")}" placeholder="paste your key" autocomplete="off" autocapitalize="off" spellcheck="false" onchange="App.setAiKey(this.value)" style="margin-bottom:8px">
+    <div class="lbl">Model</div>
+    <input id="aiModel" class="mono" value="${esc(s.aiModel || AI_DEFAULT_MODEL)}" autocomplete="off" autocapitalize="off" spellcheck="false" onchange="App.setAiModel(this.value)">
+    <a class="weblink pull" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free key <span class="ext">↗</span></a>
+  </div>` : ""}
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Crew sync — leaderboard & shared tasks with friends</div>
     ${!data.crew?.config ? `
@@ -4631,6 +4880,26 @@ window.App = {
   setDark(){
     data.settings.darkMode = !data.settings.darkMode;
     save(); applyTheme(); render();
+  },
+  toggleAiFeature(){ data.settings.aiEnabled = !data.settings.aiEnabled; if (!data.settings.aiEnabled){ ui.aiOpen = false; renderAi(); } save(); render(); },
+  setAiKey(v){ data.settings.aiKey = String(v || "").trim(); save(); toast(data.settings.aiKey ? "Gemini key saved ✓" : "Gemini key removed"); },
+  setAiModel(v){ data.settings.aiModel = String(v || "").trim() || AI_DEFAULT_MODEL; save(); toast("Model saved ✓"); },
+  aiOpen(){ ui.aiOpen = true; renderAi(); const i = $("#aiInput"); if (i) i.focus(); },
+  aiClose(){ try { aiRec?.stop(); } catch (_) {} ui.aiOpen = false; ui.aiListening = false; renderAi(); },
+  aiSend(){
+    const i = $("#aiInput"); const text = (i?.value || "").trim();
+    if (!text || ui.aiBusy) return;
+    i.value = ""; aiAsk(text);
+  },
+  aiMic(){
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR){ toast("Use the microphone key on your keyboard to dictate", true); return; }
+    if (ui.aiListening){ try { aiRec?.stop(); } catch (_) {} return; }
+    aiRec = new SR(); aiRec.lang = "en-US"; aiRec.interimResults = true;
+    aiRec.onresult = e => { const i = $("#aiInput"); if (i) i.value = [...e.results].map(r => r[0].transcript).join(""); };
+    aiRec.onerror = e => toast(e.error === "not-allowed" ? "Microphone access is blocked — use the keyboard mic instead" : "Didn't catch that — try again", true);
+    aiRec.onend = () => { ui.aiListening = false; aiRec = null; renderAi(); const i = $("#aiInput"); if (i && i.value.trim()) App.aiSend(); };
+    ui.aiListening = true; renderAi(); aiRec.start();
   },
   toggleTodoFeature(){
     data.settings.todoEnabled = !data.settings.todoEnabled;

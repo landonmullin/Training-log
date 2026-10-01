@@ -166,3 +166,29 @@ test("kcalGoalState compares a day's calories to the goal", () => {
   assert.equal(C.kcalGoalState(2300, null), null);
   assert.equal(C.kcalGoalState(2300, 0), null);
 });
+const classes = [{ id: "c1", name: "ENGR 3413 Materials Science" }, { id: "c2", name: "Modern Physics" }, { id: "c3", name: "Physics Lab" }];
+test("matchClass finds a class from loose spoken names", () => {
+  assert.equal(C.matchClass(classes, "materials science").id, "c1");
+  assert.equal(C.matchClass(classes, "Materials").id, "c1");
+  assert.equal(C.matchClass(classes, "mat sci").id, "c1");
+  assert.equal(C.matchClass(classes, "engr 3413").id, "c1");
+  assert.equal(C.matchClass(classes, "modern physics").id, "c2");
+  assert.equal(C.matchClass(classes, "physics lab").id, "c3");
+  assert.equal(C.matchClass(classes, "chemistry"), null);
+  assert.equal(C.matchClass(classes, ""), null);
+  assert.equal(C.matchClass([], "materials"), null);
+});
+test("aiTextHTML escapes and keeps line breaks and bold", () => {
+  assert.equal(C.aiTextHTML("Hi <b>\n**Exam 2** on Fri"), "Hi &lt;b&gt;<br><strong>Exam 2</strong> on Fri");
+});
+test("pickFlashModel prefers the newest free Flash model that can generate content", () => {
+  const list = { models: [
+    { name: "models/gemini-2.5-pro", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.5-flash", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.8-flash", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.8-flash-tts", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.8-flash-lite", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/embedding-001", supportedGenerationMethods: ["embedContent"] }] };
+  assert.equal(C.pickFlashModel(list), "gemini-3.8-flash");
+  assert.equal(C.pickFlashModel({ models: [] }), null);
+});
