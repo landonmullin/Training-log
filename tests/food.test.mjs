@@ -192,3 +192,12 @@ test("pickFlashModel prefers the newest free Flash model that can generate conte
   assert.equal(C.pickFlashModel(list), "gemini-3.8-flash");
   assert.equal(C.pickFlashModel({ models: [] }), null);
 });
+test("pickFlashModel can skip busy models and fall back to Flash-Lite", () => {
+  const list = { models: [
+    { name: "models/gemini-3.5-flash", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.8-flash", supportedGenerationMethods: ["generateContent"] },
+    { name: "models/gemini-3.5-flash-lite", supportedGenerationMethods: ["generateContent"] }] };
+  assert.equal(C.pickFlashModel(list, ["gemini-3.8-flash"]), "gemini-3.5-flash");
+  assert.equal(C.pickFlashModel(list, ["gemini-3.8-flash", "gemini-3.5-flash"]), "gemini-3.5-flash-lite");
+  assert.equal(C.pickFlashModel(list, ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]), null);
+});

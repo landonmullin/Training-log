@@ -528,6 +528,36 @@ def assistant_switches_to_available_model_when_default_is_gone(pw, url):
         assert "Hi from the new model." in pg.inner_text("#aiLog")
         assert stored(pg)["settings"]["aiModel"] == "gemini-9.0-flash"
 
+BUSY = (503, json.dumps({"error": {"code": 503, "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.", "status": "UNAVAILABLE"}}))
+
+@test
+def assistant_retries_then_uses_another_model_when_busy(pw, url):
+    calls = []
+    def g(req):
+        calls.append((req.method, req.url))
+        if req.method == "GET":
+            return 200, json.dumps({"models": [{"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
+                                               {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]}]})
+        if "gemini-3.6-flash:generateContent" in req.url: return gem_text("Answered by the backup model.")
+        return BUSY
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "hi")
+        assert "Answered by the backup model." in pg.inner_text("#aiLog")
+        posts = [u for m, u in calls if m == "POST"]
+        assert sum("gemini-3.5-flash:" in u for u in posts) == 2  # first try + one retry
+        assert stored(pg)["settings"].get("aiModel") in (None, "gemini-3.5-flash")  # backup isn't saved as the default
+
+@test
+def assistant_explains_when_every_model_is_busy(pw, url):
+    def g(req):
+        if req.method == "GET":
+            return 200, json.dumps({"models": [{"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]}]})
+        return BUSY
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        ask(pg, "hi")
+        txt = pg.inner_text("#aiLog").lower()
+        assert "busy" in txt and "try again" in txt
+
 # --- tests above this line ---
 
 def main():

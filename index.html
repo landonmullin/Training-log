@@ -193,7 +193,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 76;
+const APP_VERSION = 77;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2185,13 +2185,17 @@ function aiTextHTML(t){
   return String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>");
 }
-function pickFlashModel(list){
-  const ver = n => n.match(/^gemini-([\d.]+)-flash$/)?.[1].split(".").map(Number) || null;
-  const names = ((list && list.models) || [])
+function pickFlashModel(list, exclude = []){
+  const all = ((list && list.models) || [])
     .filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
-    .map(m => String(m.name || "").replace(/^models\//, "")).filter(n => ver(n));
-  names.sort((a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < Math.max(x.length, y.length); i++){ const d = (y[i] || 0) - (x[i] || 0); if (d) return d; } return 0; });
-  return names[0] || null;
+    .map(m => String(m.name || "").replace(/^models\//, "")).filter(n => !exclude.includes(n));
+  const newest = re => {
+    const ver = n => n.match(re)?.[1].split(".").map(Number) || null;
+    const names = all.filter(n => ver(n));
+    names.sort((a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < Math.max(x.length, y.length); i++){ const d = (y[i] || 0) - (x[i] || 0); if (d) return d; } return 0; });
+    return names[0] || null;
+  };
+  return newest(/^gemini-([\d.]+)-flash$/) || newest(/^gemini-([\d.]+)-flash-lite$/);
 }
 // @food-core-end
 // ----- food log: app-level (reads/writes `data`) -----
@@ -2545,23 +2549,40 @@ async function aiCall(contents){
       return j;
     } finally { clearTimeout(timer); }
   };
+  const listModels = async () => {
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": key } });
+    return r.json().catch(() => ({}));
+  };
+  const busy = e => e.status === 503 || e.status === 500; // free-tier "high demand" spikes
   const model = (data.settings.aiModel || AI_DEFAULT_MODEL).trim();
   try { return await go(model); }
   catch (e) {
-    if (e.status !== 404) throw e;
-    // model retired or renamed: pick the newest Flash model this key can use, remember it
-    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": key } });
-    const picked = pickFlashModel(await r.json().catch(() => ({})));
-    if (!picked || picked === model) throw e;
-    data.settings.aiModel = picked; save();
-    return await go(picked);
+    if (e.status === 404){
+      // model retired or renamed: pick the newest Flash model this key can use, remember it
+      const picked = pickFlashModel(await listModels(), [model]);
+      if (!picked) throw e;
+      data.settings.aiModel = picked; save();
+      return await go(picked);
+    }
+    if (!busy(e)) throw e;
   }
+  await new Promise(r => setTimeout(r, 1500)); // busy: one short retry, then borrow another free model for this question
+  try { return await go(model); } catch (e) { if (!busy(e)) throw e; }
+  const list = await listModels(), tried = [model];
+  for (let i = 0; i < 2; i++){
+    const alt = pickFlashModel(list, tried);
+    if (!alt) break;
+    tried.push(alt);
+    try { return await go(alt); } catch (e) { if (!busy(e)) throw e; }
+  }
+  const err = new Error("all models busy"); err.busy = true; throw err;
 }
 function aiErrorText(e){
   const m = String(e && e.message || "");
   if (e && e.name === "AbortError") return "Gemini took too long to answer — try again.";
   if (e && (e.status === 400 || e.status === 401 || e.status === 403) && /key|permission|credential|auth/i.test(m)) return "Gemini rejected the API key — check it in Settings → Assistant.";
   if (e && e.status === 429) return "Hit the free-tier limit — wait a minute and try again.";
+  if (e && (e.busy || e.status === 503 || e.status === 500)) return "Gemini's free models are busy right now — try again in a minute.";
   if (e instanceof TypeError) return "Couldn't reach Gemini — you may be offline, or it's blocking requests from the app.";
   return "Gemini error: " + (m || "unknown");
 }
