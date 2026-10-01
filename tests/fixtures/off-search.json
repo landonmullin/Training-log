@@ -1,0 +1,7 @@
+{"count":3,"page":1,"products":[
+ {"code":"0689544080350","product_name":"Total 0% Greek Yogurt","brands":"Fage","serving_size":"170 g","serving_quantity":170,
+  "nutriments":{"energy-kcal_100g":54,"proteins_100g":10.3,"carbohydrates_100g":3.6,"fat_100g":0,"fiber_100g":0}},
+ {"code":"3017620422003","product_name":"Nutella","brands":"Ferrero,Nutella","serving_size":"15 g","serving_quantity":15,
+  "nutriments":{"energy-kj_100g":2252,"proteins_100g":6.3,"carbohydrates_100g":57.5,"fat_100g":30.9}},
+ {"code":"111","product_name":"Mystery bar","brands":"","nutriments":{"proteins_100g":20}}
+]}

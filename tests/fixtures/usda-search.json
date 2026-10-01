@@ -1,0 +1,22 @@
+{"totalHits":4,"foods":[
+ {"fdcId":171287,"description":"Egg, whole, raw, fresh","dataType":"SR Legacy",
+  "foodNutrients":[{"nutrientId":1003,"nutrientName":"Protein","unitName":"G","value":12.6},
+   {"nutrientId":1004,"nutrientName":"Total lipid (fat)","unitName":"G","value":9.51},
+   {"nutrientId":1005,"nutrientName":"Carbohydrate, by difference","unitName":"G","value":0.72},
+   {"nutrientId":1008,"nutrientName":"Energy","unitName":"KCAL","value":143},
+   {"nutrientId":1079,"nutrientName":"Fiber, total dietary","unitName":"G","value":0}],
+  "foodMeasures":[{"disseminationText":"1 large","gramWeight":50,"rank":2},
+   {"disseminationText":"1 cup (4.86 large eggs)","gramWeight":243,"rank":1},
+   {"disseminationText":"Quantity not specified","gramWeight":50,"rank":9}]},
+ {"fdcId":2646170,"description":"Chicken, breast, boneless, skinless, raw","dataType":"Foundation",
+  "foodNutrients":[{"nutrientId":1003,"unitName":"G","value":22.5},{"nutrientId":1004,"unitName":"G","value":1.93},
+   {"nutrientId":1005,"unitName":"G","value":0},{"nutrientId":1062,"unitName":"KJ","value":444},
+   {"nutrientId":2047,"unitName":"KCAL","value":106}],
+  "foodMeasures":[]},
+ {"fdcId":2345678,"description":"GREEK NONFAT YOGURT, PLAIN","dataType":"Branded","brandOwner":"Fage USA Dairy Industry, Inc.","brandName":"FAGE",
+  "gtinUpc":"00689544080350","servingSize":170,"servingSizeUnit":"g","householdServingFullText":"1 container",
+  "foodNutrients":[{"nutrientId":1003,"unitName":"G","value":10.0},{"nutrientId":1004,"unitName":"G","value":0},
+   {"nutrientId":1005,"unitName":"G","value":3.53},{"nutrientId":1008,"unitName":"KCAL","value":53},{"nutrientId":1079,"unitName":"G","value":0}],
+  "foodMeasures":[]},
+ {"fdcId":999,"description":"NO ENERGY ROW","dataType":"Branded","foodNutrients":[{"nutrientId":1003,"unitName":"G","value":5}]}
+]}

@@ -2029,6 +2029,68 @@ function shiftISO(iso, days){
   const dt = new Date(y, m - 1, d + days);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
+const USDA_TIER = { "Foundation": 1, "SR Legacy": 1, "Survey (FNDDS)": 2, "Branded": 3 };
+const OFF_FIELDS = "code,product_name,brands,nutriments,serving_size,serving_quantity";
+function parseUsdaFood(f){
+  if (!f || !f.fdcId) return null;
+  const ns = f.foodNutrients || [];
+  const pick = (id, kcalOnly) => {
+    const n = ns.find(x => x.nutrientId === id && (!kcalOnly || String(x.unitName || "").toUpperCase() === "KCAL"));
+    return n && Number.isFinite(n.value) ? n.value : null;
+  };
+  const kcal = pick(1008, true) ?? pick(2047, true) ?? pick(2048, true);
+  if (kcal == null) return null;
+  const portions = [];
+  if (f.dataType === "Branded"){
+    const sz = fNum(f.servingSize), unit = String(f.servingSizeUnit || "").toLowerCase();
+    if (sz > 0 && (unit === "g" || unit === "grm"))
+      portions.push({ label: `1 serving (${f.householdServingFullText ? String(f.householdServingFullText).trim() : r1(sz) + " g"})`, grams: r1(sz) });
+  }
+  for (const m of [...(f.foodMeasures || [])].sort((a, b) => (a.rank || 0) - (b.rank || 0))){
+    const g = fNum(m.gramWeight), t = String(m.disseminationText || "").trim();
+    if (g > 0 && t && t.toLowerCase() !== "quantity not specified" && portions.length < 6) portions.push({ label: t, grams: r1(g) });
+  }
+  return { name: tidyName(f.description), brand: String(f.brandName || f.brandOwner || "").trim(), barcode: normBarcode(f.gtinUpc),
+    per100g: { kcal: r1(kcal), protein: r1(fNum(pick(1003))), carbs: r1(fNum(pick(1005))), fat: r1(fNum(pick(1004))), fiber: r1(fNum(pick(1079))) },
+    portions, servingOnly: false, source: "usda", sourceId: String(f.fdcId), tier: USDA_TIER[f.dataType] || 3 };
+}
+function parseOffProduct(p){
+  if (!p || !p.code) return null;
+  const n = p.nutriments || {};
+  const kcal = n["energy-kcal_100g"] != null ? fNum(n["energy-kcal_100g"])
+    : n["energy-kj_100g"] != null ? fNum(n["energy-kj_100g"]) / 4.184 : null;
+  const sq = fNum(p.serving_quantity);
+  const portions = sq > 0 ? [{ label: `1 serving (${p.serving_size ? String(p.serving_size).trim() : r1(sq) + " g"})`, grams: r1(sq) }] : [];
+  return { name: String(p.product_name || "").trim() || "Unnamed product", brand: String(p.brands || "").split(",")[0].trim(),
+    barcode: normBarcode(p.code),
+    per100g: { kcal: kcal == null ? null : r1(kcal), protein: r1(fNum(n.proteins_100g)), carbs: r1(fNum(n.carbohydrates_100g)),
+      fat: r1(fNum(n.fat_100g)), fiber: r1(fNum(n.fiber_100g)) },
+    portions, servingOnly: false, source: "off", sourceId: String(p.code), tier: 3, incomplete: kcal == null };
+}
+function mergeResults(savedHits, usdaFoods, offFoods){
+  const keys = new Set(savedHits.map(f => f.source + ":" + f.sourceId));
+  const codes = new Set(savedHits.map(f => f.barcode).filter(Boolean));
+  const out = [];
+  const remote = [...usdaFoods, ...offFoods].filter(f => f && !f.incomplete).sort((a, b) => a.tier - b.tier);
+  for (const f of remote){
+    const key = f.source + ":" + f.sourceId;
+    if (keys.has(key) || (f.barcode && codes.has(f.barcode))) continue;
+    keys.add(key); if (f.barcode) codes.add(f.barcode);
+    out.push(f);
+  }
+  return savedHits.map(f => ({ ...f, saved: true })).concat(out);
+}
+function usdaSearchURL(q, key){
+  return `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}`
+    + `&pageSize=25&dataType=${encodeURIComponent("Foundation,SR Legacy,Survey (FNDDS),Branded")}`;
+}
+function offSearchURL(q){
+  return `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}`
+    + `&search_simple=1&action=process&json=1&page_size=20&fields=${OFF_FIELDS}`;
+}
+function offProductURL(code){
+  return `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(String(code).replace(/\D/g, ""))}.json?fields=${OFF_FIELDS}`;
+}
 // @food-core-end
 // deficit/surplus vs saved calorie goal: green under, red over
 function kcalColor(kcal){
