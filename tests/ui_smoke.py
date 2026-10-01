@@ -224,6 +224,53 @@ def stale_search_result_is_ignored(pw, url):
         pg.evaluate("runRemoteSearch('egg')")  # finishes after the user has moved on
         assert pg.evaluate("ui.foodRemote.q") != "egg"
 
+@test
+def scanned_known_product_logs_directly(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("handleBarcode('0049000028911')")
+        assert pg.evaluate("ui.foodSheet") == "amount"
+        assert "Diet Coke" in pg.inner_text("#fdSheet")
+        pg.click("#faSave")
+        e = stored(pg)["foodLog"][0]
+        assert e["kcal"] == 0 and e["name"] == "Diet Coke"
+        pg.evaluate("handleBarcode('049000028911')")  # same product, UPC-A padding
+        assert pg.evaluate("ui.foodSheet") == "amount" and pg.evaluate("ui.foodPick.id") == stored(pg)["foods"][0]["id"]
+
+@test
+def unknown_barcode_creates_food_and_rescans_offline(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("handleBarcode('0000000000017')")
+        assert pg.evaluate("ui.foodSheet") == "create"
+        assert "17" in pg.inner_text("#fdSheet")
+        pg.click("#fcSave")  # blank name
+        assert pg.evaluate("ui.foodSheet") == "create"
+        pg.fill("#fcName", "Gas station bar"); pg.fill("#fcServing", "1 bar"); pg.fill("#fcGrams", "60")
+        pg.fill("#fcKcal", "250"); pg.fill("#fcProt", "20"); pg.click("#fcSave")
+        assert pg.evaluate("ui.foodSheet") == "amount"
+        pg.click("#faSave")
+        s = stored(pg)
+        assert s["foodLog"][0]["kcal"] == 250 and s["foods"][0]["barcode"] == "17"
+        pg.route("**/*", lambda r: r.continue_() if r.request.url.startswith("http://127.0.0.1") else r.abort())
+        pg.evaluate("handleBarcode('17')")
+        assert pg.evaluate("ui.foodSheet") == "amount" and "Gas station bar" in pg.inner_text("#fdSheet")
+
+@test
+def create_food_from_search_link(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdAdd"); pg.click("#fdCreateLink")
+        pg.fill("#fcName", "Mom's lasagna"); pg.fill("#fcKcal", "700"); pg.click("#fcSave")
+        opts = pg.locator("#faUnit option").all_inner_texts()
+        assert opts == ["1 serving"]
+        pg.fill("#faQty", "1.5"); pg.click("#faSave")
+        assert stored(pg)["foodLog"][0]["kcal"] == 1050
+
+@test
+def scanner_load_failure_returns_to_search(pw, url):
+    with app(pw, url, base(), offline=True) as pg:
+        pg.click("#fdScan")
+        pg.wait_for_function("ui.foodSheet === 'search'")
+        assert pg.locator("#fdQuery").count() == 1
+
 # --- tests above this line ---
 
 def main():

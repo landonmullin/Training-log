@@ -141,3 +141,16 @@ test("tidyName only changes ALL CAPS names", () => {
   assert.equal(C.tidyName("GREEK NONFAT YOGURT, PLAIN"), "Greek Nonfat Yogurt, Plain");
   assert.equal(C.tidyName("Egg, whole, raw"), "Egg, whole, raw");
 });
+test("prefillFrom gives per-serving values for the first portion", () => {
+  const p = C.prefillFrom({ name: "Bar", brand: "B", per100g: { kcal: 400, protein: 30, carbs: 40, fat: 10, fiber: 5 },
+    portions: [{ label: "1 bar", grams: 60 }], servingOnly: false }, "0123");
+  assert.deepEqual(p, { name: "Bar", brand: "B", barcode: "123", servingLabel: "1 bar", servingGrams: 60,
+    kcal: 240, protein: 18, carbs: 24, fat: 6, fiber: 3 });
+});
+test("prefillFrom falls back to 100 g, leaves unknown calories blank, blanks grams for serving-only", () => {
+  const p = C.prefillFrom({ name: "X", brand: "", per100g: { kcal: null, protein: 20, carbs: 0, fat: 0, fiber: 0 }, portions: [] }, "");
+  assert.equal(p.servingLabel, "100 g"); assert.equal(p.servingGrams, 100); assert.equal(p.kcal, ""); assert.equal(p.protein, 20);
+  const s = C.prefillFrom({ name: "W", per100g: { kcal: 900, protein: 60, carbs: 0, fat: 0, fiber: 0 },
+    portions: [{ label: "1 plate", grams: 100 }], servingOnly: true }, "");
+  assert.equal(s.servingGrams, ""); assert.equal(s.kcal, 900);
+});
