@@ -176,7 +176,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 73;
+const APP_VERSION = 74;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2032,9 +2032,10 @@ function toSavedFood(f, makeId){
     servingOnly: !!f.servingOnly, source: f.source, sourceId: f.sourceId || "", uses: 0, lastUsed: 0 };
 }
 function searchSaved(foods, q){
-  const toks = String(q ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  const fold = x => String(x ?? "").toLowerCase().replace(/['’]/g, "");
+  const toks = fold(q).split(/\s+/).filter(Boolean);
   if (!toks.length) return [];
-  return foods.filter(f => { const hay = (f.name + " " + (f.brand || "")).toLowerCase(); return toks.every(t => hay.includes(t)); })
+  return foods.filter(f => { const hay = fold(f.name + " " + (f.brand || "")); return toks.every(t => hay.includes(t)); })
     .sort((a, b) => (b.uses - a.uses) || (b.lastUsed - a.lastUsed)).slice(0, 20);
 }
 function recentFoods(foods, mode){
@@ -2141,6 +2142,12 @@ function parseUsdaPortions(detail){
 }
 function usdaFoodURL(id, key){
   return `https://api.nal.usda.gov/fdc/v1/food/${encodeURIComponent(id)}?api_key=${encodeURIComponent(key)}`;
+}
+// USDA matches whole words and ORs them, so "mcgriddle" misses "McGRIDDLES". This variant
+// requires every word and prefix-matches it, after dropping apostrophes and a plural "s".
+function usdaStrictQuery(q){
+  return String(q ?? "").toLowerCase().replace(/['’]/g, "").split(/[^a-z0-9]+/).filter(Boolean)
+    .map(w => "+" + (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w) + "*").join(" ");
 }
 // @food-core-end
 // ----- food log: app-level (reads/writes `data`) -----
@@ -2378,8 +2385,14 @@ async function runRemoteSearch(q){
   const ctl = new AbortController(); foodSearchCtl = ctl;
   const key = (data.settings.usdaKey || "").trim();
   if (ui.foodQuery.trim() === q){ ui.foodRemote = { q, usda: [], off: [], status: "loading" }; updateFoodResults(); }
+  // forgiving query first (every word, prefix match), then the literal one; either may fail alone
+  const usdaGet = query => fetchJSON(usdaSearchURL(query, key), ctl.signal).then(j => (j.foods || []).map(parseUsdaFood).filter(Boolean));
+  const strict = usdaStrictQuery(q);
   const usdaP = key
-    ? fetchJSON(usdaSearchURL(q, key), ctl.signal).then(j => (j.foods || []).map(parseUsdaFood).filter(Boolean))
+    ? Promise.allSettled([strict && strict !== q ? usdaGet(strict) : Promise.resolve([]), usdaGet(q)]).then(([a, b]) => {
+        if (a.status === "rejected" && b.status === "rejected") throw b.reason;
+        return [...(a.status === "fulfilled" ? a.value : []), ...(b.status === "fulfilled" ? b.value : [])];
+      })
     : Promise.resolve(null);
   const offP = fetchJSON(offSearchURL(q), ctl.signal).then(j => (j.products || []).map(parseOffProduct).filter(Boolean));
   const [u, o] = await Promise.allSettled([usdaP, offP]);

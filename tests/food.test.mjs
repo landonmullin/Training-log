@@ -154,3 +154,8 @@ test("prefillFrom falls back to 100 g, leaves unknown calories blank, blanks gra
     portions: [{ label: "1 plate", grams: 100 }], servingOnly: true }, "");
   assert.equal(s.servingGrams, ""); assert.equal(s.kcal, 900);
 });
+test("searchSaved ignores case and apostrophes", () => {
+  const foods = [{ id: "m", name: "McDONALD'S, Sausage, Egg & Cheese McGRIDDLES", brand: "", uses: 1, lastUsed: 1 }];
+  assert.deepEqual(C.searchSaved(foods, "mcdonalds mcgriddle").map(f => f.id), ["m"]);
+  assert.deepEqual(C.searchSaved(foods, "MCDONALD'S").map(f => f.id), ["m"]);
+});

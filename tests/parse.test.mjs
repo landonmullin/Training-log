@@ -90,3 +90,11 @@ test("parseUsdaPortions handles SR Legacy modifiers, FNDDS descriptions and frac
 test("usdaFoodURL points at the detail endpoint", () => {
   assert.equal(C.usdaFoodURL("2646170", "k/1"), "https://api.nal.usda.gov/fdc/v1/food/2646170?api_key=k%2F1");
 });
+
+test("usdaStrictQuery requires every word, tolerates plurals and apostrophes", () => {
+  assert.equal(C.usdaStrictQuery("McDonalds sausage egg cheese McGriddle"), "+mcdonald* +sausage* +egg* +cheese* +mcgriddle*");
+  assert.equal(C.usdaStrictQuery("mcdonald's hash browns"), "+mcdonald* +hash* +brown*");
+  assert.equal(C.usdaStrictQuery("Eggs & toast!"), "+egg* +toast*");
+  assert.equal(C.usdaStrictQuery("  "), "");
+  assert.equal(C.usdaStrictQuery("as is"), "+as* +is*");
+});

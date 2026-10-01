@@ -354,6 +354,20 @@ def push_sync_skips_unchanged_reminders(pw, url):
         pg.evaluate("pushSyncItems()")
         assert pg.evaluate("window.__writes") == 2
 
+@test
+def usda_search_sends_forgiving_and_literal_queries(pw, url):
+    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
+    with app(pw, url, seed) as pg:
+        seen = []
+        pg.on("request", lambda r: seen.append(r.url) if "foods/search" in r.url else None)
+        pg.click("#fdAdd"); pg.keyboard.type("McDonalds McGriddle")
+        pg.wait_for_selector("#fdResults :text('Nutella')")
+        from urllib.parse import urlparse, parse_qs
+        qs = sorted(parse_qs(urlparse(u).query)["query"][0] for u in seen)
+        assert qs == ["+mcdonald* +mcgriddle*", "McDonalds McGriddle"], qs
+        names = pg.locator("#fdResults .fd-res").all_inner_texts()
+        assert sum("Egg, whole, raw" in n for n in names) == 1  # merged without duplicates
+
 # --- tests above this line ---
 
 def main():
