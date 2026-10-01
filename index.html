@@ -2145,7 +2145,17 @@ function nutritionSettingsHTML(){
     <div style="font-size:14px;font-weight:600;margin-bottom:4px">Import from Cronometer</div>
     <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">Back-fill past days from a Cronometer <b>Daily Nutrition</b> export (website: Account → Export Data). Days that already have foods logged here are skipped.</div>
     <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
-    <!-- my-foods -->
+    <div style="height:1px;background:var(--grid);margin:14px 0"></div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:6px">My foods (${data.foods.length})</div>
+    <div id="myFoods">${data.foods.length ? [...data.foods].sort((a, b) => a.name.localeCompare(b.name)).map(f => {
+        const d = foodDefaultServing(f);
+        return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--grid)">
+          <div style="flex:1;min-width:0"><div style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</div>
+            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${f.brand ? esc(f.brand) + " · " : ""}${d.kcal} kcal / ${esc(d.label)}</div></div>
+          <button class="linkbtn" onclick="App.foodEditSaved('${f.id}')">edit</button>
+          ${delBtn("MF" + f.id, `App.foodDelSaved('${f.id}')`)}
+        </div>`; }).join("")
+      : `<div class="muted" style="text-align:left">Foods you log or create are saved here.</div>`}</div>
   </div>`;
 }
 function foodEntriesFor(date){
@@ -3183,7 +3193,7 @@ function renderSettings(){
     ${Object.entries(TYPE_META).map(([k,v])=>setRow(`${v.emoji} ${v.label}`, "", !!s.cardioTypes[k], `App.toggleCardioType('${k}')`)).join("")}
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
   </div>`;
-  html += nutritionSettingsHTML();
+  html += nutritionSettingsHTML() + foodSheetHTML();
   return html;
 }
 
@@ -4010,6 +4020,14 @@ window.App = {
     ui.foodSheet = null; ui.tab = "settings"; render();
     const el = $("#usdaKey"); if (el){ el.scrollIntoView({ block: "center" }); el.focus(); }
   },
+  foodEditSaved(id){
+    const f = data.foods.find(x => x.id === id); if (!f) return;
+    ui.foodEditFoodId = id; ui.foodPrefill = prefillFrom(f, f.barcode); ui.foodSheet = "create"; render();
+  },
+  foodDelSaved(id){
+    if (!confirmDel("MF" + id)) return;
+    data.foods = data.foods.filter(f => f.id !== id); save(); toast("Food removed — past entries keep their numbers"); render();
+  },
   foodDayToday(){ ui.foodDay = todayISO(); render(); },
   foodScan(){ ui.foodSheet = "scan"; ui.scanStatus = ""; ui.foodEdit = null; render(); startScan(); },
   foodCreateSave(){
@@ -4020,6 +4038,17 @@ window.App = {
         kcal: val("#fcKcal"), protein: val("#fcProt"), carbs: val("#fcCarb"), fat: val("#fcFat"), fiber: val("#fcFib"),
         barcode: ui.foodPrefill?.barcode || "" });
     } catch (err) { toast(err.message, true); return; }
+    if (ui.foodEditFoodId){
+      const f = data.foods.find(x => x.id === ui.foodEditFoodId);
+      if (f){
+        const keepExtra = !food.servingOnly && !f.servingOnly ? f.portions.slice(1) : [];
+        Object.assign(f, { name: food.name, brand: food.brand, per100g: food.per100g,
+          portions: [...food.portions, ...keepExtra], servingOnly: food.servingOnly });
+        save();
+      }
+      ui.foodEditFoodId = null; ui.foodPrefill = null; ui.foodSheet = null;
+      toast("Food updated ✓"); render(); return;
+    }
     const saved = toSavedFood(food, uid);
     data.foods.push(saved); save();
     ui.foodPrefill = null;

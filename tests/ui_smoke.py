@@ -271,6 +271,37 @@ def scanner_load_failure_returns_to_search(pw, url):
         pg.wait_for_function("ui.foodSheet === 'search'")
         assert pg.locator("#fdQuery").count() == 1
 
+@test
+def edit_saved_food_keeps_history(pw, url):
+    seed = base(foods=[EGG], foodLog=[{"id": "e1", "date": "2026-09-28", "time": "08:00", "foodId": "f-egg", "name": "Egg, whole",
+        "grams": 50, "qty": 1, "unit": "p0", "label": "1 large", "kcal": 72, "protein": 6.3, "carbs": 0.4, "fat": 4.8, "fiber": 0}])
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        assert "Egg, whole" in pg.inner_text("#myFoods")
+        pg.click("#myFoods .linkbtn >> nth=0")
+        assert pg.input_value("#fcName") == "Egg, whole" and pg.input_value("#fcGrams") == "50"
+        pg.fill("#fcName", "Egg (large)"); pg.fill("#fcKcal", "80"); pg.click("#fcSave")
+        s = stored(pg); f = s["foods"][0]
+        assert f["id"] == "f-egg" and f["name"] == "Egg (large)" and f["per100g"]["kcal"] == 160 and f["uses"] == 3
+        assert s["foodLog"][0]["kcal"] == 72  # history keeps its snapshot
+        assert pg.evaluate("ui.foodSheet") is None and pg.evaluate("ui.tab") == "settings"
+
+@test
+def deleted_food_entries_stay_editable(pw, url):
+    seed = base(foods=[EGG], foodLog=[{"id": "e1", "date": "2026-09-28", "time": "08:00", "foodId": "f-egg", "name": "Egg, whole",
+        "grams": 50, "qty": 1, "unit": "p0", "label": "1 large", "kcal": 72, "protein": 6.3, "carbs": 0.4, "fat": 4.8, "fiber": 0}],
+        nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 72, "protein": 6, "carbs": 0, "fat": 5, "fiber": 0, "source": "log"}])
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.click("#myFoods button.del"); pg.click("#myFoods button.del")
+        assert stored(pg)["foods"] == []
+        pg.evaluate("App.tab('food'); ui.foodDay = '2026-09-28'; render()")
+        pg.click(".fd-row >> nth=0")
+        assert pg.input_value("#faUnit") == "g" and pg.input_value("#faQty") == "50"
+        pg.fill("#faQty", "100"); pg.click("#faSave")
+        s = stored(pg)
+        assert s["foodLog"][0]["kcal"] == 144 and s["foods"] == []
+
 # --- tests above this line ---
 
 def main():
