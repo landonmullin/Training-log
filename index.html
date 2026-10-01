@@ -148,11 +148,11 @@
   .routebtn{background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:var(--body)}
   body.dark .leaflet-tile{filter:invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.7)}
   body.dark .leaflet-container{background:#1B2330}
-  .fsheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,0.45);display:flex;align-items:flex-end}
+  .fsheet{position:fixed;left:0;right:0;top:var(--vvt,0px);height:var(--vvh,100%);z-index:20;background:rgba(0,0,0,0.45);display:flex;align-items:flex-end}
   .fsheet .panel{background:var(--paper);width:100%;max-width:560px;margin:0 auto;max-height:88vh;overflow-y:auto;border-radius:16px 16px 0 0;padding:10px 14px calc(18px + env(safe-area-inset-bottom))}
   /* search sheet: pinned to the top at a fixed height so loading results never moves the search box */
   .fsheet.top{align-items:flex-start}
-  .fsheet .panel.tall{height:88vh;height:88dvh;max-height:none;display:flex;flex-direction:column;overflow:hidden;border-radius:0 0 16px 16px;padding-top:calc(10px + env(safe-area-inset-top))}
+  .fsheet .panel.tall{height:88vh;height:min(88dvh, calc(var(--vvh, 100dvh) - 6px));max-height:none;display:flex;flex-direction:column;overflow:hidden;border-radius:0 0 16px 16px;padding-top:calc(10px + env(safe-area-inset-top))}
   .fsheet .panel.tall #fdResults{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
   .fd-x{background:none;border:none;color:var(--sub);font-size:18px;padding:4px 8px;cursor:pointer}
   .fd-nav{background:none;border:1px solid var(--line);border-radius:8px;width:40px;height:34px;font-size:20px;line-height:1;color:var(--ink);cursor:pointer}
@@ -193,7 +193,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 78;
+const APP_VERSION = 79;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1507,15 +1507,17 @@ async function cloudBackup(manual){
     const prevHashes = prev.chunkHashes || [];
     const hashes = chunks.map(hashStr);
     const now = Date.now();
-    // a large log is stored in pieces; pieces go up before the main doc that points at them
+    // a large log is stored in pieces under a new generation id; the main doc switches to them only
+    // after every piece is up, so an interrupted backup leaves the previous one fully restorable
+    const gen = now.toString(36);
     for (let i=0;i<coreParts.length;i++)
-      await col.doc(`${key}__c${i}`).set({ owner:key, idx:i, data:coreParts[i], updatedAt:now });
+      await col.doc(`${key}__c${gen}_${i}`).set({ owner:key, idx:i, data:coreParts[i], updatedAt:now });
     await col.doc(key).set({
-      name: data.crew.name, core: coreParts.length ? "" : core, coreChunks: coreParts.length, chunkCount: chunks.length,
-      updatedAt: now, version: APP_VERSION
+      name: data.crew.name, core: coreParts.length ? "" : core, coreChunks: coreParts.length, coreGen: coreParts.length ? gen : null,
+      chunkCount: chunks.length, updatedAt: now, version: APP_VERSION
     });
-    for (let i=coreParts.length; i<(prev.coreChunks||0); i++){
-      try { await col.doc(`${key}__c${i}`).delete(); } catch(e){}
+    for (let i=0; i<(prev.coreChunks||0); i++){
+      try { await col.doc(prev.coreGen ? `${key}__c${prev.coreGen}_${i}` : `${key}__c${i}`).delete(); } catch(e){}
     }
     for (let i=0;i<chunks.length;i++){
       if (prevHashes[i] === hashes[i]) continue; // unchanged, skip the upload
@@ -1525,7 +1527,7 @@ async function cloudBackup(manual){
       try { await col.doc(`${key}__r${i}`).delete(); } catch(e){}
     }
     bkPushing = true;
-    data.settings.cloudBackup = { at: now, chunkCount: chunks.length, chunkHashes: hashes, coreChunks: coreParts.length };
+    data.settings.cloudBackup = { at: now, chunkCount: chunks.length, chunkHashes: hashes, coreChunks: coreParts.length, coreGen: coreParts.length ? gen : null };
     save();
     bkPushing = false;
     if (manual){ toast("Backed up to the cloud \u2713"); render(); }
@@ -1549,7 +1551,7 @@ async function cloudFetchBackup(code, key){
   if (d.coreChunks){
     const parts = [];
     for (let i=0;i<d.coreChunks;i++){
-      const c = await col.doc(`${key}__c${i}`).get();
+      const c = await col.doc(d.coreGen ? `${key}__c${d.coreGen}_${i}` : `${key}__c${i}`).get();
       if (!c.exists) throw new Error("backup is incomplete");
       parts.push(c.data().data);
     }
@@ -2063,9 +2065,14 @@ function dayTotals(entries){
 function rebuildNutritionDay(nutrition, foodLog, date, makeId){
   const entries = foodLog.filter(e => e.date === date);
   const others = nutrition.filter(n => n.date !== date);
-  if (!entries.length) return others.concat(nutrition.filter(n => n.date === date && n.source !== "log"));
   const prev = nutrition.find(n => n.date === date && n.source === "log");
-  return others.concat([{ id: prev ? prev.id : makeId(), date, ...dayTotals(entries), source: "log" }]);
+  const imported = nutrition.find(n => n.date === date && n.source !== "log");
+  // a Cronometer/manual total that logging replaced rides along, and comes back if every entry is removed
+  const replaced = prev ? prev.replaced : imported;
+  if (!entries.length) return others.concat(replaced ? [replaced] : imported ? [imported] : []);
+  const row = { id: prev ? prev.id : makeId(), date, ...dayTotals(entries), source: "log" };
+  if (replaced) row.replaced = replaced;
+  return others.concat([row]);
 }
 function skipLoggedDates(rows, foodLog){
   const logged = new Set(foodLog.map(e => e.date));
@@ -2407,16 +2414,17 @@ const foodSheetBodies = {
   quick(){
     const p = ui.foodQuickPrefill || {};
     const v = k => p[k] == null ? "" : esc(p[k]);
-    const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}"></div>`;
+    const keep = k => `oninput="App.foodField('foodQuickPrefill','${k}',this.value)"`;
+    const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}" ${keep(k)}></div>`;
     return `<div class="lbl">${ui.foodEdit ? "Edit quick add" : "Quick add"}</div>
       <div class="lbl" style="margin-top:8px">Name</div>
-      <input id="fqName" value="${p.name && p.name !== "Quick add" ? esc(p.name) : ""}" placeholder="Quick add" autocomplete="off" style="margin-bottom:8px">
+      <input id="fqName" value="${p.name && p.name !== "Quick add" ? esc(p.name) : ""}" placeholder="Quick add" autocomplete="off" style="margin-bottom:8px" ${keep("name")}>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
         ${num("fqKcal", "Calories", "kcal")}${num("fqProt", "Protein (g)", "protein")}
         ${num("fqCarb", "Carbs (g)", "carbs")}${num("fqFat", "Fat (g)", "fat")}${num("fqFib", "Fiber (g)", "fiber")}
       </div>
       <div class="lbl">Time</div>
-      <input id="fqTime" type="time" value="${esc(p.time || hhmmOf(new Date()))}" style="margin-bottom:12px">
+      <input id="fqTime" type="time" value="${esc(p.time || hhmmOf(new Date()))}" style="margin-bottom:12px" ${keep("time")}>
       <button class="btn" id="fqSave" style="background:var(--pull);color:#fff" onclick="App.foodQuickSave()">${ui.foodEdit ? "Save" : "Log"}</button>
       ${ui.foodEdit ? `<div style="text-align:center;margin-top:12px">${delBtn("FL" + ui.foodEdit, `App.foodDelEntry('${ui.foodEdit}')`, "delete entry")}</div>` : ""}`;
   },
@@ -2430,8 +2438,9 @@ foodSheetBodies.scan = function(){
 foodSheetBodies.create = function(){
   const p = ui.foodPrefill || {};
   const v = k => p[k] == null ? "" : esc(p[k]);
-  const txt = (id, label, k, ph = "") => `<div><div class="lbl">${label}</div><input id="${id}" value="${v(k)}" placeholder="${ph}" autocomplete="off"></div>`;
-  const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}"></div>`;
+  const keep = k => `oninput="App.foodField('foodPrefill','${k}',this.value)"`;
+  const txt = (id, label, k, ph = "") => `<div><div class="lbl">${label}</div><input id="${id}" value="${v(k)}" placeholder="${ph}" autocomplete="off" ${keep(k)}></div>`;
+  const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}" ${keep(k)}></div>`;
   return `<div class="lbl">${ui.foodEditFoodId ? "Edit food" : "Create food"}</div>
     <div style="display:grid;gap:8px;margin:8px 0">
       ${txt("fcName", "Name", "name")}
@@ -2473,6 +2482,13 @@ async function loadUsdaPortions(f){
   const sel = $("#faUnit");
   if (sel) sel.innerHTML = unitOptions(f).map(o => `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("");
 }
+// sheets size themselves to the visible area so the iOS keyboard never covers their inputs
+function syncVisualViewport(){
+  const vv = window.visualViewport; if (!vv) return;
+  document.documentElement.style.setProperty("--vvh", vv.height + "px");
+  document.documentElement.style.setProperty("--vvt", vv.offsetTop + "px");
+}
+if (window.visualViewport){ visualViewport.addEventListener("resize", syncVisualViewport); visualViewport.addEventListener("scroll", syncVisualViewport); }
 // ================= assistant (Gemini) =================
 const AI_DEFAULT_MODEL = "gemini-3.5-flash";
 const AI_TOOLS = [
@@ -2732,7 +2748,7 @@ async function runRemoteSearch(q){
   updateFoodResults();
 }
 const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js";
-let zxingPromise = null, scanCtl = null;
+let zxingPromise = null, scanCtl = null, scanVideo = null;
 function loadZxing(){
   if (window.ZXingBrowser) return Promise.resolve();
   if (zxingPromise) return zxingPromise;
@@ -2744,7 +2760,7 @@ function loadZxing(){
   });
   return zxingPromise;
 }
-function stopScan(){ try { scanCtl?.stop(); } catch (_) {} scanCtl = null; }
+function stopScan(){ try { scanCtl?.stop(); } catch (_) {} scanCtl = null; scanVideo = null; }
 async function startScan(){
   try {
     await loadZxing();
@@ -2752,6 +2768,7 @@ async function startScan(){
     if (ui.foodSheet !== "scan" || !video) return;
     const reader = new ZXingBrowser.BrowserMultiFormatOneDReader();
     let done = false;
+    scanVideo = video;
     scanCtl = await reader.decodeFromConstraints({ video: { facingMode: "environment" } }, video, (result) => {
       if (!result || done) return;
       done = true; stopScan(); handleBarcode(result.getText());
@@ -4166,6 +4183,8 @@ function afterRender(){
   if (s && ui.focusSearch){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); ui.focusSearch=false; }
   const cs = $("#clsSearch");
   if (cs && ui.focusClassSearch){ cs.focus(); ui.focusClassSearch=false; }
+  // a re-render replaced the scanner's <video>: move the camera to the new one
+  if (ui.foodSheet === "scan" && scanCtl && scanVideo && scanVideo !== $("#fdScanVideo")){ stopScan(); startScan(); }
   const fq = $("#fdQuery");
   if (fq && ui.foodFocus){ fq.focus(); ui.foodFocus = false; }
   initMaps();
@@ -4325,12 +4344,13 @@ window.App = {
   foodOpen(kind){
     ui.foodSheet = kind; ui.confirmKey = null;
     if (kind === "search"){ ui.foodQuery = ""; ui.foodFocus = true; ui.foodEdit = null; }
-    if (kind === "quick"){ ui.foodQuickPrefill = null; ui.foodEdit = null; }
+    if (kind === "quick"){ ui.foodQuickPrefill = {}; ui.foodEdit = null; }
     if (kind === "create" && !ui.foodPrefill) ui.foodPrefill = {};
     if (kind !== "scan") stopScan();
     render();
   },
   foodClose(){ stopScan(); ui.foodSheet = null; ui.foodEdit = null; ui.foodPrefill = null; ui.foodEditFoodId = null; ui.confirmKey = null; render(); },
+  foodField(which, k, v){ if (!ui[which]) ui[which] = {}; ui[which][k] = v; },
   foodQuery(v){ ui.foodQuery = v; scheduleRemoteSearch(v); updateFoodResults(); },
   foodListMode(m){ ui.foodListMode = m; updateFoodResults(); },
   foodPickResult(i){ const f = ui.foodResults[i]; if (f) App.foodPickFood(f); },
@@ -4961,8 +4981,9 @@ window.App = {
     aiRec = new SR(); aiRec.lang = "en-US"; aiRec.interimResults = true;
     aiRec.onresult = e => { const i = $("#aiInput"); if (i) i.value = [...e.results].map(r => r[0].transcript).join(""); };
     aiRec.onerror = e => toast(e.error === "not-allowed" ? "Microphone access is blocked — use the keyboard mic instead" : "Didn't catch that — try again", true);
-    aiRec.onend = () => { ui.aiListening = false; aiRec = null; renderAi(); const i = $("#aiInput"); if (i && i.value.trim()) App.aiSend(); };
-    ui.aiListening = true; renderAi(); aiRec.start();
+    const setMic = on => { ui.aiListening = on; $("#aiMic")?.classList.toggle("rec", on); };
+    aiRec.onend = () => { setMic(false); aiRec = null; const i = $("#aiInput"); if (i && i.value.trim()) App.aiSend(); };
+    setMic(true); aiRec.start();
   },
   toggleTodoFeature(){
     data.settings.todoEnabled = !data.settings.todoEnabled;

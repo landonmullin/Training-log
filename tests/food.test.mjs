@@ -201,3 +201,12 @@ test("pickFlashModel can skip busy models and fall back to Flash-Lite", () => {
   assert.equal(C.pickFlashModel(list, ["gemini-3.8-flash", "gemini-3.5-flash"]), "gemini-3.5-flash-lite");
   assert.equal(C.pickFlashModel(list, ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]), null);
 });
+test("removing every entry from a Cronometer day brings its imported total back", () => {
+  const crono = { id: "c1", date: "2026-09-20", kcal: 2100, protein: 150, carbs: 200, fat: 70, fiber: 30, source: "cronometer" };
+  const withLog = C.rebuildNutritionDay([crono], [{ date: "2026-09-20", kcal: 100, protein: 0, carbs: 0, fat: 0, fiber: 0 }], "2026-09-20", () => "L");
+  assert.equal(withLog[0].source, "log"); assert.equal(withLog[0].kcal, 100);
+  const again = C.rebuildNutritionDay(withLog, [{ date: "2026-09-20", kcal: 300, protein: 0, carbs: 0, fat: 0, fiber: 0 }], "2026-09-20", () => "X");
+  assert.equal(again[0].kcal, 300); assert.equal(again[0].id, "L");
+  const back = C.rebuildNutritionDay(again, [], "2026-09-20", () => "Y");
+  assert.deepEqual(back, [crono]);
+});

@@ -638,6 +638,63 @@ def calendar_banner_reflects_cloud_backup_health(pw, url):
         pg.evaluate("App.tab('calendar')")
         assert "export" in pg.inner_text("#view").lower()  # no crew: keep the export reminder
 
+@test
+def interrupted_backup_leaves_the_previous_one_restorable(pw, url):
+    with app(pw, url, backup_seed()) as pg:
+        pg.evaluate(FAKE_FS); pg.evaluate(BIG_LOG, 9000); pg.evaluate("cloudBackup(true)")
+        pg.evaluate(BIG_LOG, 9100); pg.evaluate("data.foodLog[0].name = 'x'.repeat(5000)")  # shift every piece boundary
+        pg.evaluate("""() => { const real = fbInit; fbInit = async () => { const fb = await real(); const col = fb.db.collection;
+          fb.db = { collection: n => { const c = col(n); const wrap = c2 => ({ ...c2, doc: id => { const d = c2.doc(id);
+            return { ...d, collection: m => wrap(d.collection(m)), set: async v => { if (/__c.*1$/.test(id)) throw new Error("signal lost"); return d.set(v); } }; } });
+            return wrap(c); } }; return fb; }; }""")
+        pg.evaluate("cloudBackup(false)")
+        r = pg.evaluate("cloudFetchBackup('ABC123', 'landon')")
+        assert len(r["foodLog"]) == 9000 and r["foodLog"][0]["name"].startswith("Entry number 0")  # the last complete backup is intact
+
+@test
+def voice_transcript_is_sent_when_speech_ends(pw, url):
+    g = scripted(gem_text("Got it."))
+    with app(pw, url, school_seed(), gemini=g) as pg:
+        pg.evaluate("""() => { window.SpeechRecognition = window.webkitSpeechRecognition = class { start(){ window.__rec = this; } stop(){ this.onend && this.onend(); } }; }""")
+        pg.click("#aiBtn"); pg.click("#aiMic")
+        pg.evaluate("""() => { __rec.onresult({ results: [[{ transcript: "when is my next exam" }]] }); __rec.onend(); }""")
+        pg.wait_for_function("!ui.aiBusy && ui.aiMsgs.length >= 2")
+        assert pg.evaluate("ui.aiMsgs[0].text") == "when is my next exam"
+        assert len(g.seen) == 1
+
+@test
+def background_render_keeps_half_filled_forms(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdAdd"); pg.click("#fdQuickLink")
+        pg.fill("#fqName", "Tacos"); pg.fill("#fqKcal", "450")
+        pg.evaluate("render()")
+        assert pg.input_value("#fqName") == "Tacos" and pg.input_value("#fqKcal") == "450"
+        pg.evaluate("App.foodOpen('search')"); pg.click("#fdCreateLink")
+        pg.fill("#fcName", "Mom's chili"); pg.fill("#fcKcal", "520"); pg.fill("#fcGrams", "300")
+        pg.evaluate("render()")
+        assert pg.input_value("#fcName") == "Mom's chili" and pg.input_value("#fcKcal") == "520" and pg.input_value("#fcGrams") == "300"
+
+@test
+def scanner_restarts_on_the_new_video_after_a_rerender(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("""() => { window.__starts = 0; window.__stops = 0;
+          window.ZXingBrowser = { BrowserMultiFormatOneDReader: class { async decodeFromConstraints(c, video){ window.__starts++; window.__video = video; return { stop(){ window.__stops++; } }; } } }; }""")
+        pg.click("#fdScan"); pg.wait_for_function("window.__starts === 1")
+        pg.evaluate("render()"); pg.wait_for_function("window.__starts === 2")
+        assert pg.evaluate("window.__stops") == 1
+        assert pg.evaluate("window.__video === document.querySelector('#fdScanVideo')")
+        pg.click("#fdSheet .fd-x")
+        assert pg.evaluate("window.__stops") == 2
+
+@test
+def assistant_sheet_fits_above_the_keyboard(pw, url):
+    with app(pw, url, school_seed()) as pg:
+        pg.click("#aiBtn")
+        pg.evaluate("""() => { Object.defineProperty(window.visualViewport, 'height', { configurable: true, get: () => 420 });
+          window.visualViewport.dispatchEvent(new Event('resize')); }""")
+        box = pg.locator("#aiInput").bounding_box()
+        assert box["y"] + box["height"] <= 420, box
+
 # --- tests above this line ---
 
 def main():
