@@ -193,7 +193,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 77;
+const APP_VERSION = 78;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1461,12 +1461,27 @@ function hashStr(s){ // cheap content hash so unchanged chunks aren't re-uploade
   for (let i=0;i<s.length;i++) h = ((h<<5) + h + s.charCodeAt(i)) >>> 0;
   return h.toString(36) + ":" + s.length;
 }
-// everything except GPS routes — small, and the part that actually matters
+// everything except GPS routes and secrets. Anyone with the crew code can read backups,
+// so API keys and Strava tokens stay on this phone (restore keeps the phone's copies).
 function backupCore(){
   const core = {};
   for (const k of Object.keys(data)) core[k] = data[k];
   core.cardio = data.cardio.map(c => { const {route, ...rest} = c; return rest; });
+  core.settings = { ...data.settings };
+  delete core.settings.aiKey; delete core.settings.usdaKey;
+  if (data.stravaApi){ const { clientSecret, refreshToken, accessToken, expiresAt, ...rest } = data.stravaApi; core.stravaApi = rest; }
   return JSON.stringify(core);
+}
+const BK_CORE_CHARS = 300000; // ≤ ~900 KB even if every character needs 3 bytes; Firestore caps a doc at 1 MiB
+function splitText(str, n){
+  const out = [];
+  for (let i = 0; i < str.length;){
+    let end = Math.min(i + n, str.length);
+    const c = str.charCodeAt(end - 1);
+    if (end < str.length && c >= 0xD800 && c <= 0xDBFF) end--; // never split an emoji's surrogate pair
+    out.push(str.slice(i, end)); i = end;
+  }
+  return out;
 }
 function backupRouteChunks(){
   const routes = data.cardio.filter(c=>c.route).map(c=>({id:c.id, route:c.route}));
@@ -1486,15 +1501,22 @@ async function cloudBackup(manual){
     const key = nameKey(data.crew.name);
     const col = db.collection("crews").doc(data.crew.code).collection("backups");
     const core = backupCore();
+    const coreParts = core.length > BK_CORE_CHARS ? splitText(core, BK_CORE_CHARS) : [];
     const chunks = backupRouteChunks();
     const prev = data.settings.cloudBackup || {};
     const prevHashes = prev.chunkHashes || [];
     const hashes = chunks.map(hashStr);
     const now = Date.now();
+    // a large log is stored in pieces; pieces go up before the main doc that points at them
+    for (let i=0;i<coreParts.length;i++)
+      await col.doc(`${key}__c${i}`).set({ owner:key, idx:i, data:coreParts[i], updatedAt:now });
     await col.doc(key).set({
-      name: data.crew.name, core, chunkCount: chunks.length,
+      name: data.crew.name, core: coreParts.length ? "" : core, coreChunks: coreParts.length, chunkCount: chunks.length,
       updatedAt: now, version: APP_VERSION
     });
+    for (let i=coreParts.length; i<(prev.coreChunks||0); i++){
+      try { await col.doc(`${key}__c${i}`).delete(); } catch(e){}
+    }
     for (let i=0;i<chunks.length;i++){
       if (prevHashes[i] === hashes[i]) continue; // unchanged, skip the upload
       await col.doc(`${key}__r${i}`).set({ owner:key, idx:i, data:chunks[i], updatedAt:Date.now() });
@@ -1503,7 +1525,7 @@ async function cloudBackup(manual){
       try { await col.doc(`${key}__r${i}`).delete(); } catch(e){}
     }
     bkPushing = true;
-    data.settings.cloudBackup = { at: now, chunkCount: chunks.length, chunkHashes: hashes };
+    data.settings.cloudBackup = { at: now, chunkCount: chunks.length, chunkHashes: hashes, coreChunks: coreParts.length };
     save();
     bkPushing = false;
     if (manual){ toast("Backed up to the cloud \u2713"); render(); }
@@ -1513,7 +1535,7 @@ async function cloudListBackups(code){
   const {db} = await fbInit();
   const snap = await db.collection("crews").doc(code).collection("backups").get();
   return snap.docs
-    .filter(d => !d.id.includes("__r"))
+    .filter(d => !d.id.includes("__r") && !d.id.includes("__c"))
     .map(d => ({ key:d.id, name:d.data().name || d.id, updatedAt:d.data().updatedAt || 0 }))
     .sort((a,b)=>b.updatedAt-a.updatedAt);
 }
@@ -1523,7 +1545,17 @@ async function cloudFetchBackup(code, key){
   const doc = await col.doc(key).get();
   if (!doc.exists){ const e = new Error("not found"); e.code = "NOTFOUND"; throw e; }
   const d = doc.data();
-  const restored = JSON.parse(d.core);
+  let coreStr = d.core;
+  if (d.coreChunks){
+    const parts = [];
+    for (let i=0;i<d.coreChunks;i++){
+      const c = await col.doc(`${key}__c${i}`).get();
+      if (!c.exists) throw new Error("backup is incomplete");
+      parts.push(c.data().data);
+    }
+    coreStr = parts.join("");
+  }
+  const restored = JSON.parse(coreStr);
   const routeMap = {};
   for (let i=0;i<(d.chunkCount||0);i++){
     const c = await col.doc(`${key}__r${i}`).get();
@@ -1643,7 +1675,17 @@ function renderCalendar(){
   const map = byDate();
   let banner = "";
   const hasData = data.lifts.length + data.cardio.length + data.weights.length + data.nutrition.length > 0;
-  if (hasData){
+  if (hasData && data.crew?.code){
+    // automatic cloud backup is the safety net; only speak up when it has stopped working
+    const at = data.settings.cloudBackup?.at || 0;
+    const days = Math.floor((Date.now() - at) / 86400000);
+    if (days >= 3){
+      banner = `<div class="card" style="background:#FFF8E6;border-color:#E0C878;display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div style="font-size:13px;line-height:1.4;color:#5C4A12"><b>Cloud backup ${at ? `hasn't run in ${days} days.` : "hasn't run yet."}</b> Check your connection, then back up now.</div>
+        <button id="bkBannerBtn" onclick="App.cloudBackupNow()" style="padding:8px 14px;font-size:13px;font-weight:700;background:var(--ink);color:var(--card);border:none;border-radius:8px;cursor:pointer;white-space:nowrap">Back up</button>
+      </div>`;
+    }
+  } else if (hasData){
     const le = data.settings.lastExport;
     const daysSince = le ? Math.floor((new Date(todayISO()) - new Date(le)) / 86400000) : null;
     if (le == null || daysSince > 30){
@@ -5006,9 +5048,17 @@ window.App = {
   // backup
   confirmRestore(){
     if (!ui.pendingRestore) return;
+    const mine = { aiKey: data.settings?.aiKey, usdaKey: data.settings?.usdaKey }, myStrava = data.stravaApi;
     data = { ...structuredClone(EMPTY), ...ui.pendingRestore };
     if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
-    for (const k of Object.keys(EMPTY)) if (!Array.isArray(data[k])) data[k] = [];
+    // backups don't carry keys or tokens, so keep this phone's
+    for (const [k, v] of Object.entries(mine)) if (v && !data.settings[k]) data.settings[k] = v;
+    if (myStrava?.refreshToken && !data.stravaApi?.refreshToken && (!data.stravaApi?.clientId || data.stravaApi.clientId === myStrava.clientId))
+      data.stravaApi = { ...(data.stravaApi || {}), ...myStrava };
+    // same normalization as app start: only list fields get reset (school is an object, not a list)
+    for (const k of Object.keys(EMPTY)) if (Array.isArray(EMPTY[k]) && !Array.isArray(data[k])) data[k] = [];
+    if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = structuredClone(EMPTY.school);
+    for (const k of Object.keys(EMPTY.school)) if (!Array.isArray(data.school[k])) data.school[k] = [];
     ui.pendingRestore = null;
     save(); toast("Backup restored ✓"); render();
   },

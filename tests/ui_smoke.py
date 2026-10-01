@@ -558,6 +558,86 @@ def assistant_explains_when_every_model_is_busy(pw, url):
         txt = pg.inner_text("#aiLog").lower()
         assert "busy" in txt and "try again" in txt
 
+FAKE_FS = """() => {
+  window.__fs = {};
+  const mkDoc = path => ({
+    set: async v => { __fs[path] = JSON.parse(JSON.stringify(v)); },
+    get: async () => ({ exists: path in __fs, data: () => __fs[path], id: path.split("/").pop() }),
+    delete: async () => { delete __fs[path]; },
+    collection: n => mkCol(path + "/" + n),
+  });
+  const mkCol = path => ({
+    doc: id => mkDoc(path + "/" + id),
+    get: async () => ({ docs: Object.keys(__fs).filter(k => k.startsWith(path + "/") && !k.slice(path.length + 1).includes("/"))
+      .map(k => ({ id: k.slice(path.length + 1), data: () => __fs[k] })) }),
+  });
+  fbInit = async () => ({ db: { collection: n => mkCol(n) } });
+}"""
+def backup_seed():
+    d = base()
+    d["crew"] = {"code": "ABC123", "name": "Landon", "config": {"apiKey": "x", "projectId": "p", "appId": "a"}}
+    d["settings"].update({"aiKey": "SECRET-GEMINI-KEY-123", "usdaKey": "SECRET-USDA-KEY-456"})
+    d["stravaApi"] = {"clientId": "777", "clientSecret": "SECRET-STRAVA-CLIENT", "refreshToken": "SECRET-STRAVA-REFRESH", "accessToken": "SECRET-STRAVA-ACCESS", "expiresAt": 1}
+    return d
+BIG_LOG = """n => { data.foodLog = Array.from({ length: n }, (_, i) => ({ id: "e" + i, date: "2026-01-01", time: "08:00", foodId: null,
+  name: "Entry number " + i + " with a reasonably long descriptive food name", grams: 100, qty: 1, unit: "p0",
+  label: "1 serving", kcal: 250, protein: 20.5, carbs: 30.5, fat: 8.5, fiber: 2.5 })); }"""
+
+@test
+def cloud_backup_handles_a_log_over_one_megabyte_and_strips_secrets(pw, url):
+    with app(pw, url, backup_seed()) as pg:
+        pg.evaluate(FAKE_FS); pg.evaluate(BIG_LOG, 9000)
+        assert pg.evaluate("backupCore().length") > 1_000_000
+        pg.evaluate("cloudBackup(true)")
+        docs = pg.evaluate("__fs")
+        sizes = {k: len(json.dumps(v)) for k, v in docs.items()}
+        assert max(sizes.values()) < 900_000, sizes
+        blob = json.dumps(docs)
+        for secret in ["SECRET-GEMINI-KEY-123", "SECRET-USDA-KEY-456", "SECRET-STRAVA-CLIENT", "SECRET-STRAVA-REFRESH", "SECRET-STRAVA-ACCESS"]:
+            assert secret not in blob, secret
+        assert [b["name"] for b in pg.evaluate("cloudListBackups('ABC123')")] == ["Landon"]
+        r = pg.evaluate("cloudFetchBackup('ABC123', 'landon')")
+        assert len(r["foodLog"]) == 9000 and r["stravaApi"]["clientId"] == "777" and "aiKey" not in r["settings"]
+        assert stored(pg)["settings"]["aiKey"] == "SECRET-GEMINI-KEY-123"  # the phone keeps its keys
+
+@test
+def cloud_backup_cleans_up_chunks_when_the_log_shrinks(pw, url):
+    with app(pw, url, backup_seed()) as pg:
+        pg.evaluate(FAKE_FS); pg.evaluate(BIG_LOG, 9000); pg.evaluate("cloudBackup(true)")
+        assert any("__c" in k for k in pg.evaluate("Object.keys(__fs)"))
+        pg.evaluate(BIG_LOG, 10); pg.evaluate("cloudBackup(true)")
+        assert not any("__c" in k for k in pg.evaluate("Object.keys(__fs)"))
+        assert len(pg.evaluate("cloudFetchBackup('ABC123', 'landon')")["foodLog"]) == 10
+
+@test
+def restoring_a_backup_keeps_this_phones_keys(pw, url):
+    seed = backup_seed()
+    seed["school"]["classes"] = [{"id": "c1", "name": "Materials Science"}]
+    seed["school"]["dates"] = [{"id": "d1", "title": "Exam 2", "kind": "exam", "date": "2026-10-20", "classId": "c1"}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate(FAKE_FS); pg.evaluate("cloudBackup(true)")
+        pg.evaluate("async () => { ui.pendingRestore = await cloudFetchBackup('ABC123', 'landon'); App.confirmRestore(); }")
+        st = stored(pg)
+        assert st["settings"]["aiKey"] == "SECRET-GEMINI-KEY-123" and st["settings"]["usdaKey"] == "SECRET-USDA-KEY-456"
+        assert st["stravaApi"]["refreshToken"] == "SECRET-STRAVA-REFRESH"
+        assert st["school"]["classes"][0]["name"] == "Materials Science" and st["school"]["dates"][0]["title"] == "Exam 2"
+
+@test
+def calendar_banner_reflects_cloud_backup_health(pw, url):
+    d = backup_seed(); d["weights"] = [{"id": "w1", "date": "2026-09-01", "lbs": 180}]
+    d["settings"]["cloudBackup"] = {"at": 0}
+    with app(pw, url, d) as pg:
+        pg.evaluate("data.settings.cloudBackup = { at: Date.now() - 3600e3 }; App.tab('calendar')")
+        assert "back up" not in pg.inner_text("#view").lower()  # healthy cloud backup: no nag
+        pg.evaluate("data.settings.cloudBackup = { at: Date.now() - 4 * 86400e3 }; render()")
+        txt = pg.inner_text("#view").lower()
+        assert "cloud backup" in txt and "4 days" in txt
+        assert pg.locator("#bkBannerBtn").count() == 1
+    nocrew = base(); nocrew["weights"] = [{"id": "w1", "date": "2026-09-01", "lbs": 180}]
+    with app(pw, url, nocrew) as pg:
+        pg.evaluate("App.tab('calendar')")
+        assert "export" in pg.inner_text("#view").lower()  # no crew: keep the export reminder
+
 # --- tests above this line ---
 
 def main():
