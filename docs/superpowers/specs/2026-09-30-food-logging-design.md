@@ -138,7 +138,7 @@ Tapping an entry opens the amount screen pre-filled, with **Save** and **Delete*
 - **Import from Cronometer**: the moved CSV import.
 
 ### Errors and offline
-- When `navigator.onLine` is false or both remote sources fail, saved foods and Quick add stay available, with a note: "Offline — showing saved foods".
+- When `navigator.onLine` is false or both remote sources fail, saved foods and Quick add stay available, with a note: "Offline — showing saved foods". This covers losing signal while the app is already open; `sw.js` does no caching, so a cold launch with no signal is unchanged from today and out of scope.
 - When no USDA key is set, USDA is skipped and a one-line hint links to the Settings field.
 - **Risk to verify first:** whether both APIs accept browser requests (CORS). If either one doesn't, stop and confirm a fallback with Landon before adding a proxy.
 
@@ -160,7 +160,7 @@ Tapping an entry opens the amount screen pre-filled, with **Save** and **Delete*
 - Text search, scanning a known product, scanning an unknown product.
 - Log, edit, and delete an entry; log on a past day.
 - Quick add; creating a custom food.
-- Airplane mode: saved foods and Quick add still work.
+- Airplane mode, enabled after the app is open: saved foods and Quick add still work.
 - The calendar day view, Food tab charts, and averages reflect the logged totals.
 - A Cronometer import skips logged dates.
 
@@ -168,6 +168,6 @@ Tapping an entry opens the amount screen pre-filled, with **Save** and **Delete*
 For 2 or 3 days, log the same foods in both apps. A daily calorie difference within about 3–5% passes. Anything larger is treated as a bug to fix before dropping Cronometer.
 
 ### Rollout
-- Set `APP_VERSION` to 72 and bump the `sw.js` cache version.
+- Set `APP_VERSION` to 72. `sw.js` does no caching (push only), so no cache bump is needed; updates load on the next app open.
 - No data migration.
 - No feature toggle.
