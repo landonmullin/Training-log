@@ -133,6 +133,18 @@
   .routebtn{background:none;border:none;color:var(--cardio);font-size:13px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:var(--body)}
   body.dark .leaflet-tile{filter:invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9) saturate(0.7)}
   body.dark .leaflet-container{background:#1B2330}
+  .fsheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,0.45);display:flex;align-items:flex-end}
+  .fsheet .panel{background:var(--paper);width:100%;max-width:560px;margin:0 auto;max-height:88vh;overflow-y:auto;border-radius:16px 16px 0 0;padding:10px 14px calc(18px + env(safe-area-inset-bottom))}
+  .fd-x{background:none;border:none;color:var(--sub);font-size:18px;padding:4px 8px;cursor:pointer}
+  .fd-nav{background:none;border:1px solid var(--line);border-radius:8px;width:40px;height:34px;font-size:20px;line-height:1;color:var(--ink);cursor:pointer}
+  .fd-nav:disabled{opacity:.3}
+  .fd-date{background:none;border:none;font-weight:700;font-size:15px;color:var(--ink);cursor:pointer}
+  .fd-row{display:grid;grid-template-columns:48px 1fr auto;gap:8px;align-items:baseline;width:100%;text-align:left;padding:9px 0;background:none;border:none;border-bottom:1px solid var(--grid);color:var(--ink);cursor:pointer;font-size:14px;font-family:var(--body)}
+  .fd-row .t,.fd-row .k{font-family:var(--mono);font-size:12px;color:var(--sub)}
+  .fd-row .a{color:var(--sub);font-size:12px}
+  .fd-res .meta{display:block;font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:2px}
+  .fd-tag{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px;color:var(--sub);vertical-align:middle}
+  .linkbtn{background:none;border:none;color:var(--pull);font-weight:600;font-size:14px;cursor:pointer;padding:6px}
 </style>
 </head>
 <body>
@@ -1506,7 +1518,7 @@ const ui = {
   pending: [], manualOpen: false, manualType: "run",
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
-  foodMetric: "kcal", foodManualOpen: false, cardioList: "recent", targetsOpen: false,
+  foodMetric: "kcal", cardioList: "recent", targetsOpen: false,
   foodDay: todayISO(), foodSheet: null, foodQuery: "", foodFocus: false, foodListMode: "recent", foodResults: [],
   foodRemote: { q: "", usda: [], off: [], status: "" }, foodPick: null, foodAmt: null, foodEdit: null,
   foodQuickPrefill: null, foodPrefill: null, foodEditFoodId: null, scanStatus: "",
@@ -2121,6 +2133,131 @@ function nutritionSettingsHTML(){
     <!-- my-foods -->
   </div>`;
 }
+function foodEntriesFor(date){
+  return data.foodLog.filter(e => e.date === date).sort((a, b) => a.time < b.time ? -1 : a.time > b.time ? 1 : 0);
+}
+function foodDayCardHTML(){
+  const date = ui.foodDay, s = data.settings, today = todayISO();
+  const entries = foodEntriesFor(date);
+  const t = dayTotals(entries);
+  const label = date === today ? "Today" : date === shiftISO(today, -1) ? "Yesterday" : prettyDate(date);
+  const remain = s.kcalTarget ? s.kcalTarget - t.kcal : null;
+  return `<div class="card" style="border-left:4px solid var(--pull)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <button class="fd-nav" id="fdPrev" onclick="App.foodDayShift(-1)" aria-label="Previous day">‹</button>
+      <button class="fd-date" onclick="App.foodDayToday()">${esc(label)}</button>
+      <button class="fd-nav" id="fdNext" onclick="App.foodDayShift(1)" aria-label="Next day" ${date >= today ? "disabled" : ""}>›</button>
+    </div>
+    <div class="stats" style="margin-bottom:6px">
+      <div class="stat"><div class="k">eaten</div><div class="v" style="color:${kcalColor(t.kcal)}">${t.kcal}</div></div>
+      ${remain != null ? `<div class="stat"><div class="k">${remain >= 0 ? "left" : "over"}</div><div class="v" style="color:${remain >= 0 ? "#2B8A3E" : "var(--danger)"}">${Math.abs(remain)}</div></div>` : ""}
+      <div class="stat"><div class="k">protein</div><div class="v">${t.protein}${s.proteinTarget ? `<span style="color:var(--sub);font-size:12px">/${s.proteinTarget}</span>` : ""}g</div></div>
+    </div>
+    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:6px">C${t.carbs} · F${t.fat} · fiber ${t.fiber}</div>
+    ${entries.length ? entries.map(e => `<button class="fd-row" onclick="App.foodEditEntry('${e.id}')">
+        <span class="t">${fdTime(e.time)}</span>
+        <span class="n">${esc(e.name)}${e.label ? ` <span class="a">${esc(e.label)}</span>` : ""}</span>
+        <span class="k">${e.kcal} kcal · P${Math.round(e.protein)}</span></button>`).join("")
+      : `<div class="muted" style="padding:8px 0">Nothing logged ${date === today ? "yet today" : "this day"}.</div>`}
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-top:12px">
+      <button class="btn" id="fdAdd" style="background:var(--pull);color:#fff" onclick="App.foodOpen('search')">+ Add food</button>
+      <button class="btn" id="fdScan" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="App.foodScan()">Scan</button>
+    </div>
+  </div>`;
+}
+function foodDefaultServing(f){
+  const p = (f.portions || [])[0];
+  const grams = p ? p.grams : 100;
+  return { label: p ? p.label : "100 g", kcal: macrosFor(f.per100g, grams).kcal };
+}
+function foodResultRowHTML(f, i){
+  const d = foodDefaultServing(f);
+  const tag = f.saved ? "saved" : f.source === "usda" ? "USDA" : f.source === "off" ? "OFF" : "custom";
+  return `<button class="pick fd-res" onclick="App.foodPickResult(${i})">${esc(f.name)}<span class="fd-tag">${tag}</span>
+    <span class="meta">${f.brand ? esc(f.brand) + " · " : ""}${d.kcal} kcal / ${esc(d.label)}</span></button>`;
+}
+function foodRemoteStatusHTML(){
+  const st = ui.foodRemote.q === ui.foodQuery.trim() ? ui.foodRemote.status : "";
+  if (st === "loading") return `<div class="note" style="margin:10px 0">Searching USDA and Open Food Facts…</div>`;
+  if (st === "offline") return `<div class="note" style="margin:10px 0">Offline — showing saved foods</div>`;
+  if (st === "partial") return `<div class="note" style="margin:10px 0">One database didn't respond — showing what came back</div>`;
+  if (st === "nokey") return `<div class="note" style="margin:10px 0">USDA search is off — <button class="linkbtn" style="font-size:11px;padding:0" onclick="App.foodGoUsdaKey()">add your free key in Settings</button></div>`;
+  return "";
+}
+function foodResultsHTML(){
+  const q = ui.foodQuery.trim();
+  if (!q){
+    ui.foodResults = recentFoods(data.foods, ui.foodListMode).map(f => ({ ...f, saved: true }));
+    return `<div class="seg" style="margin:10px 0 4px">
+        <button class="${ui.foodListMode === "recent" ? "on" : ""}" onclick="App.foodListMode('recent')">Recent</button>
+        <button class="${ui.foodListMode === "frequent" ? "on" : ""}" onclick="App.foodListMode('frequent')">Frequent</button>
+      </div>` + (ui.foodResults.length ? ui.foodResults.map(foodResultRowHTML).join("")
+        : `<div class="muted" style="padding:12px 0">Foods you log show up here.</div>`);
+  }
+  const r = ui.foodRemote.q === q ? ui.foodRemote : { usda: [], off: [] };
+  ui.foodResults = mergeResults(searchSaved(data.foods, q), r.usda, r.off);
+  return (ui.foodResults.length ? ui.foodResults.map(foodResultRowHTML).join("")
+      : (q.length < 3 ? `<div class="muted" style="padding:12px 0">Keep typing to search the databases…</div>` : ""))
+    + foodRemoteStatusHTML();
+}
+function updateFoodResults(){ const el = $("#fdResults"); if (el) el.innerHTML = foodResultsHTML(); }
+function foodPreviewHTML(){
+  const f = ui.foodPick, a = ui.foodAmt;
+  const g = gramsFor(f, a.qty, a.unit);
+  if (!g) return `<div class="note">Enter an amount</div>`;
+  const m = macrosFor(f.per100g, g);
+  return `<div class="stats">${stat("kcal", m.kcal)}${stat("protein", m.protein + "g")}${stat("carbs", m.carbs + "g")}${stat("fat", m.fat + "g")}</div>
+    <div class="note" style="text-align:left;margin-top:6px">${g} g · fiber ${m.fiber} g</div>`;
+}
+const foodSheetBodies = {
+  search(){
+    return `<div class="lbl">Add food · ${ui.foodDay === todayISO() ? "today" : esc(shortDate(ui.foodDay))}</div>
+      <input id="fdQuery" value="${esc(ui.foodQuery)}" placeholder="Search foods…" autocomplete="off" autocorrect="off" oninput="App.foodQuery(this.value)">
+      <div id="fdResults">${foodResultsHTML()}</div>
+      <div id="fdLinks" style="display:flex;gap:16px;justify-content:center;margin-top:12px">
+        <button class="linkbtn" id="fdQuickLink" onclick="App.foodOpen('quick')">Quick add</button>
+      </div>`;
+  },
+  amount(){
+    const f = ui.foodPick, a = ui.foodAmt;
+    return `<div class="lbl">${ui.foodEdit ? "Edit entry" : "Log food"}</div>
+      <div style="font-weight:700;font-size:16px">${esc(f.name)}</div>
+      ${f.brand ? `<div style="font-size:13px;color:var(--sub)">${esc(f.brand)}</div>` : ""}
+      <div style="display:grid;grid-template-columns:1fr 1.6fr;gap:8px;margin:12px 0">
+        <input class="mono" id="faQty" type="number" inputmode="decimal" step="any" value="${esc(a.qty)}" oninput="App.foodAmt('qty', this.value)">
+        <select id="faUnit" onchange="App.foodAmt('unit', this.value)">${unitOptions(f).map(o =>
+          `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>
+      </div>
+      <div class="lbl">Time</div>
+      <input id="faTime" type="time" value="${esc(a.time)}" onchange="App.foodAmt('time', this.value)" style="margin-bottom:12px">
+      <div id="faPreview">${foodPreviewHTML()}</div>
+      <button class="btn" id="faSave" style="background:var(--pull);color:#fff;margin-top:14px" onclick="App.foodLogSave()">${ui.foodEdit ? "Save" : "Log"}</button>
+      ${ui.foodEdit ? `<div style="text-align:center;margin-top:12px">${delBtn("FL" + ui.foodEdit, `App.foodDelEntry('${ui.foodEdit}')`, "delete entry")}</div>` : ""}`;
+  },
+  quick(){
+    const p = ui.foodQuickPrefill || {};
+    const v = k => p[k] == null ? "" : esc(p[k]);
+    const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}"></div>`;
+    return `<div class="lbl">${ui.foodEdit ? "Edit quick add" : "Quick add"}</div>
+      <div class="lbl" style="margin-top:8px">Name</div>
+      <input id="fqName" value="${p.name && p.name !== "Quick add" ? esc(p.name) : ""}" placeholder="Quick add" autocomplete="off" style="margin-bottom:8px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        ${num("fqKcal", "Calories", "kcal")}${num("fqProt", "Protein (g)", "protein")}
+        ${num("fqCarb", "Carbs (g)", "carbs")}${num("fqFat", "Fat (g)", "fat")}${num("fqFib", "Fiber (g)", "fiber")}
+      </div>
+      <div class="lbl">Time</div>
+      <input id="fqTime" type="time" value="${esc(p.time || hhmmOf(new Date()))}" style="margin-bottom:12px">
+      <button class="btn" id="fqSave" style="background:var(--pull);color:#fff" onclick="App.foodQuickSave()">${ui.foodEdit ? "Save" : "Log"}</button>
+      ${ui.foodEdit ? `<div style="text-align:center;margin-top:12px">${delBtn("FL" + ui.foodEdit, `App.foodDelEntry('${ui.foodEdit}')`, "delete entry")}</div>` : ""}`;
+  },
+};
+function foodSheetHTML(){
+  const body = ui.foodSheet && foodSheetBodies[ui.foodSheet];
+  if (!body) return "";
+  return `<div class="fsheet" onclick="if(event.target===this)App.foodClose()"><div class="panel" id="fdSheet">
+    <div style="display:flex;justify-content:flex-end"><button class="fd-x" onclick="App.foodClose()" aria-label="Close">✕</button></div>
+    ${body()}</div></div>`;
+}
 // deficit/surplus vs saved calorie goal: green under, red over
 function kcalColor(kcal){
   const t = data.settings.kcalTarget;
@@ -2195,26 +2332,7 @@ function parseCronometerCSV(text){
 }
 function renderFood(){
   const s = data.settings;
-  let html = `<div class="card" style="border-left:4px solid var(--pull)">
-    <div class="h2" style="margin:0 0 4px">Import from Cronometer</div>
-    <div style="font-size:13px;color:var(--sub);margin-bottom:12px;line-height:1.45">
-      Export must be done from the Cronometer <b>website</b>, not the app: sign in, then <b>Account → Export Data → Daily Nutrition</b>, pick your date range, and upload the .csv here. Re-importing overlapping dates just updates them; empty days are skipped automatically.</div>
-    <button class="btn" style="background:var(--pull);color:#fff" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
-    <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull);margin-top:8px" onclick="App.toggleFoodManual()">${ui.foodManualOpen?"Hide manual entry":"Or enter a day manually"}</button>
-    <div><a class="weblink pull" href="https://cronometer.com/login/" target="_blank" rel="noopener">Open Cronometer website <span class="ext">↗</span></a></div>
-  </div>`;
-  if (ui.foodManualOpen){
-    html += `<div class="card">
-      <div class="lbl">Date</div>
-      <input type="date" id="fDate" value="${todayISO()}" style="margin-bottom:8px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
-        <div><div class="lbl">Calories</div><input class="mono" type="number" inputmode="numeric" id="fKcal" placeholder="2000"></div>
-        <div><div class="lbl">Protein (g)</div><input class="mono" type="number" inputmode="numeric" id="fProt" placeholder="170"></div>
-        <div><div class="lbl">Carbs (g)</div><input class="mono" type="number" inputmode="numeric" id="fCarb" placeholder="180"></div>
-        <div><div class="lbl">Fat (g)</div><input class="mono" type="number" inputmode="numeric" id="fFat" placeholder="65"></div>
-      </div>
-      <button class="btn" style="background:var(--pull);color:#fff" onclick="App.saveFood()">Save day</button></div>`;
-  }
+  let html = foodDayCardHTML();
   const sorted = [...data.nutrition].sort((a,b)=>a.date<b.date?-1:1);
   if (sorted.length){
     const last7 = sorted.slice(-7);
@@ -2238,7 +2356,7 @@ function renderFood(){
   const chartRows = sorted.slice(-30).map(d=>({label:shortDate(d.date), value:d[ui.foodMetric]}));
   const ref = ui.foodMetric==="kcal" ? s.kcalTarget : ui.foodMetric==="protein" ? s.proteinTarget : null;
   html += `<div class="card">${lineChart(chartRows, "#2B8A3E",
-    {fmt:v=>Math.round(v), refLine:ref||null, emptyMsg:"Import a Cronometer export or log two days to draw a trend. Chart shows the last 30 logged days."})}</div>`;
+    {fmt:v=>Math.round(v), refLine:ref||null, emptyMsg:"Log foods on two days to draw a trend. Chart shows the last 30 logged days."})}</div>`;
   if (sorted.length){
     html += `<div class="h2">Recent days</div>` + [...sorted].reverse().slice(0,7).map(d=>`
       <div class="card" style="padding:10px 14px">
@@ -2251,7 +2369,7 @@ function renderFood(){
         ${s.kcalTarget?`<div style="font-size:11px;margin-top:4px;text-align:right">${kcalDelta(d.kcal)}</div>`:""}
       </div>`).join("");
   }
-  return html;
+  return html + foodSheetHTML();
 }
 
 // ----- weight -----
@@ -3511,13 +3629,15 @@ function afterRender(){
   if (s && ui.focusSearch){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); ui.focusSearch=false; }
   const cs = $("#clsSearch");
   if (cs && ui.focusClassSearch){ cs.focus(); ui.focusClassSearch=false; }
+  const fq = $("#fdQuery");
+  if (fq && ui.foodFocus){ fq.focus(); ui.foodFocus = false; }
   initMaps();
   initSwipe();
 }
 
 // ================= actions =================
 window.App = {
-  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
+  tab(t){ if (ui.foodSheet){ ui.foodSheet = null; ui.foodEdit = null; } if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
   selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
@@ -3665,17 +3785,84 @@ window.App = {
   delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); removeEventFor(id); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Activity deleted"); render(); },
 
   // food
-  toggleFoodManual(){ ui.foodManualOpen=!ui.foodManualOpen; render(); },
   foodMetric(m){ ui.foodMetric=m; render(); },
-  saveFood(){
-    const kcal = parseFloat($("#fKcal").value);
-    if (!kcal || kcal<=0){ toast("Enter calories", true); return; }
-    const date = $("#fDate").value;
-    const n = f => { const v=parseFloat($(f).value); return isFinite(v)?Math.round(v):0; };
-    data.nutrition = data.nutrition.filter(d=>d.date!==date);
-    data.nutrition.push({id:uid(), date, kcal:Math.round(kcal), protein:n("#fProt"), carbs:n("#fCarb"), fat:n("#fFat"), fiber:0, source:"manual"});
-    save(); ui.foodManualOpen=false; toast("Day saved ✓"); render();
+  foodOpen(kind){
+    ui.foodSheet = kind; ui.confirmKey = null;
+    if (kind === "search"){ ui.foodQuery = ""; ui.foodFocus = true; ui.foodEdit = null; }
+    if (kind === "quick"){ ui.foodQuickPrefill = null; ui.foodEdit = null; }
+    render();
   },
+  foodClose(){ ui.foodSheet = null; ui.foodEdit = null; ui.foodPrefill = null; ui.foodEditFoodId = null; ui.confirmKey = null; render(); },
+  foodQuery(v){ ui.foodQuery = v; updateFoodResults(); },
+  foodListMode(m){ ui.foodListMode = m; updateFoodResults(); },
+  foodPickResult(i){ const f = ui.foodResults[i]; if (f) App.foodPickFood(f); },
+  foodPickFood(f){
+    const first = unitOptions(f)[0];
+    ui.foodPick = f; ui.foodEdit = null;
+    ui.foodAmt = { qty: first.key === "g" ? "100" : "1", unit: first.key, time: hhmmOf(new Date()) };
+    ui.foodSheet = "amount"; render();
+  },
+  foodAmt(field, value){
+    ui.foodAmt[field] = value;
+    if (field !== "time"){ const el = $("#faPreview"); if (el) el.innerHTML = foodPreviewHTML(); }
+  },
+  foodLogSave(){
+    const a = ui.foodAmt, picked = ui.foodPick;
+    const grams = gramsFor(picked, a.qty, a.unit);
+    if (!(grams > 0)){ toast("Enter an amount", true); return; }
+    if (!/^\d{2}:\d{2}$/.test(a.time || "")){ toast("Enter a time", true); return; }
+    const editing = ui.foodEdit ? data.foodLog.find(e => e.id === ui.foodEdit) : null;
+    const food = editing ? picked : upsertFood(picked);
+    const fields = { time: a.time, name: food.name, grams, qty: r1(fNum(a.qty)), unit: a.unit,
+      label: amountLabel(food, a.qty, a.unit), ...macrosFor(food.per100g, grams) };
+    let date;
+    if (editing){ Object.assign(editing, fields); date = editing.date; }
+    else {
+      date = ui.foodDay;
+      data.foodLog.push({ id: uid(), date, foodId: food.id, ...fields });
+      food.uses = (food.uses || 0) + 1; food.lastUsed = Date.now();
+    }
+    refreshFoodDay(date); save();
+    ui.foodSheet = null; ui.foodEdit = null; ui.foodPick = null;
+    toast(editing ? "Entry updated ✓" : `Logged ${fields.kcal} kcal ✓`); render();
+  },
+  foodQuickSave(){
+    const val = id => ($(id)?.value ?? "").trim();
+    const kcalStr = val("#fqKcal");
+    if (kcalStr === "" || !(parseFloat(kcalStr) >= 0)){ toast("Enter calories", true); return; }
+    const time = val("#fqTime");
+    if (!/^\d{2}:\d{2}$/.test(time)){ toast("Enter a time", true); return; }
+    const m = id => r1(Math.max(0, fNum(val(id))));
+    const fields = { time, foodId: null, name: val("#fqName") || "Quick add", grams: null, qty: null, unit: null, label: "",
+      kcal: Math.round(parseFloat(kcalStr)), protein: m("#fqProt"), carbs: m("#fqCarb"), fat: m("#fqFat"), fiber: m("#fqFib") };
+    const editing = ui.foodEdit ? data.foodLog.find(e => e.id === ui.foodEdit) : null;
+    let date;
+    if (editing){ Object.assign(editing, fields); date = editing.date; }
+    else { date = ui.foodDay; data.foodLog.push({ id: uid(), date, ...fields }); }
+    refreshFoodDay(date); save();
+    ui.foodSheet = null; ui.foodEdit = null; ui.foodQuickPrefill = null;
+    toast(editing ? "Entry updated ✓" : `Logged ${fields.kcal} kcal ✓`); render();
+  },
+  foodEditEntry(id){
+    const e = data.foodLog.find(x => x.id === id); if (!e) return;
+    ui.foodEdit = id; ui.confirmKey = null;
+    if (e.grams == null){ ui.foodQuickPrefill = { ...e }; ui.foodSheet = "quick"; render(); return; }
+    const food = foodForEntry(e);
+    const ok = unitOptions(food).some(o => o.key === e.unit) && e.qty != null;
+    ui.foodPick = food;
+    ui.foodAmt = { qty: String(ok ? e.qty : e.grams), unit: ok ? e.unit : "g", time: e.time };
+    ui.foodSheet = "amount"; render();
+  },
+  foodDelEntry(id){
+    if (!confirmDel("FL" + id)) return;
+    const e = data.foodLog.find(x => x.id === id); if (!e) return;
+    data.foodLog = data.foodLog.filter(x => x.id !== id);
+    refreshFoodDay(e.date); save();
+    ui.foodSheet = null; ui.foodEdit = null; toast("Entry deleted"); render();
+  },
+  foodDayShift(n){ const d = shiftISO(ui.foodDay, n); if (d > todayISO()) return; ui.foodDay = d; render(); },
+  foodDayToday(){ ui.foodDay = todayISO(); render(); },
+  foodScan(){ toast("Barcode scanning arrives in the next step", true); },
   saveTargets(){
     const k = parseFloat($("#tKcal").value), p = parseFloat($("#tProt").value);
     data.settings.kcalTarget = isFinite(k)&&k>0 ? Math.round(k) : null;

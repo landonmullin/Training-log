@@ -100,6 +100,85 @@ def deleting_a_logged_day_clears_its_entries(pw, url):
         pg.evaluate("refreshFoodDay('2026-09-28')")
         assert stored(pg)["nutrition"] == []
 
+@test
+def log_recent_food_on_today(pw, url):
+    with app(pw, url, base(foods=[EGG])) as pg:
+        pg.click("#fdAdd")
+        pg.click("#fdResults .fd-res >> nth=0")
+        pg.fill("#faQty", "2"); pg.select_option("#faUnit", "p0")
+        assert "143" in pg.inner_text("#faPreview")
+        pg.click("#faSave")
+        s = stored(pg); e = s["foodLog"][0]
+        assert e["date"] == today(pg) and e["kcal"] == 143 and e["label"] == "2 × large" and e["grams"] == 100
+        assert e["qty"] == 2 and e["unit"] == "p0"
+        row = [r for r in s["nutrition"] if r["date"] == today(pg)][0]
+        assert row["source"] == "log" and row["kcal"] == 143
+        assert s["foods"][0]["uses"] == 4
+        assert pg.locator("#fdSheet").count() == 0
+        assert "Egg, whole" in pg.inner_text("#view")
+
+@test
+def search_box_keeps_focus_while_typing(pw, url):
+    with app(pw, url, base(foods=[EGG])) as pg:
+        pg.click("#fdAdd")
+        pg.keyboard.type("egg", delay=50)
+        assert pg.input_value("#fdQuery") == "egg"
+        assert pg.evaluate("document.activeElement.id") == "fdQuery"
+        assert "Egg, whole" in pg.inner_text("#fdResults")
+
+@test
+def quick_add_on_yesterday_including_zero_calories(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdPrev")
+        y = pg.evaluate("shiftISO(todayISO(), -1)")
+        pg.click("#fdAdd"); pg.click("#fdQuickLink")
+        pg.fill("#fqName", "Black coffee"); pg.fill("#fqKcal", "0"); pg.click("#fqSave")
+        pg.click("#fdAdd"); pg.click("#fdQuickLink")
+        pg.fill("#fqKcal", "500"); pg.fill("#fqProt", "30"); pg.click("#fqSave")
+        s = stored(pg)
+        assert [e["date"] for e in s["foodLog"]] == [y, y]
+        assert s["foodLog"][0]["kcal"] == 0 and s["foodLog"][0]["name"] == "Black coffee"
+        assert s["foodLog"][1]["name"] == "Quick add"
+        assert [(r["date"], r["kcal"]) for r in s["nutrition"]] == [(y, 500)]
+        pg.click("#fdNext")
+        assert pg.evaluate("ui.foodDay") == today(pg)
+        assert pg.locator("#fdNext").is_disabled()  # cannot go past today
+        pg.evaluate("App.foodDayShift(1)")
+        assert pg.evaluate("ui.foodDay") == today(pg)
+
+@test
+def quick_add_requires_calories(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdAdd"); pg.click("#fdQuickLink"); pg.click("#fqSave")
+        assert stored(pg)["foodLog"] == [] and pg.locator("#fdSheet").count() == 1
+
+@test
+def edit_then_delete_entry(pw, url):
+    with app(pw, url, base(foods=[EGG])) as pg:
+        pg.click("#fdAdd"); pg.click("#fdResults .fd-res >> nth=0")
+        pg.fill("#faQty", "1"); pg.select_option("#faUnit", "p0"); pg.click("#faSave")
+        eid = stored(pg)["foodLog"][0]["id"]
+        pg.click(".fd-row >> nth=0")
+        assert pg.input_value("#faQty") == "1" and pg.input_value("#faUnit") == "p0"
+        pg.fill("#faQty", "3"); pg.click("#faSave")
+        s = stored(pg)
+        assert len(s["foodLog"]) == 1 and s["foodLog"][0]["id"] == eid and s["foodLog"][0]["kcal"] == 215
+        assert s["foods"][0]["uses"] == 4  # editing doesn't count as a new use
+        pg.click(".fd-row >> nth=0")
+        pg.click("#fdSheet button.del"); pg.click("#fdSheet button.del")
+        s = stored(pg)
+        assert s["foodLog"] == [] and s["nutrition"] == []
+
+@test
+def edit_quick_add_entry(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.click("#fdAdd"); pg.click("#fdQuickLink"); pg.fill("#fqKcal", "400"); pg.click("#fqSave")
+        pg.click(".fd-row >> nth=0")
+        assert pg.input_value("#fqKcal") == "400"
+        pg.fill("#fqKcal", "450"); pg.click("#fqSave")
+        s = stored(pg)
+        assert len(s["foodLog"]) == 1 and s["foodLog"][0]["kcal"] == 450 and s["nutrition"][0]["kcal"] == 450
+
 # --- tests above this line ---
 
 def main():
