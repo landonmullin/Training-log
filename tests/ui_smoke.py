@@ -508,6 +508,22 @@ def assistant_reads_a_day_and_cannot_log_food(pw, url):
         names = [f["name"] for f in g.seen[0]["body"]["tools"][0]["functionDeclarations"]]
         assert "log_food" not in names
 
+@test
+def food_tab_has_a_sync_now_button(pw, url):
+    t = iso_shift(0)
+    with app(pw, url, sync_seed()) as pg:
+        pg.evaluate(FAKE_FS)
+        pg.evaluate(f"() => {{ __fs['healthInbox/{TOKEN}'] = {{ {dkey(t)}: {{ kcal: '512.1', protein: '22.4' }} }}; }}")
+        assert "no food data" in pg.inner_text("#foodDay").lower()
+        btn = pg.locator("#foodSyncBtn")
+        assert btn.is_visible() and btn.bounding_box()["y"] < pg.locator("#foodDay").bounding_box()["y"] + 10
+        btn.click()
+        pg.wait_for_function("document.querySelector('#foodDay').innerText.includes('512')")
+        assert "last synced" in pg.inner_text("#view").lower()
+        pg.wait_for_function("document.querySelector('#foodSyncBtn').innerText.includes('Sync now')")  # not stuck on Syncing…
+    with app(pw, url, base()) as pg:
+        assert pg.locator("#foodSyncBtn").count() == 0
+
 # --- tests above this line ---
 
 def main():

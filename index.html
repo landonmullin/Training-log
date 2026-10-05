@@ -188,7 +188,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 80;
+const APP_VERSION = 81;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2117,14 +2117,17 @@ function foodDayCardHTML(){
       <div class="note" style="margin-top:10px">${esc(NUTRI_SOURCE[n.source] || "")}</div>`;
   }
   const last = s.healthLast ? new Date(s.healthLast).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }) : null;
-  return `<div class="card" id="foodDay" style="border-left:4px solid var(--pull)">
+  const syncBar = s.healthToken && data.crew?.config ? `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 2px 8px">
+      <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${last ? `last synced ${esc(last)}` : "not synced yet"}</span>
+      <button id="foodSyncBtn" onclick="App.healthSyncNow()" ${healthSyncing ? "disabled" : ""} style="padding:6px 12px;font-size:13px;font-weight:700;background:transparent;border:1px solid var(--pull);color:var(--pull);border-radius:8px;cursor:pointer">${healthSyncing ? "Syncing…" : "↻ Sync now"}</button>
+    </div>` : "";
+  return `${syncBar}<div class="card" id="foodDay" style="border-left:4px solid var(--pull)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <button class="fd-nav" id="fdPrev" onclick="App.foodDayShift(-1)" aria-label="Previous day">‹</button>
       <button class="fd-date" onclick="App.foodDayToday()">${esc(label)}</button>
       <button class="fd-nav" id="fdNext" onclick="App.foodDayShift(1)" aria-label="Next day" ${date >= today ? "disabled" : ""}>›</button>
     </div>
     ${body}
-    ${last ? `<div class="note" style="margin-top:4px">last synced ${esc(last)}</div>` : ""}
   </div>`;
 }
 // calendar day detail: the day's food, shown above workouts
@@ -3965,7 +3968,11 @@ window.App = {
   foodDayToday(){ ui.foodDay = todayISO(); render(); },
   foodGoDay(iso){ const t = todayISO(); ui.foodDay = iso > t ? t : iso; App.tab("food"); },
   healthSetup(){ if (!data.settings.healthToken){ data.settings.healthToken = makeHealthToken(crypto.getRandomValues(new Uint8Array(24))); save(); } render(); },
-  healthSyncNow(){ healthSync(true); },
+  healthSyncNow(){
+    const p = healthSync(true);
+    if (ui.tab === "food") render(); // shows "Syncing…"
+    return p.finally(() => { if (ui.tab === "food") render(); }); // healthSyncing is cleared by now
+  },
   copyText(id){
     const t = $("#" + id)?.textContent || "";
     (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast("Copied ✓"), () => toast("Couldn't copy — select the text instead", true));
