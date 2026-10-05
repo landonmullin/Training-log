@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 82;
+const APP_VERSION = 83;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2126,8 +2126,7 @@ function foodDayCardHTML(){
     body = `<div style="text-align:center;margin:4px 0 10px">
         <div class="kbig" data-zone="${kcalZone(n.kcal, s) || ""}" style="font-family:var(--mono);font-size:40px;font-weight:700;line-height:1;color:${kcalColor(n.kcal)}">${n.kcal}</div>
         <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin-top:4px">kcal${remain != null
-          ? ` · <span style="color:${kcalColor(n.kcal)}">${Math.abs(remain)} ${remain >= 0 ? "under" : "over"}</span> ${s.kcalTarget} goal` : ""}${
-          s.kcalLow || s.kcalHigh ? ` · ${s.kcalMode === "bulk" ? "bulk" : "cut"} range ${s.kcalLow || "…"}–${s.kcalHigh || "…"}` : ""}</div>
+          ? ` · <span style="color:${kcalColor(n.kcal)}">${Math.abs(remain)} ${remain >= 0 ? "under" : "over"}</span> ${s.kcalTarget} goal` : ""}</div>
       </div>
       <div class="stats" style="justify-content:space-around">
         <div class="stat"><div class="k">protein</div><div class="v">${n.protein}${s.proteinTarget ? `<span style="color:var(--sub);font-size:12px">/${s.proteinTarget}</span>` : ""}g</div></div>
@@ -2520,9 +2519,50 @@ function parseCronometerCSV(text){
       date, kcal:Math.round(e.kcal), protein:Math.round(e.protein), carbs:Math.round(e.carbs), fat:Math.round(e.fat), fiber:Math.round(e.fiber)
     }));
 }
+// calorie & protein goal form — shown in Weight › targets and on the Food tab
+function goalFormHTML(){
+  const st = data.settings;
+  return `
+        <div class="lbl">Daily calorie & protein goal</div>
+        <div class="seg" id="tMode" style="margin-bottom:8px">
+          <button class="${st.kcalMode !== "bulk" ? "on" : ""}" onclick="App.setKcalMode('cut')">Cut (deficit)</button>
+          <button class="${st.kcalMode === "bulk" ? "on" : ""}" onclick="App.setKcalMode('bulk')">Bulk (surplus)</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input class="mono" type="number" inputmode="numeric" id="tKcal" placeholder="kcal goal" value="${st.kcalTarget||""}">
+          <input class="mono" type="number" inputmode="numeric" id="tProt" placeholder="protein (g)" value="${st.proteinTarget||""}">
+        </div>
+        <div class="lbl">Green range (optional)</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <input class="mono" type="number" inputmode="numeric" id="tLow" placeholder="low kcal" value="${st.kcalLow||""}">
+          <span style="color:var(--sub)">–</span>
+          <input class="mono" type="number" inputmode="numeric" id="tHigh" placeholder="high kcal" value="${st.kcalHigh||""}">
+        </div>
+        <button class="btn ink" id="tSave" onclick="App.saveTargets()">Save goal</button>
+        ${kcalZone(0, st) ? (() => {
+          const bulk = st.kcalMode === "bulk";
+          const lo = st.kcalLow || (bulk ? st.kcalTarget : null), hi = st.kcalHigh || (bulk ? null : st.kcalTarget);
+          const g = lo && hi ? `${Math.min(lo, hi)}–${Math.max(lo, hi)}` : lo ? `${lo}+` : `up to ${hi}`;
+          return `<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px;line-height:1.6">${bulk ? "bulking" : "cutting"}:
+            <span style="color:#2B8A3E">green</span> ${g} kcal${lo ? ` · below is <span style="color:${bulk ? "var(--danger)" : "var(--warn)"}">${bulk ? "red" : "yellow"}</span>` : ""}${hi ? ` · above is <span style="color:${bulk ? "var(--warn)" : "var(--danger)"}">${bulk ? "yellow" : "red"}</span>` : ""}</div>`;
+        })() : ""}`;
+}
+function goalSummary(){
+  const st = data.settings;
+  if (!st.kcalTarget && !st.kcalLow && !st.kcalHigh) return "Set a calorie goal";
+  const range = st.kcalLow || st.kcalHigh ? ` · green ${st.kcalLow || "…"}–${st.kcalHigh || "…"}` : "";
+  return `${st.kcalMode === "bulk" ? "Bulk" : "Cut"}${st.kcalTarget ? ` · ${st.kcalTarget} kcal` : ""}${range}`;
+}
 function renderFood(){
   const s = data.settings;
   let html = foodDayCardHTML();
+  html += `<div class="card" style="padding:${ui.foodGoalOpen ? "14px" : "10px 14px"}">
+    <button id="foodGoalBtn" onclick="App.toggleFoodGoal()" style="display:flex;justify-content:space-between;align-items:center;width:100%;background:none;border:none;cursor:pointer;padding:0;color:var(--ink);font-family:var(--body)">
+      <span style="font-size:14px;font-weight:600">🎯 ${esc(goalSummary())}</span>
+      <span style="font-family:var(--mono);font-size:13px;color:var(--sub)">${ui.foodGoalOpen ? "▾ hide" : "edit ▸"}</span>
+    </button>
+    ${ui.foodGoalOpen ? `<div style="margin-top:12px">${goalFormHTML()}</div>` : ""}
+  </div>`;
   const sorted = [...data.nutrition].sort((a,b)=>a.date<b.date?-1:1);
   if (sorted.length){
     const last7 = sorted.slice(-7);
@@ -2612,29 +2652,7 @@ function renderWeight(){
         <div style="font-size:12px;color:var(--sub)">Zones: Z1 &lt;60% · Z2 60–70% · Z3 70–80% · Z4 80–90% · Z5 90%+ of max</div>
       </div>
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--grid)">
-        <div class="lbl">Daily calorie & protein goal</div>
-        <div class="seg" id="tMode" style="margin-bottom:8px">
-          <button class="${st.kcalMode !== "bulk" ? "on" : ""}" onclick="App.setKcalMode('cut')">Cut (deficit)</button>
-          <button class="${st.kcalMode === "bulk" ? "on" : ""}" onclick="App.setKcalMode('bulk')">Bulk (surplus)</button>
-        </div>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <input class="mono" type="number" inputmode="numeric" id="tKcal" placeholder="kcal goal" value="${st.kcalTarget||""}">
-          <input class="mono" type="number" inputmode="numeric" id="tProt" placeholder="protein (g)" value="${st.proteinTarget||""}">
-        </div>
-        <div class="lbl">Green range (optional)</div>
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-          <input class="mono" type="number" inputmode="numeric" id="tLow" placeholder="low kcal" value="${st.kcalLow||""}">
-          <span style="color:var(--sub)">–</span>
-          <input class="mono" type="number" inputmode="numeric" id="tHigh" placeholder="high kcal" value="${st.kcalHigh||""}">
-        </div>
-        <button class="btn ink" id="tSave" onclick="App.saveTargets()">Save goal</button>
-        ${kcalZone(0, st) ? (() => {
-          const bulk = st.kcalMode === "bulk";
-          const lo = st.kcalLow || (bulk ? st.kcalTarget : null), hi = st.kcalHigh || (bulk ? null : st.kcalTarget);
-          const g = lo && hi ? `${Math.min(lo, hi)}–${Math.max(lo, hi)}` : lo ? `${lo}+` : `up to ${hi}`;
-          return `<div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:8px;line-height:1.6">${bulk ? "bulking" : "cutting"}:
-            <span style="color:#2B8A3E">green</span> ${g} kcal${lo ? ` · below is <span style="color:${bulk ? "var(--danger)" : "var(--warn)"}">${bulk ? "red" : "yellow"}</span>` : ""}${hi ? ` · above is <span style="color:${bulk ? "var(--warn)" : "var(--danger)"}">${bulk ? "yellow" : "red"}</span>` : ""}</div>`;
-        })() : ""}
+        ${goalFormHTML()}
       </div>`:""}
     </div>`;
   return html;
@@ -3987,6 +4005,7 @@ window.App = {
     save(); ui.manualOpen=false; toast("Activity saved ✓"); render();
   },
   toggleTargets(){ ui.targetsOpen=!ui.targetsOpen; render(); },
+  toggleFoodGoal(){ ui.foodGoalOpen = !ui.foodGoalOpen; render(); },
   setKcalMode(m){
     // keep anything typed but not saved yet
     const keep = ["tKcal", "tProt", "tLow", "tHigh"].map(id => [id, $("#" + id)?.value]);
@@ -4000,6 +4019,7 @@ window.App = {
     let lo = num("#tLow"), hi = num("#tHigh");
     if (lo && hi && lo > hi) [lo, hi] = [hi, lo];
     data.settings.kcalLow = lo; data.settings.kcalHigh = hi;
+    ui.foodGoalOpen = false;
     save(); toast("Goal saved ✓"); render();
   },
   saveMaxHr(){

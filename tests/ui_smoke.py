@@ -554,7 +554,24 @@ def food_tab_colors_follow_the_goal_mode(pw, url):
     d["settings"].update({"kcalMode": "cut", "kcalTarget": 2300, "kcalLow": 2100, "kcalHigh": 2400})
     with app(pw, url, d) as pg:
         assert pg.get_attribute("#foodDay .kbig", "data-zone") == "yellow"   # 1900 is under the cutting range
-        assert "2100–2400" in pg.inner_text("#foodDay")
+        assert "2100–2400" in pg.inner_text("#foodGoalBtn")
+
+@test
+def food_tab_edits_the_calorie_goal_in_place(pw, url):
+    d = base(nutrition=[{"id": "n", "date": iso_shift(0), "kcal": 2700, "protein": 150, "carbs": 300, "fat": 90, "fiber": 30, "source": "health"}])
+    with app(pw, url, d) as pg:
+        assert pg.get_attribute("#foodDay .kbig", "data-zone") == "red"      # 2700 over the 2400 cut goal
+        assert "2400" in pg.inner_text("#foodGoalBtn")
+        pg.click("#foodGoalBtn")
+        pg.click("#tMode button:has-text('Bulk')")
+        pg.fill("#tKcal", "2800"); pg.fill("#tLow", "2600"); pg.fill("#tHigh", "3000")
+        pg.click("#tSave")
+        st = stored(pg)["settings"]
+        assert st["kcalMode"] == "bulk" and st["kcalTarget"] == 2800 and st["kcalLow"] == 2600 and st["kcalHigh"] == 3000
+        assert pg.evaluate("ui.tab") == "food"
+        assert pg.get_attribute("#foodDay .kbig", "data-zone") == "green"
+        assert pg.locator("#tSave").count() == 0                               # editor closes after saving
+        assert "bulk" in pg.inner_text("#foodGoalBtn").lower()
 
 # --- tests above this line ---
 
