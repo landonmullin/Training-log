@@ -9,12 +9,32 @@ test("time helpers", () => {
   assert.equal(C.shiftISO("2026-03-01", -1), "2026-02-28");
   assert.equal(C.shiftISO("2026-12-31", 1), "2027-01-01");
 });
-test("kcalGoalState compares a day's calories to the goal", () => {
-  assert.equal(C.kcalGoalState(2300, 2400), "under");
-  assert.equal(C.kcalGoalState(2400, 2400), "under");
-  assert.equal(C.kcalGoalState(2401, 2400), "over");
-  assert.equal(C.kcalGoalState(2300, null), null);
-  assert.equal(C.kcalGoalState(2300, 0), null);
+test("kcalZone: cutting — under range yellow, in range green, over range red", () => {
+  const cut = { kcalMode: "cut", kcalTarget: 2300, kcalLow: 2100, kcalHigh: 2400 };
+  assert.equal(C.kcalZone(1900, cut), "yellow");
+  assert.equal(C.kcalZone(2100, cut), "green");
+  assert.equal(C.kcalZone(2400, cut), "green");
+  assert.equal(C.kcalZone(2401, cut), "red");
+});
+test("kcalZone: bulking — under range red, in range green, over range yellow", () => {
+  const bulk = { kcalMode: "bulk", kcalTarget: 3000, kcalLow: 2900, kcalHigh: 3200 };
+  assert.equal(C.kcalZone(2800, bulk), "red");
+  assert.equal(C.kcalZone(3000, bulk), "green");
+  assert.equal(C.kcalZone(3300, bulk), "yellow");
+});
+test("kcalZone: without a range the goal is the line (old behavior for cutting)", () => {
+  assert.equal(C.kcalZone(2300, { kcalTarget: 2400 }), "green");   // no mode = cutting
+  assert.equal(C.kcalZone(2500, { kcalTarget: 2400 }), "red");
+  assert.equal(C.kcalZone(2500, { kcalMode: "bulk", kcalTarget: 2400 }), "green");
+  assert.equal(C.kcalZone(2300, { kcalMode: "bulk", kcalTarget: 2400 }), "red");
+  assert.equal(C.kcalZone(2300, {}), null);
+  assert.equal(C.kcalZone(2300, { kcalTarget: null }), null);
+});
+test("kcalZone: one-sided range falls back to the goal; reversed limits are swapped", () => {
+  assert.equal(C.kcalZone(2450, { kcalMode: "cut", kcalTarget: 2400, kcalLow: 2100 }), "red");
+  assert.equal(C.kcalZone(2000, { kcalMode: "cut", kcalTarget: 2400, kcalLow: 2100 }), "yellow");
+  assert.equal(C.kcalZone(2200, { kcalMode: "cut", kcalLow: 2400, kcalHigh: 2100 }), "green");
+  assert.equal(C.kcalZone(2000, { kcalMode: "cut", kcalLow: 2100, kcalHigh: 2400 }), "yellow"); // range alone works
 });
 const classes = [{ id: "c1", name: "ENGR 3413 Materials Science" }, { id: "c2", name: "Modern Physics" }, { id: "c3", name: "Physics Lab" }];
 test("matchClass finds a class from loose spoken names", () => {

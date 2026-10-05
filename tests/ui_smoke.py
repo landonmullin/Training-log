@@ -419,8 +419,8 @@ def calendar_marks_calorie_goal_and_shows_food_first(pw, url):
         weights=[{"id": "w1", "date": d3, "lbs": 180}])
     with app(pw, url, seed) as pg:
         pg.evaluate("App.tab('calendar')"); pg.evaluate("App.month(-1)")
-        assert pg.locator(".cal .day .kbar.under").count() == 1
-        assert pg.locator(".cal .day .kbar.over").count() == 1
+        assert pg.locator(".cal .day .kbar.green").count() == 1
+        assert pg.locator(".cal .day .kbar.red").count() == 1
         assert pg.locator(".cal .day .kbar").count() == 2  # weigh-in-only day gets no bar
         pg.evaluate(f"App.selDay('{d1}')")
         cards = pg.locator("#view .card").all_inner_texts()
@@ -523,6 +523,38 @@ def food_tab_has_a_sync_now_button(pw, url):
         pg.wait_for_function("document.querySelector('#foodSyncBtn').innerText.includes('Sync now')")  # not stuck on Syncing…
     with app(pw, url, base()) as pg:
         assert pg.locator("#foodSyncBtn").count() == 0
+
+@test
+def goal_settings_set_bulk_mode_and_green_range(pw, url):
+    ym = (_dt.date.today().replace(day=1) - _dt.timedelta(days=1)).isoformat()[:7]
+    days = {f"{ym}-02": 2700, f"{ym}-03": 3050, f"{ym}-04": 3400}
+    seed = base(nutrition=[{"id": d, "date": d, "kcal": k, "protein": 150, "carbs": 300, "fat": 90, "fiber": 30, "source": "health"} for d, k in days.items()])
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('weight')"); pg.evaluate("App.toggleTargets()")
+        pg.click("#tMode button:has-text('Bulk')")
+        pg.fill("#tKcal", "3000"); pg.fill("#tLow", "2900"); pg.fill("#tHigh", "3200")
+        pg.click("#tSave")
+        st = stored(pg)["settings"]
+        assert st["kcalMode"] == "bulk" and st["kcalTarget"] == 3000 and st["kcalLow"] == 2900 and st["kcalHigh"] == 3200
+        assert "2900" in pg.inner_text("#view") and "3200" in pg.inner_text("#view")
+        pg.evaluate("App.tab('calendar')"); pg.evaluate("App.month(-1)")
+        assert pg.locator(".cal .day .kbar.red").count() == 1      # 2700: under range while bulking
+        assert pg.locator(".cal .day .kbar.green").count() == 1    # 3050
+        assert pg.locator(".cal .day .kbar.yellow").count() == 1   # 3400: over range while bulking
+        legend = pg.inner_text(".legend").lower()
+        assert "in range" in legend and "over" in legend and "under" in legend
+        pg.evaluate("App.tab('weight')"); pg.evaluate("ui.targetsOpen = true; render()")
+        pg.fill("#tLow", ""); pg.fill("#tHigh", ""); pg.click("#tSave")
+        st = stored(pg)["settings"]
+        assert st["kcalLow"] is None and st["kcalHigh"] is None
+
+@test
+def food_tab_colors_follow_the_goal_mode(pw, url):
+    d = base(nutrition=[{"id": "n", "date": iso_shift(0), "kcal": 1900, "protein": 150, "carbs": 200, "fat": 60, "fiber": 30, "source": "health"}])
+    d["settings"].update({"kcalMode": "cut", "kcalTarget": 2300, "kcalLow": 2100, "kcalHigh": 2400})
+    with app(pw, url, d) as pg:
+        assert pg.get_attribute("#foodDay .kbig", "data-zone") == "yellow"   # 1900 is under the cutting range
+        assert "2100–2400" in pg.inner_text("#foodDay")
 
 # --- tests above this line ---
 
