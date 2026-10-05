@@ -161,12 +161,7 @@
   .fd-row{display:grid;grid-template-columns:48px 1fr auto;gap:8px;align-items:baseline;width:100%;text-align:left;padding:9px 0;background:none;border:none;border-bottom:1px solid var(--grid);color:var(--ink);cursor:pointer;font-size:14px;font-family:var(--body)}
   .fd-row .t,.fd-row .k{font-family:var(--mono);font-size:12px;color:var(--sub)}
   .fd-row .a{color:var(--sub);font-size:12px}
-  .fd-res .meta{display:block;font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:2px}
-  .fd-tag{display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:6px;color:var(--sub);vertical-align:middle}
   .linkbtn{background:none;border:none;color:var(--pull);font-weight:600;font-size:14px;cursor:pointer;padding:6px}
-  .fd-scan{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:10px;overflow:hidden;margin:8px 0}
-  .fd-scan video{width:100%;height:100%;object-fit:cover;display:block}
-  .fd-scan .aim{position:absolute;left:12%;right:12%;top:42%;height:16%;border:2px solid rgba(255,255,255,.85);border-radius:8px}
 </style>
 </head>
 <body>
@@ -193,7 +188,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 79;
+const APP_VERSION = 80;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1579,9 +1574,7 @@ const ui = {
   progMode: "lift", progExercise: "", progMetric: "top",
   cardioType: "run", cardioMetric: "pace",
   cardioList: "recent", targetsOpen: false,
-  foodDay: todayISO(), foodSheet: null, foodQuery: "", foodFocus: false, foodListMode: "recent", foodResults: [],
-  foodRemote: { q: "", usda: [], off: [], status: "" }, foodPick: null, foodAmt: null, foodEdit: null,
-  foodQuickPrefill: null, foodPrefill: null, foodEditFoodId: null, scanStatus: "",
+  foodDay: todayISO(),
   aiOpen: false, aiMsgs: [], aiBusy: false, aiListening: false,
   todoTab: "open",
   openMaps: new Set(),
@@ -2023,199 +2016,52 @@ function renderCardio(){
 
 // ----- food / nutrition -----
 // @food-core-start
-// Pure food-logging helpers: no DOM, no `data`, no network. Tested by tests/*.test.mjs.
-const FOOD_OZ = 28.3495;
 function fNum(v){ const n = typeof v === "string" ? parseFloat(v) : v; return Number.isFinite(n) ? n : 0; }
 function r1(n){ return Math.round(n * 10) / 10; }
-function normBarcode(s){ return String(s ?? "").replace(/\D/g, "").replace(/^0+/, ""); }
-function tidyName(s){
-  const t = String(s ?? "").trim();
-  if (!t || t !== t.toUpperCase()) return t;
-  return t.toLowerCase().replace(/(^|[\s,(\/-])([a-z])/g, (m, a, b) => a + b.toUpperCase());
-}
-function unitOptions(food){
-  const opts = (food.portions || []).map((p, i) => ({ key: "p" + i, label: p.label, grams: p.grams }));
-  if (!food.servingOnly) opts.push({ key: "g", label: "g", grams: 1 }, { key: "oz", label: "oz", grams: FOOD_OZ });
-  return opts;
-}
-function gramsFor(food, qty, unitKey){
-  const q = fNum(qty);
-  const u = unitOptions(food).find(o => o.key === unitKey);
-  return (q > 0 && u) ? r1(q * u.grams) : 0;
-}
-function amountLabel(food, qty, unitKey){
-  const u = unitOptions(food).find(o => o.key === unitKey);
-  if (!u) return "";
-  const q = r1(fNum(qty));
-  if (unitKey === "g" || unitKey === "oz") return `${q} ${u.label}`;
-  if (q === 1) return u.label;
-  return `${q} × ${u.label.replace(/^1\s+/, "")}`;
-}
-function macrosFor(per100g, grams){
-  const f = fNum(grams) / 100;
-  return { kcal: Math.round(fNum(per100g.kcal) * f), protein: r1(fNum(per100g.protein) * f),
-    carbs: r1(fNum(per100g.carbs) * f), fat: r1(fNum(per100g.fat) * f), fiber: r1(fNum(per100g.fiber) * f) };
-}
-function dayTotals(entries){
-  const t = { kcal: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 };
-  for (const e of entries) for (const k of Object.keys(t)) t[k] += fNum(e[k]);
-  for (const k of Object.keys(t)) t[k] = Math.round(t[k]);
-  return t;
-}
-function rebuildNutritionDay(nutrition, foodLog, date, makeId){
-  const entries = foodLog.filter(e => e.date === date);
-  const others = nutrition.filter(n => n.date !== date);
-  const prev = nutrition.find(n => n.date === date && n.source === "log");
-  const imported = nutrition.find(n => n.date === date && n.source !== "log");
-  // a Cronometer/manual total that logging replaced rides along, and comes back if every entry is removed
-  const replaced = prev ? prev.replaced : imported;
-  if (!entries.length) return others.concat(replaced ? [replaced] : imported ? [imported] : []);
-  const row = { id: prev ? prev.id : makeId(), date, ...dayTotals(entries), source: "log" };
-  if (replaced) row.replaced = replaced;
-  return others.concat([row]);
-}
-function skipLoggedDates(rows, foodLog){
-  const logged = new Set(foodLog.map(e => e.date));
-  return { kept: rows.filter(r => !logged.has(r.date)), skipped: rows.filter(r => logged.has(r.date)).length };
-}
-function customFood(v){
-  const name = String(v.name ?? "").trim();
-  if (!name) throw new Error("Enter a name");
-  const kcalRaw = String(v.kcal ?? "").trim();
-  if (kcalRaw === "" || !(parseFloat(kcalRaw) >= 0)) throw new Error("Enter calories");
-  const grams = fNum(v.servingGrams);
-  const servingOnly = !(grams > 0);
-  const scale = servingOnly ? 1 : 100 / grams;
-  const per100g = {};
-  for (const k of ["kcal", "protein", "carbs", "fat", "fiber"]) per100g[k] = r1(Math.max(0, fNum(v[k])) * scale);
-  return { name, brand: String(v.brand ?? "").trim(), barcode: normBarcode(v.barcode), per100g,
-    portions: [{ label: String(v.servingLabel ?? "").trim() || "1 serving", grams: servingOnly ? 100 : r1(grams) }],
-    servingOnly, source: "custom", sourceId: "" };
-}
-function toSavedFood(f, makeId){
-  return { id: makeId(), name: f.name, brand: f.brand || "", barcode: f.barcode || "",
-    per100g: { ...f.per100g }, portions: (f.portions || []).map(p => ({ label: p.label, grams: p.grams })),
-    servingOnly: !!f.servingOnly, source: f.source, sourceId: f.sourceId || "", uses: 0, lastUsed: 0 };
-}
-function searchSaved(foods, q){
-  const fold = x => String(x ?? "").toLowerCase().replace(/['’]/g, "");
-  const toks = fold(q).split(/\s+/).filter(Boolean);
-  if (!toks.length) return [];
-  return foods.filter(f => { const hay = fold(f.name + " " + (f.brand || "")); return toks.every(t => hay.includes(t)); })
-    .sort((a, b) => (b.uses - a.uses) || (b.lastUsed - a.lastUsed)).slice(0, 20);
-}
-function recentFoods(foods, mode){
-  const key = mode === "frequent" ? (f => f.uses) : (f => f.lastUsed);
-  return foods.filter(f => f.uses > 0).sort((a, b) => key(b) - key(a)).slice(0, 15);
-}
 function fdTime(hhmm){
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm ?? ""));
   if (!m) return "";
   const h = +m[1];
   return `${h % 12 || 12}:${m[2]}${h < 12 ? "a" : "p"}`;
 }
-function hhmmOf(d){ return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; }
 function shiftISO(iso, days){
   const [y, m, d] = iso.split("-").map(Number);
   const dt = new Date(y, m - 1, d + days);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
-const USDA_TIER = { "Foundation": 1, "SR Legacy": 1, "Survey (FNDDS)": 2, "Branded": 3 };
-const OFF_FIELDS = "code,product_name,brands,nutriments,serving_size,serving_quantity";
-function parseUsdaFood(f){
-  if (!f || !f.fdcId) return null;
-  const ns = f.foodNutrients || [];
-  const pick = (id, kcalOnly) => {
-    const n = ns.find(x => x.nutrientId === id && (!kcalOnly || String(x.unitName || "").toUpperCase() === "KCAL"));
-    return n && Number.isFinite(n.value) ? n.value : null;
-  };
-  const kcal = pick(1008, true) ?? pick(2047, true) ?? pick(2048, true);
-  if (kcal == null) return null;
-  const portions = [];
-  if (f.dataType === "Branded"){
-    const sz = fNum(f.servingSize), unit = String(f.servingSizeUnit || "").toLowerCase();
-    if (sz > 0 && (unit === "g" || unit === "grm"))
-      portions.push({ label: `1 serving (${f.householdServingFullText ? String(f.householdServingFullText).trim() : r1(sz) + " g"})`, grams: r1(sz) });
-  }
-  for (const m of [...(f.foodMeasures || [])].sort((a, b) => (a.rank || 0) - (b.rank || 0))){
-    const g = fNum(m.gramWeight), t = String(m.disseminationText || "").trim();
-    if (g > 0 && t && t.toLowerCase() !== "quantity not specified" && portions.length < 6) portions.push({ label: t, grams: r1(g) });
-  }
-  return { name: tidyName(f.description), brand: String(f.brandName || f.brandOwner || "").trim(), barcode: normBarcode(f.gtinUpc),
-    per100g: { kcal: r1(kcal), protein: r1(fNum(pick(1003))), carbs: r1(fNum(pick(1005))), fat: r1(fNum(pick(1004))), fiber: r1(fNum(pick(1079))) },
-    portions, servingOnly: false, source: "usda", sourceId: String(f.fdcId), tier: USDA_TIER[f.dataType] || 3 };
-}
-function parseOffProduct(p){
-  if (!p || !p.code) return null;
-  const n = p.nutriments || {};
-  const kcal = n["energy-kcal_100g"] != null ? fNum(n["energy-kcal_100g"])
-    : n["energy-kj_100g"] != null ? fNum(n["energy-kj_100g"]) / 4.184 : null;
-  const sq = fNum(p.serving_quantity);
-  const portions = sq > 0 ? [{ label: `1 serving (${p.serving_size ? String(p.serving_size).trim() : r1(sq) + " g"})`, grams: r1(sq) }] : [];
-  return { name: String(p.product_name || "").trim() || "Unnamed product", brand: String(p.brands || "").split(",")[0].trim(),
-    barcode: normBarcode(p.code),
-    per100g: { kcal: kcal == null ? null : r1(kcal), protein: r1(fNum(n.proteins_100g)), carbs: r1(fNum(n.carbohydrates_100g)),
-      fat: r1(fNum(n.fat_100g)), fiber: r1(fNum(n.fiber_100g)) },
-    portions, servingOnly: false, source: "off", sourceId: String(p.code), tier: 3, incomplete: kcal == null };
-}
-function mergeResults(savedHits, usdaFoods, offFoods){
-  const keys = new Set(savedHits.map(f => f.source + ":" + f.sourceId));
-  const codes = new Set(savedHits.map(f => f.barcode).filter(Boolean));
-  const out = [];
-  const remote = [...usdaFoods, ...offFoods].filter(f => f && !f.incomplete).sort((a, b) => a.tier - b.tier);
-  for (const f of remote){
-    const key = f.source + ":" + f.sourceId;
-    if (keys.has(key) || (f.barcode && codes.has(f.barcode))) continue;
-    keys.add(key); if (f.barcode) codes.add(f.barcode);
-    out.push(f);
-  }
-  return savedHits.map(f => ({ ...f, saved: true })).concat(out);
-}
-function usdaSearchURL(q, key){
-  return `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}`
-    + `&pageSize=25&dataType=${encodeURIComponent("Foundation,SR Legacy,Survey (FNDDS),Branded")}`;
-}
-function offSearchURL(q){
-  return `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(q)}`
-    + `&search_simple=1&action=process&json=1&page_size=20&fields=${OFF_FIELDS}`;
-}
-function offProductURL(code){
-  return `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(String(code).replace(/\D/g, ""))}.json?fields=${OFF_FIELDS}`;
-}
-function prefillFrom(food, barcode){
-  const p = (food.portions || [])[0];
-  const grams = p ? p.grams : 100;
-  const m = macrosFor(food.per100g, grams);
-  return { name: food.name || "", brand: food.brand || "", barcode: normBarcode(barcode || food.barcode),
-    servingLabel: p ? p.label : "100 g", servingGrams: food.servingOnly ? "" : grams,
-    kcal: food.per100g.kcal == null ? "" : m.kcal, protein: m.protein, carbs: m.carbs, fat: m.fat, fiber: m.fiber };
-}
-function parseUsdaPortions(detail){
-  const out = [];
-  const list = [...((detail && detail.foodPortions) || [])].sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-  for (const p of list){
-    const g = fNum(p.gramWeight);
-    if (!(g > 0)) continue;
-    const desc = String(p.portionDescription || "").trim();
-    let label = desc && desc.toLowerCase() !== "quantity not specified" ? desc : "";
-    if (!label){
-      const unit = String(p.measureUnit?.name || "").trim();
-      label = [r1(fNum(p.amount) || 1), unit && unit !== "undetermined" ? unit : "", String(p.modifier || "").trim()].filter(Boolean).join(" ");
-    }
-    if (out.length < 8) out.push({ label, grams: r1(g) });
-  }
-  return out;
-}
-function usdaFoodURL(id, key){
-  return `https://api.nal.usda.gov/fdc/v1/food/${encodeURIComponent(id)}?api_key=${encodeURIComponent(key)}`;
-}
-// USDA matches whole words and ORs them, so "mcgriddle" misses "McGRIDDLES". This variant
-// requires every word and prefix-matches it, after dropping apostrophes and a plural "s".
-function usdaStrictQuery(q){
-  return String(q ?? "").toLowerCase().replace(/['’]/g, "").split(/[^a-z0-9]+/).filter(Boolean)
-    .map(w => "+" + (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w) + "*").join(" ");
-}
 function kcalGoalState(kcal, target){ return target > 0 ? (fNum(kcal) <= target ? "under" : "over") : null; }
+// ----- Cronometer → Apple Health → Shortcut → Firestore inbox -----
+// The Shortcut writes one map per day, keyed d<yyyyMMdd>, with values as text (Shortcuts may add commas).
+function parseHealthInbox(doc, today){
+  const num = v => { const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : 0; };
+  const out = [];
+  for (const [k, v] of Object.entries(doc || {})){
+    const m = /^d(\d{4})(\d{2})(\d{2})$/.exec(k);
+    if (!m || !v || typeof v !== "object") continue;
+    const date = `${m[1]}-${m[2]}-${m[3]}`;
+    if (date > today) continue;
+    const kcal = num(v.kcal);
+    if (!(kcal > 0)) continue; // a locked phone can report nothing; never overwrite a day with zero
+    out.push({ date, kcal: Math.round(kcal), protein: Math.round(num(v.protein)), carbs: Math.round(num(v.carbs)),
+      fat: Math.round(num(v.fat)), fiber: Math.round(num(v.fiber)) });
+  }
+  return out.sort((a, b) => a.date < b.date ? -1 : 1);
+}
+function mergeHealthDays(nutrition, days, makeId){
+  let out = nutrition; const changed = [];
+  for (const d of days){
+    const rows = out.filter(n => n.date === d.date);
+    const prev = rows.find(n => n.source === "health");
+    const same = rows.length === 1 && prev && ["kcal", "protein", "carbs", "fat", "fiber"].every(k => prev[k] === d[k]);
+    if (same) continue;
+    out = out.filter(n => n.date !== d.date).concat([{ id: prev ? prev.id : makeId(), ...d, source: "health" }]);
+    changed.push(d.date);
+  }
+  return { nutrition: out, changed };
+}
+function makeHealthToken(bytes){
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 // ----- assistant helpers -----
 function matchClass(classes, name){
   const norm = x => String(x ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -2247,241 +2093,135 @@ function pickFlashModel(list, exclude = []){
   return newest(/^gemini-([\d.]+)-flash$/) || newest(/^gemini-([\d.]+)-flash-lite$/);
 }
 // @food-core-end
-// ----- food log: app-level (reads/writes `data`) -----
-function refreshFoodDay(date){ data.nutrition = rebuildNutritionDay(data.nutrition, data.foodLog, date, uid); }
-function upsertFood(food){
-  let f = food.id ? data.foods.find(x => x.id === food.id) : null;
-  if (!f && food.source !== "custom" && food.sourceId) f = data.foods.find(x => x.source === food.source && x.sourceId === food.sourceId);
-  if (!f && food.barcode) f = data.foods.find(x => x.barcode && x.barcode === food.barcode);
-  if (!f){ f = toSavedFood(food, uid); data.foods.push(f); }
-  return f;
-}
-function foodForEntry(e){
-  const lib = data.foods.find(f => f.id === e.foodId);
-  if (lib) return lib;
-  const g = fNum(e.grams) || 100, k = 100 / g;
-  return { name: e.name, brand: "", barcode: "", portions: [], servingOnly: false, source: "custom", sourceId: "",
-    per100g: { kcal: e.kcal * k, protein: e.protein * k, carbs: e.carbs * k, fat: e.fat * k, fiber: e.fiber * k } };
-}
-function nutritionSettingsHTML(){
-  return `<div class="card" id="nutritionSettings">
-    <div class="lbl" style="margin-bottom:8px">Nutrition</div>
-    <div style="font-size:14px;font-weight:600;margin-bottom:4px">USDA food database key</div>
-    <div style="font-size:13px;color:var(--sub);margin-bottom:8px;line-height:1.45">Free key that turns on USDA results in food search. Open Food Facts works without one.</div>
-    <input id="usdaKey" class="mono" value="${esc(data.settings.usdaKey || "")}" placeholder="paste your key" autocomplete="off" autocapitalize="off" spellcheck="false" onchange="App.setUsdaKey(this.value)">
-    <a class="weblink pull" href="https://api.data.gov/signup/" target="_blank" rel="noopener">Get a free key <span class="ext">↗</span></a>
-    <div style="height:1px;background:var(--grid);margin:14px 0"></div>
-    <div style="font-size:14px;font-weight:600;margin-bottom:4px">Import from Cronometer</div>
-    <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">Back-fill past days from a Cronometer <b>Daily Nutrition</b> export (website: Account → Export Data). Days that already have foods logged here are skipped.</div>
-    <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
-    <div style="height:1px;background:var(--grid);margin:14px 0"></div>
-    <div style="font-size:14px;font-weight:600;margin-bottom:6px">My foods (${data.foods.length})</div>
-    <div id="myFoods">${data.foods.length ? [...data.foods].sort((a, b) => a.name.localeCompare(b.name)).map(f => {
-        const d = foodDefaultServing(f);
-        return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--grid)">
-          <div style="flex:1;min-width:0"><div style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</div>
-            <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${f.brand ? esc(f.brand) + " · " : ""}${d.kcal} kcal / ${esc(d.label)}</div></div>
-          <button class="linkbtn" onclick="App.foodEditSaved('${f.id}')">edit</button>
-          ${delBtn("MF" + f.id, `App.foodDelSaved('${f.id}')`)}
-        </div>`; }).join("")
-      : `<div class="muted" style="text-align:left">Foods you log or create are saved here.</div>`}</div>
-  </div>`;
-}
-function foodEntriesFor(date){
-  return data.foodLog.filter(e => e.date === date).sort((a, b) => a.time < b.time ? -1 : a.time > b.time ? 1 : 0);
-}
+// ----- food: view-only day card, calendar card, Cronometer sync -----
+const NUTRI_SOURCE = { health: "from Cronometer · Apple Health sync", cronometer: "from a Cronometer CSV import", log: "logged in this app", manual: "entered manually" };
 function foodDayCardHTML(){
   const date = ui.foodDay, s = data.settings, today = todayISO();
-  const entries = foodEntriesFor(date);
-  const t = dayTotals(entries);
+  const n = data.nutrition.find(x => x.date === date);
   const label = date === today ? "Today" : date === shiftISO(today, -1) ? "Yesterday" : prettyDate(date);
-  const remain = s.kcalTarget ? s.kcalTarget - t.kcal : null;
-  return `<div class="card" style="border-left:4px solid var(--pull)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+  let body;
+  if (!n){
+    body = `<div class="muted" style="padding:14px 0">No food data for this day.</div>
+      ${!s.healthToken ? `<div class="note">Set up Cronometer sync in Settings → Nutrition</div>` : ""}`;
+  } else {
+    const remain = s.kcalTarget ? s.kcalTarget - n.kcal : null;
+    body = `<div style="text-align:center;margin:4px 0 10px">
+        <div style="font-family:var(--mono);font-size:40px;font-weight:700;line-height:1;color:${kcalColor(n.kcal)}">${n.kcal}</div>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin-top:4px">kcal${remain != null
+          ? ` · <span style="color:${remain >= 0 ? "#2B8A3E" : "var(--danger)"}">${Math.abs(remain)} ${remain >= 0 ? "under" : "over"}</span> ${s.kcalTarget} goal` : ""}</div>
+      </div>
+      <div class="stats" style="justify-content:space-around">
+        <div class="stat"><div class="k">protein</div><div class="v">${n.protein}${s.proteinTarget ? `<span style="color:var(--sub);font-size:12px">/${s.proteinTarget}</span>` : ""}g</div></div>
+        ${stat("carbs", n.carbs + "g")}${stat("fat", n.fat + "g")}${stat("fiber", (n.fiber || 0) + "g")}
+      </div>
+      <div class="note" style="margin-top:10px">${esc(NUTRI_SOURCE[n.source] || "")}</div>`;
+  }
+  const last = s.healthLast ? new Date(s.healthLast).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }) : null;
+  return `<div class="card" id="foodDay" style="border-left:4px solid var(--pull)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
       <button class="fd-nav" id="fdPrev" onclick="App.foodDayShift(-1)" aria-label="Previous day">‹</button>
       <button class="fd-date" onclick="App.foodDayToday()">${esc(label)}</button>
       <button class="fd-nav" id="fdNext" onclick="App.foodDayShift(1)" aria-label="Next day" ${date >= today ? "disabled" : ""}>›</button>
     </div>
-    <div class="stats" style="margin-bottom:6px">
-      <div class="stat"><div class="k">eaten</div><div class="v" style="color:${kcalColor(t.kcal)}">${t.kcal}</div></div>
-      ${remain != null ? `<div class="stat"><div class="k">${remain >= 0 ? "left" : "over"}</div><div class="v" style="color:${remain >= 0 ? "#2B8A3E" : "var(--danger)"}">${Math.abs(remain)}</div></div>` : ""}
-      <div class="stat"><div class="k">protein</div><div class="v">${t.protein}${s.proteinTarget ? `<span style="color:var(--sub);font-size:12px">/${s.proteinTarget}</span>` : ""}g</div></div>
-    </div>
-    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:6px">C${t.carbs} · F${t.fat} · fiber ${t.fiber}</div>
-    ${entries.length ? entries.map(e => `<button class="fd-row" onclick="App.foodEditEntry('${e.id}')">
-        <span class="t">${fdTime(e.time)}</span>
-        <span class="n">${esc(e.name)}${e.label ? ` <span class="a">${esc(e.label)}</span>` : ""}</span>
-        <span class="k">${e.kcal} kcal · P${Math.round(e.protein)}</span></button>`).join("")
-      : `<div class="muted" style="padding:8px 0">Nothing logged ${date === today ? "yet today" : "this day"}.</div>`}
-    <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-top:12px">
-      <button class="btn" id="fdAdd" style="background:var(--pull);color:#fff" onclick="App.foodOpen('search')">+ Add food</button>
-      <button class="btn" id="fdScan" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="App.foodScan()">Scan</button>
-    </div>
+    ${body}
+    ${last ? `<div class="note" style="margin-top:4px">last synced ${esc(last)}</div>` : ""}
   </div>`;
 }
 // calendar day detail: the day's food, shown above workouts
 function calFoodCardHTML(date, rows){
   const n = rows[0];
   if (!n) return "";
-  const entries = foodEntriesFor(date), t = data.settings.kcalTarget;
+  const t = data.settings.kcalTarget;
   return `<div class="card" style="border-left:4px solid var(--pull)">
     <div style="display:flex;justify-content:space-between;align-items:baseline">
       <div class="h2" style="margin:0">FOOD</div>
-      <button class="linkbtn" id="calFoodOpen" style="padding:0;font-size:13px" onclick="App.foodGoDay('${date}')">${entries.length ? "edit" : "open"} ›</button>
+      <button class="linkbtn" id="calFoodOpen" style="padding:0;font-size:13px" onclick="App.foodGoDay('${date}')">view ›</button>
     </div>
     <div class="stats" style="margin-top:6px">
       <div class="stat"><div class="k">kcal</div><div class="v" style="color:${kcalColor(n.kcal)}">${n.kcal}</div></div>
       ${stat("protein", n.protein + "g")}${stat("carbs", n.carbs + "g")}${stat("fat", n.fat + "g")}
     </div>
     ${t ? `<div style="font-size:12px;margin-top:6px">vs ${t} kcal goal: ${kcalDelta(n.kcal)}</div>` : ""}
-    ${entries.length ? `<div style="margin-top:8px">${entries.map(e => `<div class="fd-row" style="cursor:default">
-        <span class="t">${fdTime(e.time)}</span>
-        <span class="n">${esc(e.name)}${e.label ? ` <span class="a">${esc(e.label)}</span>` : ""}</span>
-        <span class="k">${e.kcal} kcal</span></div>`).join("")}</div>`
-      : n.source === "cronometer" ? `<div class="note" style="text-align:left;margin-top:6px">imported from Cronometer</div>` : ""}
   </div>`;
 }
-function foodDefaultServing(f){
-  const p = (f.portions || [])[0];
-  const grams = p ? p.grams : 100;
-  return { label: p ? p.label : "100 g", kcal: macrosFor(f.per100g, grams).kcal };
+function healthInboxURL(){
+  const c = data.crew?.config || {};
+  return `https://firestore.googleapis.com/v1/projects/${c.projectId}/databases/(default)/documents/healthInbox/${data.settings.healthToken}?key=${c.apiKey}&updateMask.fieldPaths=d`;
 }
-function foodResultRowHTML(f, i){
-  const d = foodDefaultServing(f);
-  const tag = f.saved ? "saved" : f.source === "usda" ? "USDA" : f.source === "off" ? "OFF" : "custom";
-  return `<button class="pick fd-res" onclick="App.foodPickResult(${i})">${esc(f.name)}<span class="fd-tag">${tag}</span>
-    <span class="meta">${f.brand ? esc(f.brand) + " · " : ""}${d.kcal} kcal / ${esc(d.label)}</span></button>`;
+const HEALTH_BODY = '{"fields":{"dDATE":{"mapValue":{"fields":{"kcal":{"stringValue":"KCAL"},"protein":{"stringValue":"PROTEIN"},"carbs":{"stringValue":"CARBS"},"fat":{"stringValue":"FAT"},"fiber":{"stringValue":"FIBER"}}}}}}';
+const HEALTH_RULES = `match /healthInbox/{token} {
+  allow get: if token.size() >= 32;
+  allow create, update: if token.size() >= 32 && request.resource.data.size() <= 100;
+}`;
+function copyBox(id, text){
+  return `<div style="position:relative;margin:6px 0 10px">
+    <pre id="${id}" class="mono" style="white-space:pre-wrap;word-break:break-all;font-size:11px;background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:0">${esc(text)}</pre>
+    <button class="linkbtn" style="font-size:12px;padding:2px 0" onclick="App.copyText('${id}')">copy</button></div>`;
 }
-function foodRemoteStatusHTML(){
-  const st = ui.foodRemote.q === ui.foodQuery.trim() ? ui.foodRemote.status : "";
-  if (st === "loading") return `<div class="note" style="margin:10px 0">Searching USDA and Open Food Facts…</div>`;
-  if (st === "offline") return `<div class="note" style="margin:10px 0">Offline — showing saved foods</div>`;
-  if (st === "partial") return `<div class="note" style="margin:10px 0">One database didn't respond — showing what came back</div>`;
-  if (st === "nokey") return `<div class="note" style="margin:10px 0">USDA search is off — <button class="linkbtn" style="font-size:11px;padding:0" onclick="App.foodGoUsdaKey()">add your free key in Settings</button></div>`;
-  return "";
+function nutritionSettingsHTML(){
+  const s = data.settings, cfg = data.crew?.config;
+  let sync;
+  if (!cfg) sync = `<div style="font-size:13px;color:var(--sub);line-height:1.45">Cronometer sync uses the same Firebase project as crew sync — set up crew sync below first.</div>`;
+  else if (!s.healthToken) sync = `<div style="font-size:13px;color:var(--sub);line-height:1.45;margin-bottom:10px">Brings Cronometer's daily totals in through Apple Health with an iPhone Shortcut — whenever you close Cronometer and once a night.</div>
+    <button class="btn" id="healthSetupBtn" style="background:var(--pull);color:#fff" onclick="App.healthSetup()">Set up Cronometer sync</button>`;
+  else sync = `<div id="healthSetup" style="font-size:13px;line-height:1.5">
+    <div style="color:var(--sub);margin-bottom:6px">${s.healthLast ? `Last synced ${esc(new Date(s.healthLast).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}.` : "Nothing received yet."}
+      <button class="linkbtn" style="font-size:13px;padding:0 4px" onclick="App.healthSyncNow()">check now</button></div>
+    <details style="margin-top:6px"><summary style="font-weight:600;cursor:pointer">Setup steps</summary>
+      <div style="margin-top:8px"><b>1. Firestore rules</b> — Firebase console → Firestore → Rules. Paste inside <span class="mono">match /databases/{database}/documents {</span>, then Publish:</div>
+      ${copyBox("hsRules", HEALTH_RULES)}
+      <div><b>2. Cronometer → Apple Health</b> — in Cronometer, turn on the Apple Health connection so it writes nutrition. Check: Health app → Browse → Nutrition → Dietary Energy shows Cronometer.</div>
+      <div style="margin-top:8px"><b>3. Shortcut</b> — new shortcut named "Send nutrition", with these actions in order:</div>
+      <ol style="margin:4px 0 0 18px;padding:0">
+        <li><b>Format Date</b>: Current Date, Custom, format <span class="mono">yyyyMMdd</span></li>
+        <li><b>Find Health Samples</b> where Type is Dietary Energy and Start Date is today → <b>Calculate Statistics</b>: Sum</li>
+        <li>Same two actions for Protein, Carbohydrates, Total Fat, and Fiber</li>
+        <li><b>Text</b>: paste the body below, then replace DATE with the Formatted Date and KCAL, PROTEIN, CARBS, FAT, FIBER with each Statistics result</li>
+        <li><b>Get Contents of URL</b>: paste the URL below and add the Formatted Date at the very end. Method PATCH, header <span class="mono">Content-Type: application/json</span>, Request Body: File → the Text</li>
+      </ol>
+      <div style="margin-top:8px">URL (keep private):</div>${copyBox("hsURL", healthInboxURL())}
+      <div>Body:</div>${copyBox("hsBody", HEALTH_BODY)}
+      <div><b>4. Automations</b> — Shortcuts → Automation → New: <b>App</b> → Cronometer → Is Closed → Run Immediately → Send nutrition. Add a second: <b>Time of Day</b> 11:55 PM, Daily, Run Immediately → Send nutrition.</div>
+    </details></div>`;
+  return `<div class="card" id="nutritionSettings">
+    <div class="lbl" style="margin-bottom:8px">Nutrition</div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:4px">Cronometer sync</div>
+    ${sync}
+    <div style="height:1px;background:var(--grid);margin:14px 0"></div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:4px">Import from Cronometer</div>
+    <div style="font-size:13px;color:var(--sub);margin-bottom:10px;line-height:1.45">Back-fill past days from a Cronometer <b>Daily Nutrition</b> export (website: Account → Export Data). Imported days replace what's here.</div>
+    <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
+  </div>`;
 }
-function foodResultsHTML(){
-  const q = ui.foodQuery.trim();
-  if (!q){
-    ui.foodResults = recentFoods(data.foods, ui.foodListMode).map(f => ({ ...f, saved: true }));
-    return `<div class="seg" style="margin:10px 0 4px">
-        <button class="${ui.foodListMode === "recent" ? "on" : ""}" onclick="App.foodListMode('recent')">Recent</button>
-        <button class="${ui.foodListMode === "frequent" ? "on" : ""}" onclick="App.foodListMode('frequent')">Frequent</button>
-      </div>` + (ui.foodResults.length ? ui.foodResults.map(foodResultRowHTML).join("")
-        : `<div class="muted" style="padding:12px 0">Foods you log show up here.</div>`);
-  }
-  const r = ui.foodRemote.q === q ? ui.foodRemote : { usda: [], off: [] };
-  ui.foodResults = mergeResults(searchSaved(data.foods, q), r.usda, r.off);
-  return (ui.foodResults.length ? ui.foodResults.map(foodResultRowHTML).join("")
-      : (q.length < 3 ? `<div class="muted" style="padding:12px 0">Keep typing to search the databases…</div>` : ""))
-    + foodRemoteStatusHTML();
+let healthSyncAt = 0, healthSyncing = false;
+async function healthSync(manual){
+  const token = data.settings.healthToken;
+  if (!token || !data.crew?.config || healthSyncing) return;
+  if (!manual && Date.now() - healthSyncAt < 60000) return;
+  healthSyncing = true;
+  try {
+    const { db } = await fbInit();
+    const ref = db.collection("healthInbox").doc(token);
+    const snap = await ref.get();
+    healthSyncAt = Date.now();
+    if (!snap.exists){ if (manual) toast("Nothing received yet — run the Shortcut once", true); return; }
+    const doc = snap.data() || {};
+    const { nutrition, changed } = mergeHealthDays(data.nutrition, parseHealthInbox(doc, todayISO()), uid);
+    data.settings.healthLast = Date.now();
+    if (changed.length) data.nutrition = nutrition;
+    save();
+    // keep the inbox small: once it holds 60+ days, rewrite it with the last 30
+    const keys = Object.keys(doc).filter(k => /^d\d{8}$/.test(k)).sort();
+    if (keys.length >= 60){
+      const keep = {}; keys.slice(-30).forEach(k => { keep[k] = doc[k]; });
+      try { await ref.set(keep); } catch (_) {}
+    }
+    if (manual) toast(changed.length ? `Synced ${changed.length} day${changed.length > 1 ? "s" : ""} from Cronometer ✓` : "Up to date ✓");
+    if (changed.length || manual) render();
+  } catch (e) { if (manual) toast("Couldn't reach Firebase — check connection", true); }
+  finally { healthSyncing = false; }
 }
-function updateFoodResults(){ const el = $("#fdResults"); if (el) el.innerHTML = foodResultsHTML(); }
-function foodPreviewHTML(){
-  const f = ui.foodPick, a = ui.foodAmt;
-  const g = gramsFor(f, a.qty, a.unit);
-  if (!g) return `<div class="note">Enter an amount</div>`;
-  const m = macrosFor(f.per100g, g);
-  return `<div class="stats">${stat("kcal", m.kcal)}${stat("protein", m.protein + "g")}${stat("carbs", m.carbs + "g")}${stat("fat", m.fat + "g")}</div>
-    <div class="note" style="text-align:left;margin-top:6px">${g} g · fiber ${m.fiber} g</div>`;
-}
-const foodSheetBodies = {
-  search(){
-    return `<div class="lbl">Add food · ${ui.foodDay === todayISO() ? "today" : esc(shortDate(ui.foodDay))}</div>
-      <input id="fdQuery" value="${esc(ui.foodQuery)}" placeholder="Search foods…" autocomplete="off" autocorrect="off" oninput="App.foodQuery(this.value)">
-      <div id="fdLinks" style="display:flex;gap:16px;justify-content:center;margin:4px 0">
-        <button class="linkbtn" id="fdQuickLink" onclick="App.foodOpen('quick')">Quick add</button>
-        <button class="linkbtn" id="fdCreateLink" onclick="App.foodOpen('create')">Create food</button>
-      </div>
-      <div id="fdResults">${foodResultsHTML()}</div>`;
-  },
-  amount(){
-    const f = ui.foodPick, a = ui.foodAmt;
-    return `<div class="lbl">${ui.foodEdit ? "Edit entry" : "Log food"}</div>
-      <div style="font-weight:700;font-size:16px">${esc(f.name)}</div>
-      ${f.brand ? `<div style="font-size:13px;color:var(--sub)">${esc(f.brand)}</div>` : ""}
-      <div style="display:grid;grid-template-columns:1fr 1.6fr;gap:8px;margin:12px 0">
-        <input class="mono" id="faQty" type="number" inputmode="decimal" step="any" value="${esc(a.qty)}" oninput="App.foodAmt('qty', this.value)">
-        <select id="faUnit" onchange="App.foodAmt('unit', this.value)">${unitOptions(f).map(o =>
-          `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>
-      </div>
-      <div class="lbl">Time</div>
-      <input id="faTime" type="time" value="${esc(a.time)}" onchange="App.foodAmt('time', this.value)" style="margin-bottom:12px">
-      <div id="faPreview">${foodPreviewHTML()}</div>
-      <button class="btn" id="faSave" style="background:var(--pull);color:#fff;margin-top:14px" onclick="App.foodLogSave()">${ui.foodEdit ? "Save" : "Log"}</button>
-      ${ui.foodEdit ? `<div style="text-align:center;margin-top:12px">${delBtn("FL" + ui.foodEdit, `App.foodDelEntry('${ui.foodEdit}')`, "delete entry")}</div>` : ""}`;
-  },
-  quick(){
-    const p = ui.foodQuickPrefill || {};
-    const v = k => p[k] == null ? "" : esc(p[k]);
-    const keep = k => `oninput="App.foodField('foodQuickPrefill','${k}',this.value)"`;
-    const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}" ${keep(k)}></div>`;
-    return `<div class="lbl">${ui.foodEdit ? "Edit quick add" : "Quick add"}</div>
-      <div class="lbl" style="margin-top:8px">Name</div>
-      <input id="fqName" value="${p.name && p.name !== "Quick add" ? esc(p.name) : ""}" placeholder="Quick add" autocomplete="off" style="margin-bottom:8px" ${keep("name")}>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-        ${num("fqKcal", "Calories", "kcal")}${num("fqProt", "Protein (g)", "protein")}
-        ${num("fqCarb", "Carbs (g)", "carbs")}${num("fqFat", "Fat (g)", "fat")}${num("fqFib", "Fiber (g)", "fiber")}
-      </div>
-      <div class="lbl">Time</div>
-      <input id="fqTime" type="time" value="${esc(p.time || hhmmOf(new Date()))}" style="margin-bottom:12px" ${keep("time")}>
-      <button class="btn" id="fqSave" style="background:var(--pull);color:#fff" onclick="App.foodQuickSave()">${ui.foodEdit ? "Save" : "Log"}</button>
-      ${ui.foodEdit ? `<div style="text-align:center;margin-top:12px">${delBtn("FL" + ui.foodEdit, `App.foodDelEntry('${ui.foodEdit}')`, "delete entry")}</div>` : ""}`;
-  },
-};
-foodSheetBodies.scan = function(){
-  return `<div class="lbl">Scan barcode</div>
-    <div class="fd-scan"><video id="fdScanVideo" playsinline muted autoplay></video><div class="aim"></div></div>
-    <div class="note">${esc(ui.scanStatus || "Point the camera at the barcode")}</div>
-    <div style="text-align:center;margin-top:8px"><button class="linkbtn" onclick="App.foodOpen('search')">Search instead</button></div>`;
-};
-foodSheetBodies.create = function(){
-  const p = ui.foodPrefill || {};
-  const v = k => p[k] == null ? "" : esc(p[k]);
-  const keep = k => `oninput="App.foodField('foodPrefill','${k}',this.value)"`;
-  const txt = (id, label, k, ph = "") => `<div><div class="lbl">${label}</div><input id="${id}" value="${v(k)}" placeholder="${ph}" autocomplete="off" ${keep(k)}></div>`;
-  const num = (id, label, k) => `<div><div class="lbl">${label}</div><input class="mono" id="${id}" type="number" inputmode="decimal" step="any" value="${v(k)}" ${keep(k)}></div>`;
-  return `<div class="lbl">${ui.foodEditFoodId ? "Edit food" : "Create food"}</div>
-    <div style="display:grid;gap:8px;margin:8px 0">
-      ${txt("fcName", "Name", "name")}
-      ${txt("fcBrand", "Brand (optional)", "brand")}
-      <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:8px">
-        ${txt("fcServing", "Serving", "servingLabel", "1 serving")}
-        ${num("fcGrams", "Grams (optional)", "servingGrams")}
-      </div>
-      <div class="lbl" style="margin-top:4px">Per serving</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        ${num("fcKcal", "Calories", "kcal")}${num("fcProt", "Protein (g)", "protein")}
-        ${num("fcCarb", "Carbs (g)", "carbs")}${num("fcFat", "Fat (g)", "fat")}${num("fcFib", "Fiber (g)", "fiber")}
-      </div>
-    </div>
-    ${p.barcode ? `<div class="note">barcode ${esc(p.barcode)}</div>` : ""}
-    <button class="btn" id="fcSave" style="background:var(--pull);color:#fff;margin-top:10px" onclick="App.foodCreateSave()">${ui.foodEditFoodId ? "Save food" : "Save & log"}</button>`;
-};
-function foodSheetHTML(){
-  const body = ui.foodSheet && foodSheetBodies[ui.foodSheet];
-  if (!body) return "";
-  const tall = ui.foodSheet === "search";
-  return `<div class="fsheet${tall ? " top" : ""}" onclick="if(event.target===this)App.foodClose()"><div class="panel${tall ? " tall" : ""}" id="fdSheet">
-    <div style="display:flex;justify-content:flex-end"><button class="fd-x" onclick="App.foodClose()" aria-label="Close">✕</button></div>
-    ${body()}</div></div>`;
-}
-// Search results omit serving sizes for some USDA foods; the detail record has them.
-async function loadUsdaPortions(f){
-  const key = (data.settings.usdaKey || "").trim();
-  if (!key || !f.sourceId) return;
-  let portions;
-  try { portions = parseUsdaPortions(await fetchJSON(usdaFoodURL(f.sourceId, key))); } catch (_) { return; }
-  if (!portions.length) return;
-  f.portions = portions.map(p => ({ ...p }));
-  const lib = data.foods.find(x => x.source === "usda" && x.sourceId === f.sourceId);
-  if (lib){ if (lib !== f) lib.portions = portions.map(p => ({ ...p })); save(); }
-  if (ui.foodSheet !== "amount" || ui.foodPick !== f) return;
-  const a = ui.foodAmt;
-  if (!ui.foodEdit && a.unit === "g" && a.qty === "100"){ a.unit = "p0"; a.qty = "1"; render(); return; }
-  const sel = $("#faUnit");
-  if (sel) sel.innerHTML = unitOptions(f).map(o => `<option value="${o.key}" ${o.key === a.unit ? "selected" : ""}>${esc(o.label)}</option>`).join("");
-}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") healthSync(false); });
 // sheets size themselves to the visible area so the iOS keyboard never covers their inputs
 function syncVisualViewport(){
   const vv = window.visualViewport; if (!vv) return;
@@ -2504,8 +2244,6 @@ const AI_TOOLS = [
     parameters: { type: "OBJECT", properties: { text: { type: "STRING" } }, required: ["text"] } },
   { name: "add_grocery_item", description: "Add an item to a shared grocery list. Uses the most recent list unless list_name is given.",
     parameters: { type: "OBJECT", properties: { item: { type: "STRING" }, list_name: { type: "STRING" } }, required: ["item"] } },
-  { name: "log_food", description: "Log a food with known calories as a quick-add entry. Only use when the user gives or clearly implies the calories.",
-    parameters: { type: "OBJECT", properties: { name: { type: "STRING" }, kcal: { type: "NUMBER" }, protein: { type: "NUMBER" }, carbs: { type: "NUMBER" }, fat: { type: "NUMBER" }, date: { type: "STRING", description: "YYYY-MM-DD, default today" } }, required: ["name", "kcal"] } },
 ];
 const isISO = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
 const weekdayOf = iso => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("en-US", { weekday: "long" }); };
@@ -2514,7 +2252,7 @@ function aiDay(date){
   const n = data.nutrition.find(x => x.date === date);
   return { date, weekday: weekdayOf(date),
     food: n ? { kcal: n.kcal, protein: n.protein, carbs: n.carbs, fat: n.fat, fiber: n.fiber, goal: data.settings.kcalTarget || null,
-      items: foodEntriesFor(date).map(e => ({ time: e.time, name: e.name, amount: e.label || null, kcal: e.kcal, protein: e.protein })) } : null,
+      source: n.source === "health" || n.source === "cronometer" ? "Cronometer" : n.source } : null,
     lifting: data.lifts.filter(w => w.date === date).map(w => ({ split: w.split ? SPLITS[w.split].name : "untagged",
       exercises: w.exercises.map(ex => ({ name: ex.name, sets: ex.sets.map(x => `${x.weight}x${x.reps}`).join(", ") })), notes: w.notes || null })),
     cardio: data.cardio.filter(c => c.date === date).map(c => ({ type: tmeta(c.type).label, name: c.name || null, miles: c.distanceMi || null,
@@ -2577,15 +2315,6 @@ async function aiRunTool(name, a){
       save(); return { ok: true, added: text, note: data.settings.todoEnabled ? undefined : "the to-do list feature is turned off in Settings" };
     }
     case "add_grocery_item": return aiGrocery(a.item, a.list_name);
-    case "log_food": {
-      const kcal = parseFloat(a.kcal);
-      if (!(kcal >= 0)) return { error: "kcal is required" };
-      const date = isISO(a.date) && a.date <= todayISO() ? a.date : todayISO();
-      const m = k => r1(Math.max(0, fNum(a[k])));
-      data.foodLog.push({ id: uid(), date, time: hhmmOf(new Date()), foodId: null, name: String(a.name || "Quick add").trim() || "Quick add",
-        grams: null, qty: null, unit: null, label: "", kcal: Math.round(kcal), protein: m("protein"), carbs: m("carbs"), fat: m("fat"), fiber: 0 });
-      refreshFoodDay(date); save(); return { ok: true, date, kcal: Math.round(kcal) };
-    }
   }
   return { error: "unknown tool " + name };
 }
@@ -2701,111 +2430,6 @@ async function aiAsk(text){
   if (changed) render();
   aiRenderLog();
 }
-async function fetchJSON(url, signal){
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
-  const relay = () => ctl.abort();
-  signal?.addEventListener("abort", relay);
-  try {
-    const r = await fetch(url, { signal: ctl.signal });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return await r.json();
-  } finally { clearTimeout(timer); signal?.removeEventListener("abort", relay); }
-}
-let foodSearchTimer = null, foodSearchCtl = null;
-function scheduleRemoteSearch(q){
-  clearTimeout(foodSearchTimer);
-  if (foodSearchCtl){ foodSearchCtl.abort(); foodSearchCtl = null; }
-  q = q.trim();
-  if (q.length < 3){ ui.foodRemote = { q: "", usda: [], off: [], status: "" }; return; }
-  foodSearchTimer = setTimeout(() => runRemoteSearch(q), 500);
-}
-async function runRemoteSearch(q){
-  if (!navigator.onLine){ ui.foodRemote = { q, usda: [], off: [], status: "offline" }; updateFoodResults(); return; }
-  const ctl = new AbortController(); foodSearchCtl = ctl;
-  const key = (data.settings.usdaKey || "").trim();
-  if (ui.foodQuery.trim() === q){ ui.foodRemote = { q, usda: [], off: [], status: "loading" }; updateFoodResults(); }
-  // forgiving query first (every word, prefix match), then the literal one; either may fail alone
-  const usdaGet = query => fetchJSON(usdaSearchURL(query, key), ctl.signal).then(j => (j.foods || []).map(parseUsdaFood).filter(Boolean));
-  const strict = usdaStrictQuery(q);
-  const usdaP = key
-    ? Promise.allSettled([strict && strict !== q ? usdaGet(strict) : Promise.resolve([]), usdaGet(q)]).then(([a, b]) => {
-        if (a.status === "rejected" && b.status === "rejected") throw b.reason;
-        return [...(a.status === "fulfilled" ? a.value : []), ...(b.status === "fulfilled" ? b.value : [])];
-      })
-    : Promise.resolve(null);
-  const offP = fetchJSON(offSearchURL(q), ctl.signal).then(j => (j.products || []).map(parseOffProduct).filter(Boolean));
-  const [u, o] = await Promise.allSettled([usdaP, offP]);
-  if (ctl.signal.aborted || ui.foodQuery.trim() !== q) return; // a newer search replaced this one
-  if (foodSearchCtl === ctl) foodSearchCtl = null;
-  const usda = u.status === "fulfilled" && u.value ? u.value : [];
-  const off = o.status === "fulfilled" ? o.value : [];
-  const usdaFailed = u.status === "rejected", offFailed = o.status === "rejected";
-  const status = (offFailed && (usdaFailed || !key)) ? "offline"
-    : !key ? "nokey"
-    : (usdaFailed || offFailed) ? "partial" : "done";
-  ui.foodRemote = { q, usda, off, status };
-  updateFoodResults();
-}
-const ZXING_URL = "https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js";
-let zxingPromise = null, scanCtl = null, scanVideo = null;
-function loadZxing(){
-  if (window.ZXingBrowser) return Promise.resolve();
-  if (zxingPromise) return zxingPromise;
-  zxingPromise = new Promise((res, rej) => {
-    const s = document.createElement("script");
-    s.src = ZXING_URL; s.onload = () => res();
-    s.onerror = () => { zxingPromise = null; rej(new Error("Couldn't load the scanner — check your signal")); };
-    document.head.appendChild(s);
-  });
-  return zxingPromise;
-}
-function stopScan(){ try { scanCtl?.stop(); } catch (_) {} scanCtl = null; scanVideo = null; }
-async function startScan(){
-  try {
-    await loadZxing();
-    const video = $("#fdScanVideo");
-    if (ui.foodSheet !== "scan" || !video) return;
-    const reader = new ZXingBrowser.BrowserMultiFormatOneDReader();
-    let done = false;
-    scanVideo = video;
-    scanCtl = await reader.decodeFromConstraints({ video: { facingMode: "environment" } }, video, (result) => {
-      if (!result || done) return;
-      done = true; stopScan(); handleBarcode(result.getText());
-    });
-    if (ui.foodSheet !== "scan" || done) stopScan(); // sheet closed while the camera was starting
-  } catch (err) {
-    stopScan();
-    const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
-    ui.foodSheet = "search"; ui.foodQuery = ""; render();
-    toast(denied ? "Camera access was blocked for this app" : (err.message || "Scanner failed"), true);
-  }
-}
-async function handleBarcode(raw){
-  const code = normBarcode(raw);
-  if (!code){ ui.foodSheet = "search"; ui.foodQuery = ""; render(); toast("Couldn't read that barcode", true); return; }
-  const saved = data.foods.find(f => f.barcode && f.barcode === code);
-  if (saved){ App.foodPickFood(saved); return; }
-  ui.foodSheet = "scan"; ui.scanStatus = `Looking up ${String(raw).trim()}…`; render();
-  const complete = f => f && !f.incomplete && f.portions.length > 0;
-  let off = null, usda = null;
-  try { const j = await fetchJSON(offProductURL(raw)); if (j && j.status === 1 && j.product) off = parseOffProduct({ code: String(raw), ...j.product }); } catch (_) {}
-  if (!complete(off) && (data.settings.usdaKey || "").trim()){
-    try {
-      const j = await fetchJSON(usdaSearchURL(code, data.settings.usdaKey.trim()));
-      const hit = (j.foods || []).find(x => normBarcode(x.gtinUpc) === code);
-      usda = hit ? parseUsdaFood(hit) : null;
-    } catch (_) {}
-  }
-  if (ui.foodSheet !== "scan") return; // closed while looking up
-  ui.scanStatus = "";
-  const pick = complete(off) ? off : complete(usda) ? usda : null;
-  if (pick){ App.foodPickFood(pick); return; }
-  const partial = off || usda;
-  ui.foodPrefill = partial ? prefillFrom(partial, code) : { barcode: code };
-  ui.foodSheet = "create"; render();
-  toast(partial ? "Found it, but some info is missing — check and save" : "Not found — enter it once and it'll scan next time");
-}
 // deficit/surplus vs saved calorie goal: green under, red over
 function kcalColor(kcal){
   const t = data.settings.kcalTarget;
@@ -2913,7 +2537,7 @@ function renderFood(){
         ${s.kcalTarget?`<div style="font-size:11px;margin-top:4px;text-align:right">${kcalDelta(d.kcal)}</div>`:""}
       </div>`).join("");
   }
-  return html + foodSheetHTML();
+  return html;
 }
 
 // ----- weight -----
@@ -3595,7 +3219,7 @@ function renderSettings(){
     ${Object.entries(TYPE_META).map(([k,v])=>setRow(`${v.emoji} ${v.label}`, "", !!s.cardioTypes[k], `App.toggleCardioType('${k}')`)).join("")}
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
   </div>`;
-  html += nutritionSettingsHTML() + foodSheetHTML();
+  html += nutritionSettingsHTML();
   return html;
 }
 
@@ -4183,17 +3807,13 @@ function afterRender(){
   if (s && ui.focusSearch){ s.focus(); s.setSelectionRange(s.value.length, s.value.length); ui.focusSearch=false; }
   const cs = $("#clsSearch");
   if (cs && ui.focusClassSearch){ cs.focus(); ui.focusClassSearch=false; }
-  // a re-render replaced the scanner's <video>: move the camera to the new one
-  if (ui.foodSheet === "scan" && scanCtl && scanVideo && scanVideo !== $("#fdScanVideo")){ stopScan(); startScan(); }
-  const fq = $("#fdQuery");
-  if (fq && ui.foodFocus){ fq.focus(); ui.foodFocus = false; }
   initMaps();
   initSwipe();
 }
 
 // ================= actions =================
 window.App = {
-  tab(t){ if (ui.foodSheet){ stopScan(); ui.foodSheet = null; ui.foodEdit = null; } if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
+  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
   selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
@@ -4341,130 +3961,14 @@ window.App = {
   delCardio(id){ if(!confirmDel("C"+id))return; data.cardio=data.cardio.filter(c=>c.id!==id); save(); removeEventFor(id); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Activity deleted"); render(); },
 
   // food
-  foodOpen(kind){
-    ui.foodSheet = kind; ui.confirmKey = null;
-    if (kind === "search"){ ui.foodQuery = ""; ui.foodFocus = true; ui.foodEdit = null; }
-    if (kind === "quick"){ ui.foodQuickPrefill = {}; ui.foodEdit = null; }
-    if (kind === "create" && !ui.foodPrefill) ui.foodPrefill = {};
-    if (kind !== "scan") stopScan();
-    render();
-  },
-  foodClose(){ stopScan(); ui.foodSheet = null; ui.foodEdit = null; ui.foodPrefill = null; ui.foodEditFoodId = null; ui.confirmKey = null; render(); },
-  foodField(which, k, v){ if (!ui[which]) ui[which] = {}; ui[which][k] = v; },
-  foodQuery(v){ ui.foodQuery = v; scheduleRemoteSearch(v); updateFoodResults(); },
-  foodListMode(m){ ui.foodListMode = m; updateFoodResults(); },
-  foodPickResult(i){ const f = ui.foodResults[i]; if (f) App.foodPickFood(f); },
-  foodPickFood(f){
-    const first = unitOptions(f)[0];
-    ui.foodPick = f; ui.foodEdit = null;
-    ui.foodAmt = { qty: first.key === "g" ? "100" : "1", unit: first.key, time: hhmmOf(new Date()) };
-    ui.foodSheet = "amount"; render();
-    if (f.source === "usda" && !(f.portions || []).length) loadUsdaPortions(f);
-  },
-  foodAmt(field, value){
-    ui.foodAmt[field] = value;
-    if (field !== "time"){ const el = $("#faPreview"); if (el) el.innerHTML = foodPreviewHTML(); }
-  },
-  foodLogSave(){
-    const a = ui.foodAmt, picked = ui.foodPick;
-    const grams = gramsFor(picked, a.qty, a.unit);
-    if (!(grams > 0)){ toast("Enter an amount", true); return; }
-    if (!/^\d{2}:\d{2}$/.test(a.time || "")){ toast("Enter a time", true); return; }
-    const editing = ui.foodEdit ? data.foodLog.find(e => e.id === ui.foodEdit) : null;
-    const food = editing ? picked : upsertFood(picked);
-    const fields = { time: a.time, name: food.name, grams, qty: r1(fNum(a.qty)), unit: a.unit,
-      label: amountLabel(food, a.qty, a.unit), ...macrosFor(food.per100g, grams) };
-    let date;
-    if (editing){ Object.assign(editing, fields); date = editing.date; }
-    else {
-      date = ui.foodDay;
-      data.foodLog.push({ id: uid(), date, foodId: food.id, ...fields });
-      food.uses = (food.uses || 0) + 1; food.lastUsed = Date.now();
-    }
-    refreshFoodDay(date); save();
-    ui.foodSheet = null; ui.foodEdit = null; ui.foodPick = null;
-    toast(editing ? "Entry updated ✓" : `Logged ${fields.kcal} kcal ✓`); render();
-  },
-  foodQuickSave(){
-    const val = id => ($(id)?.value ?? "").trim();
-    const kcalStr = val("#fqKcal");
-    if (kcalStr === "" || !(parseFloat(kcalStr) >= 0)){ toast("Enter calories", true); return; }
-    const time = val("#fqTime");
-    if (!/^\d{2}:\d{2}$/.test(time)){ toast("Enter a time", true); return; }
-    const m = id => r1(Math.max(0, fNum(val(id))));
-    const fields = { time, foodId: null, name: val("#fqName") || "Quick add", grams: null, qty: null, unit: null, label: "",
-      kcal: Math.round(parseFloat(kcalStr)), protein: m("#fqProt"), carbs: m("#fqCarb"), fat: m("#fqFat"), fiber: m("#fqFib") };
-    const editing = ui.foodEdit ? data.foodLog.find(e => e.id === ui.foodEdit) : null;
-    let date;
-    if (editing){ Object.assign(editing, fields); date = editing.date; }
-    else { date = ui.foodDay; data.foodLog.push({ id: uid(), date, ...fields }); }
-    refreshFoodDay(date); save();
-    ui.foodSheet = null; ui.foodEdit = null; ui.foodQuickPrefill = null;
-    toast(editing ? "Entry updated ✓" : `Logged ${fields.kcal} kcal ✓`); render();
-  },
-  foodEditEntry(id){
-    const e = data.foodLog.find(x => x.id === id); if (!e) return;
-    ui.foodEdit = id; ui.confirmKey = null;
-    if (e.grams == null){ ui.foodQuickPrefill = { ...e }; ui.foodSheet = "quick"; render(); return; }
-    const food = foodForEntry(e);
-    const ok = unitOptions(food).some(o => o.key === e.unit) && e.qty != null;
-    ui.foodPick = food;
-    ui.foodAmt = { qty: String(ok ? e.qty : e.grams), unit: ok ? e.unit : "g", time: e.time };
-    ui.foodSheet = "amount"; render();
-  },
-  foodDelEntry(id){
-    if (!confirmDel("FL" + id)) return;
-    const e = data.foodLog.find(x => x.id === id); if (!e) return;
-    data.foodLog = data.foodLog.filter(x => x.id !== id);
-    refreshFoodDay(e.date); save();
-    ui.foodSheet = null; ui.foodEdit = null; toast("Entry deleted"); render();
-  },
   foodDayShift(n){ const d = shiftISO(ui.foodDay, n); if (d > todayISO()) return; ui.foodDay = d; render(); },
-  setUsdaKey(v){ data.settings.usdaKey = String(v || "").trim(); save(); toast(data.settings.usdaKey ? "USDA key saved ✓" : "USDA key removed"); },
-  foodGoUsdaKey(){
-    ui.foodSheet = null; ui.tab = "settings"; render();
-    const el = $("#usdaKey"); if (el){ el.scrollIntoView({ block: "center" }); el.focus(); }
-  },
-  foodEditSaved(id){
-    const f = data.foods.find(x => x.id === id); if (!f) return;
-    ui.foodEditFoodId = id; ui.foodPrefill = prefillFrom(f, f.barcode); ui.foodSheet = "create"; render();
-  },
-  foodDelSaved(id){
-    if (!confirmDel("MF" + id)) return;
-    data.foods = data.foods.filter(f => f.id !== id); save(); toast("Food removed — past entries keep their numbers"); render();
-  },
-  foodGoDay(iso){ const t = todayISO(); ui.foodDay = iso > t ? t : iso; App.tab("food"); },
   foodDayToday(){ ui.foodDay = todayISO(); render(); },
-  foodScan(){ ui.foodSheet = "scan"; ui.scanStatus = ""; ui.foodEdit = null; render(); startScan(); },
-  foodCreateSave(){
-    const val = id => $(id)?.value ?? "";
-    let food;
-    try {
-      food = customFood({ name: val("#fcName"), brand: val("#fcBrand"), servingLabel: val("#fcServing"), servingGrams: val("#fcGrams"),
-        kcal: val("#fcKcal"), protein: val("#fcProt"), carbs: val("#fcCarb"), fat: val("#fcFat"), fiber: val("#fcFib"),
-        barcode: ui.foodPrefill?.barcode || "" });
-    } catch (err) { toast(err.message, true); return; }
-    if (ui.foodEditFoodId){
-      const f = data.foods.find(x => x.id === ui.foodEditFoodId);
-      if (f){
-        const keepExtra = !food.servingOnly && !f.servingOnly ? f.portions.slice(1) : [];
-        Object.assign(f, { name: food.name, brand: food.brand, per100g: food.per100g,
-          portions: [...food.portions, ...keepExtra], servingOnly: food.servingOnly });
-        save();
-      }
-      ui.foodEditFoodId = null; ui.foodPrefill = null; ui.foodSheet = null;
-      toast("Food updated ✓"); render(); return;
-    }
-    const saved = toSavedFood(food, uid);
-    data.foods.push(saved); save();
-    ui.foodPrefill = null;
-    App.foodPickFood(saved);
-  },
-  saveTargets(){
-    const k = parseFloat($("#tKcal").value), p = parseFloat($("#tProt").value);
-    data.settings.kcalTarget = isFinite(k)&&k>0 ? Math.round(k) : null;
-    data.settings.proteinTarget = isFinite(p)&&p>0 ? Math.round(p) : null;
-    save(); toast("Targets saved ✓"); render();
+  foodGoDay(iso){ const t = todayISO(); ui.foodDay = iso > t ? t : iso; App.tab("food"); },
+  healthSetup(){ if (!data.settings.healthToken){ data.settings.healthToken = makeHealthToken(crypto.getRandomValues(new Uint8Array(24))); save(); } render(); },
+  healthSyncNow(){ healthSync(true); },
+  copyText(id){
+    const t = $("#" + id)?.textContent || "";
+    (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => toast("Copied ✓"), () => toast("Couldn't copy — select the text instead", true));
   },
   delFood(key){
     if(!confirmDel("F"+key))return;
@@ -5126,16 +4630,14 @@ $("#gpxFile").addEventListener("change", async e=>{
 $("#csvFile").addEventListener("change", async e=>{
   const f = e.target.files?.[0]; if(!f) return;
   try {
-    const parsedAll = parseCronometerCSV(await f.text());
-    if (!parsedAll.length) throw new Error("No daily rows found in file");
-    const { kept: parsed, skipped } = skipLoggedDates(parsedAll, data.foodLog);
-    if (!parsed.length) throw new Error(`All ${skipped} day${skipped>1?"s":""} already have foods logged here — nothing imported`);
+    const parsed = parseCronometerCSV(await f.text());
+    if (!parsed.length) throw new Error("No daily rows found in file");
     const dates = new Set(parsed.map(p=>p.date));
     data.nutrition = data.nutrition.filter(d=>!dates.has(d.date));
     parsed.forEach(p=>data.nutrition.push({id:uid(), ...p, source:"cronometer"}));
     save();
     const ds = [...dates].sort();
-    toast(`Imported ${parsed.length} day${parsed.length>1?"s":""} (${shortDate(ds[0])}–${shortDate(ds[ds.length-1])})${skipped?` · ${skipped} logged day${skipped>1?"s":""} kept`:""} ✓`);
+    toast(`Imported ${parsed.length} day${parsed.length>1?"s":""} (${shortDate(ds[0])}–${shortDate(ds[ds.length-1])}) ✓`);
     render();
   } catch(err){ toast(err.message, true); }
   e.target.value = "";
@@ -5161,6 +4663,7 @@ applyTheme();
 render();
 setTimeout(checkBirthdayCelebration, 900); // after crew data has a chance to load
 if (data.crew?.code) crewSync(false);
+healthSync(false);
 // handle Strava OAuth redirect + auto-sync (only for users who configured it)
 (async function stravaBoot(){
   const q = new URLSearchParams(location.search);

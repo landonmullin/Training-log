@@ -31,15 +31,6 @@ def router(offline, gemini=None):
             status, body = gemini(route.request)
             return route.fulfill(status=status, content_type="application/json", body=body,
                                  headers={**CORS, "Access-Control-Allow-Headers": "*"})
-        if "api.nal.usda.gov/fdc/v1/food/" in url:
-            return route.fulfill(status=200, content_type="application/json", body=fixture("usda-food-details.json"), headers=CORS)
-        if "api.nal.usda.gov" in url:
-            return route.fulfill(status=200, content_type="application/json", body=fixture("usda-search.json"), headers=CORS)
-        if "openfoodfacts.org/cgi/search.pl" in url:
-            return route.fulfill(status=200, content_type="application/json", body=fixture("off-search.json"), headers=CORS)
-        if "openfoodfacts.org/api/v2/product/" in url:
-            name = "off-product.json" if "49000028911" in url else "off-product-missing.json"
-            return route.fulfill(status=200, content_type="application/json", body=fixture(name), headers=CORS)
         return route.abort()
     return handle
 
@@ -79,20 +70,6 @@ def today(pg): return pg.evaluate("todayISO()")
 TESTS = []
 def test(fn): TESTS.append(fn); return fn
 
-@test
-def cronometer_import_skips_logged_dates(pw, url):
-    seed = base(foodLog=[{"id": "e1", "date": "2026-09-28", "time": "08:00", "foodId": None, "name": "Quick add",
-                          "grams": None, "qty": None, "unit": None, "label": "", "kcal": 500, "protein": 0, "carbs": 0, "fat": 0, "fiber": 0}],
-                nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 500, "protein": 0, "carbs": 0, "fat": 0, "fiber": 0, "source": "log"}])
-    csv = "Date,Energy (kcal),Protein (g),Carbs (g),Fat (g),Fiber (g)\n2026-09-27,2100,150,200,70,30\n2026-09-28,2300,160,210,75,32\n"
-    with app(pw, url, seed) as pg:
-        pg.evaluate("App.tab('settings')")
-        assert pg.locator("#nutritionSettings").count() == 1
-        pg.set_input_files("#csvFile", files=[{"name": "c.csv", "mimeType": "text/csv", "buffer": csv.encode()}])
-        pg.wait_for_function("JSON.parse(localStorage.getItem('ftrack-data-v2')).nutrition.length === 2")
-        rows = {r["date"]: r for r in stored(pg)["nutrition"]}
-        assert rows["2026-09-27"]["source"] == "cronometer"
-        assert rows["2026-09-28"]["source"] == "log" and rows["2026-09-28"]["kcal"] == 500
 
 @test
 def deleting_a_logged_day_clears_its_entries(pw, url):
@@ -104,210 +81,22 @@ def deleting_a_logged_day_clears_its_entries(pw, url):
         pg.evaluate("App.delFood('n1')"); pg.evaluate("App.delFood('n1')")
         s = stored(pg)
         assert s["nutrition"] == [] and s["foodLog"] == []
-        pg.evaluate("refreshFoodDay('2026-09-28')")
-        assert stored(pg)["nutrition"] == []
 
-@test
-def log_recent_food_on_today(pw, url):
-    with app(pw, url, base(foods=[EGG])) as pg:
-        pg.click("#fdAdd")
-        pg.click("#fdResults .fd-res >> nth=0")
-        pg.fill("#faQty", "2"); pg.select_option("#faUnit", "p0")
-        assert "143" in pg.inner_text("#faPreview")
-        pg.click("#faSave")
-        s = stored(pg); e = s["foodLog"][0]
-        assert e["date"] == today(pg) and e["kcal"] == 143 and e["label"] == "2 × large" and e["grams"] == 100
-        assert e["qty"] == 2 and e["unit"] == "p0"
-        row = [r for r in s["nutrition"] if r["date"] == today(pg)][0]
-        assert row["source"] == "log" and row["kcal"] == 143
-        assert s["foods"][0]["uses"] == 4
-        assert pg.locator("#fdSheet").count() == 0
-        assert "Egg, whole" in pg.inner_text("#view")
 
-@test
-def search_box_keeps_focus_while_typing(pw, url):
-    with app(pw, url, base(foods=[EGG])) as pg:
-        pg.click("#fdAdd")
-        pg.keyboard.type("egg", delay=50)
-        assert pg.input_value("#fdQuery") == "egg"
-        assert pg.evaluate("document.activeElement.id") == "fdQuery"
-        assert "Egg, whole" in pg.inner_text("#fdResults")
 
-@test
-def quick_add_on_yesterday_including_zero_calories(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdPrev")
-        y = pg.evaluate("shiftISO(todayISO(), -1)")
-        pg.click("#fdAdd"); pg.click("#fdQuickLink")
-        pg.fill("#fqName", "Black coffee"); pg.fill("#fqKcal", "0"); pg.click("#fqSave")
-        pg.click("#fdAdd"); pg.click("#fdQuickLink")
-        pg.fill("#fqKcal", "500"); pg.fill("#fqProt", "30"); pg.click("#fqSave")
-        s = stored(pg)
-        assert [e["date"] for e in s["foodLog"]] == [y, y]
-        assert s["foodLog"][0]["kcal"] == 0 and s["foodLog"][0]["name"] == "Black coffee"
-        assert s["foodLog"][1]["name"] == "Quick add"
-        assert [(r["date"], r["kcal"]) for r in s["nutrition"]] == [(y, 500)]
-        pg.click("#fdNext")
-        assert pg.evaluate("ui.foodDay") == today(pg)
-        assert pg.locator("#fdNext").is_disabled()  # cannot go past today
-        pg.evaluate("App.foodDayShift(1)")
-        assert pg.evaluate("ui.foodDay") == today(pg)
 
-@test
-def quick_add_requires_calories(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdAdd"); pg.click("#fdQuickLink"); pg.click("#fqSave")
-        assert stored(pg)["foodLog"] == [] and pg.locator("#fdSheet").count() == 1
 
-@test
-def edit_then_delete_entry(pw, url):
-    with app(pw, url, base(foods=[EGG])) as pg:
-        pg.click("#fdAdd"); pg.click("#fdResults .fd-res >> nth=0")
-        pg.fill("#faQty", "1"); pg.select_option("#faUnit", "p0"); pg.click("#faSave")
-        eid = stored(pg)["foodLog"][0]["id"]
-        pg.click(".fd-row >> nth=0")
-        assert pg.input_value("#faQty") == "1" and pg.input_value("#faUnit") == "p0"
-        pg.fill("#faQty", "3"); pg.click("#faSave")
-        s = stored(pg)
-        assert len(s["foodLog"]) == 1 and s["foodLog"][0]["id"] == eid and s["foodLog"][0]["kcal"] == 215
-        assert s["foods"][0]["uses"] == 4  # editing doesn't count as a new use
-        pg.click(".fd-row >> nth=0")
-        pg.click("#fdSheet button.del"); pg.click("#fdSheet button.del")
-        s = stored(pg)
-        assert s["foodLog"] == [] and s["nutrition"] == []
 
-@test
-def edit_quick_add_entry(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdAdd"); pg.click("#fdQuickLink"); pg.fill("#fqKcal", "400"); pg.click("#fqSave")
-        pg.click(".fd-row >> nth=0")
-        assert pg.input_value("#fqKcal") == "400"
-        pg.fill("#fqKcal", "450"); pg.click("#fqSave")
-        s = stored(pg)
-        assert len(s["foodLog"]) == 1 and s["foodLog"][0]["kcal"] == 450 and s["nutrition"][0]["kcal"] == 450
 
-@test
-def remote_search_merges_and_ranks(pw, url):
-    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed) as pg:
-        pg.click("#fdAdd"); pg.keyboard.type("yogurt")
-        pg.wait_for_selector("#fdResults :text('Nutella')")
-        names = pg.locator("#fdResults .fd-res").all_inner_texts()
-        joined = "\n".join(names)
-        assert "Greek Nonfat Yogurt, Plain" in joined and "Total 0% Greek Yogurt" not in joined
-        assert "Mystery bar" not in joined
-        assert names[0].startswith("Chicken") or names[0].startswith("Egg, whole, raw")
-        pg.click("#fdResults .fd-res:has-text('Nutella')")
-        pg.select_option("#faUnit", "p0"); pg.click("#faSave")
-        s = stored(pg)
-        assert s["foodLog"][0]["kcal"] == 81 and any(f["name"] == "Nutella" for f in s["foods"])
 
-@test
-def search_without_key_uses_off_and_explains(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdAdd"); pg.keyboard.type("nutella")
-        pg.wait_for_selector("#fdResults :text('Nutella')")
-        assert "add your free key in Settings" in pg.inner_text("#fdResults")
-        assert "Greek Nonfat Yogurt" not in pg.inner_text("#fdResults")
-        pg.click("#fdResults .linkbtn")
-        assert pg.evaluate("ui.tab") == "settings" and pg.locator("#usdaKey").count() == 1
-        pg.fill("#usdaKey", "  KEY123 "); pg.dispatch_event("#usdaKey", "change")
-        assert stored(pg)["settings"]["usdaKey"] == "KEY123"
 
-@test
-def offline_search_shows_saved_foods(pw, url):
-    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed, offline=True) as pg:
-        pg.click("#fdAdd"); pg.keyboard.type("egg")
-        pg.wait_for_selector("#fdResults :text('Offline')")
-        assert "Egg, whole" in pg.inner_text("#fdResults")
 
-@test
-def stale_search_result_is_ignored(pw, url):
-    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed) as pg:
-        pg.click("#fdAdd")
-        pg.evaluate("ui.foodQuery = 'chicken'")
-        pg.evaluate("runRemoteSearch('egg')")  # finishes after the user has moved on
-        assert pg.evaluate("ui.foodRemote.q") != "egg"
 
-@test
-def scanned_known_product_logs_directly(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.evaluate("handleBarcode('0049000028911')")
-        assert pg.evaluate("ui.foodSheet") == "amount"
-        assert "Diet Coke" in pg.inner_text("#fdSheet")
-        pg.click("#faSave")
-        e = stored(pg)["foodLog"][0]
-        assert e["kcal"] == 0 and e["name"] == "Diet Coke"
-        pg.evaluate("handleBarcode('049000028911')")  # same product, UPC-A padding
-        assert pg.evaluate("ui.foodSheet") == "amount" and pg.evaluate("ui.foodPick.id") == stored(pg)["foods"][0]["id"]
 
-@test
-def unknown_barcode_creates_food_and_rescans_offline(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.evaluate("handleBarcode('0000000000017')")
-        assert pg.evaluate("ui.foodSheet") == "create"
-        assert "17" in pg.inner_text("#fdSheet")
-        pg.click("#fcSave")  # blank name
-        assert pg.evaluate("ui.foodSheet") == "create"
-        pg.fill("#fcName", "Gas station bar"); pg.fill("#fcServing", "1 bar"); pg.fill("#fcGrams", "60")
-        pg.fill("#fcKcal", "250"); pg.fill("#fcProt", "20"); pg.click("#fcSave")
-        assert pg.evaluate("ui.foodSheet") == "amount"
-        pg.click("#faSave")
-        s = stored(pg)
-        assert s["foodLog"][0]["kcal"] == 250 and s["foods"][0]["barcode"] == "17"
-        pg.route("**/*", lambda r: r.continue_() if r.request.url.startswith("http://127.0.0.1") else r.abort())
-        pg.evaluate("handleBarcode('17')")
-        assert pg.evaluate("ui.foodSheet") == "amount" and "Gas station bar" in pg.inner_text("#fdSheet")
 
-@test
-def create_food_from_search_link(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdAdd"); pg.click("#fdCreateLink")
-        pg.fill("#fcName", "Mom's lasagna"); pg.fill("#fcKcal", "700"); pg.click("#fcSave")
-        opts = pg.locator("#faUnit option").all_inner_texts()
-        assert opts == ["1 serving"]
-        pg.fill("#faQty", "1.5"); pg.click("#faSave")
-        assert stored(pg)["foodLog"][0]["kcal"] == 1050
 
-@test
-def scanner_load_failure_returns_to_search(pw, url):
-    with app(pw, url, base(), offline=True) as pg:
-        pg.click("#fdScan")
-        pg.wait_for_function("ui.foodSheet === 'search'")
-        assert pg.locator("#fdQuery").count() == 1
 
-@test
-def edit_saved_food_keeps_history(pw, url):
-    seed = base(foods=[EGG], foodLog=[{"id": "e1", "date": "2026-09-28", "time": "08:00", "foodId": "f-egg", "name": "Egg, whole",
-        "grams": 50, "qty": 1, "unit": "p0", "label": "1 large", "kcal": 72, "protein": 6.3, "carbs": 0.4, "fat": 4.8, "fiber": 0}])
-    with app(pw, url, seed) as pg:
-        pg.evaluate("App.tab('settings')")
-        assert "Egg, whole" in pg.inner_text("#myFoods")
-        pg.click("#myFoods .linkbtn >> nth=0")
-        assert pg.input_value("#fcName") == "Egg, whole" and pg.input_value("#fcGrams") == "50"
-        pg.fill("#fcName", "Egg (large)"); pg.fill("#fcKcal", "80"); pg.click("#fcSave")
-        s = stored(pg); f = s["foods"][0]
-        assert f["id"] == "f-egg" and f["name"] == "Egg (large)" and f["per100g"]["kcal"] == 160 and f["uses"] == 3
-        assert s["foodLog"][0]["kcal"] == 72  # history keeps its snapshot
-        assert pg.evaluate("ui.foodSheet") is None and pg.evaluate("ui.tab") == "settings"
 
-@test
-def deleted_food_entries_stay_editable(pw, url):
-    seed = base(foods=[EGG], foodLog=[{"id": "e1", "date": "2026-09-28", "time": "08:00", "foodId": "f-egg", "name": "Egg, whole",
-        "grams": 50, "qty": 1, "unit": "p0", "label": "1 large", "kcal": 72, "protein": 6.3, "carbs": 0.4, "fat": 4.8, "fiber": 0}],
-        nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 72, "protein": 6, "carbs": 0, "fat": 5, "fiber": 0, "source": "log"}])
-    with app(pw, url, seed) as pg:
-        pg.evaluate("App.tab('settings')")
-        pg.click("#myFoods button.del"); pg.click("#myFoods button.del")
-        assert stored(pg)["foods"] == []
-        pg.evaluate("App.tab('food'); ui.foodDay = '2026-09-28'; render()")
-        pg.click(".fd-row >> nth=0")
-        assert pg.input_value("#faUnit") == "g" and pg.input_value("#faQty") == "50"
-        pg.fill("#faQty", "100"); pg.click("#faSave")
-        s = stored(pg)
-        assert s["foodLog"][0]["kcal"] == 144 and s["foods"] == []
 
 @test
 def food_tab_charts_calories_only(pw, url):
@@ -319,33 +108,7 @@ def food_tab_charts_calories_only(pw, url):
         assert pg.locator("#view svg").count() >= 1
         assert "recent days" in pg.inner_text("#view").lower()
 
-@test
-def search_input_stays_put_when_results_load(pw, url):
-    seed = base(foods=[EGG]); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed) as pg:
-        pg.click("#fdAdd")
-        y0 = pg.locator("#fdQuery").bounding_box()["y"]
-        pg.keyboard.type("yogurt")
-        pg.wait_for_selector("#fdResults :text('Nutella')")
-        box = pg.locator("#fdQuery").bounding_box()
-        assert abs(box["y"] - y0) < 1, (y0, box["y"])
-        assert box["y"] >= 0
-        assert pg.locator("#fdQuickLink").bounding_box()["y"] < pg.locator("#fdResults").bounding_box()["y"]
 
-@test
-def usda_food_without_servings_loads_them(pw, url):
-    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed) as pg:
-        pg.click("#fdAdd"); pg.keyboard.type("chicken")
-        pg.wait_for_selector("#fdResults :text('Chicken, breast')")
-        pg.click("#fdResults .fd-res:has-text('Chicken, breast')")
-        pg.wait_for_function("document.querySelectorAll('#faUnit option').length > 2")
-        opts = pg.locator("#faUnit option").all_inner_texts()
-        assert opts[:2] == ["1 breast, bone and skin removed", "1 cup"], opts
-        assert pg.input_value("#faUnit") == "p0" and pg.input_value("#faQty") == "1"
-        pg.click("#faSave")
-        s = stored(pg)
-        assert s["foodLog"][0]["kcal"] == 184 and len(s["foods"][0]["portions"]) == 2
 
 @test
 def push_sync_skips_unchanged_reminders(pw, url):
@@ -359,51 +122,7 @@ def push_sync_skips_unchanged_reminders(pw, url):
         pg.evaluate("pushSyncItems()")
         assert pg.evaluate("window.__writes") == 2
 
-@test
-def usda_search_sends_forgiving_and_literal_queries(pw, url):
-    seed = base(); seed["settings"]["usdaKey"] = "TESTKEY"
-    with app(pw, url, seed) as pg:
-        seen = []
-        pg.on("request", lambda r: seen.append(r.url) if "foods/search" in r.url else None)
-        pg.click("#fdAdd"); pg.keyboard.type("McDonalds McGriddle")
-        pg.wait_for_selector("#fdResults :text('Nutella')")
-        from urllib.parse import urlparse, parse_qs
-        qs = sorted(parse_qs(urlparse(u).query)["query"][0] for u in seen)
-        assert qs == ["+mcdonald* +mcgriddle*", "McDonalds McGriddle"], qs
-        names = pg.locator("#fdResults .fd-res").all_inner_texts()
-        assert sum("Egg, whole, raw" in n for n in names) == 1  # merged without duplicates
 
-@test
-def calendar_marks_calorie_goal_and_shows_food_first(pw, url):
-    with app(pw, url, base()) as pg:
-        ym = pg.evaluate("shiftISO(todayISO().slice(0,8) + '01', -1).slice(0,7)")  # last month: all days are in the past
-    d1, d2, d3 = f"{ym}-02", f"{ym}-03", f"{ym}-04"
-    seed = base(
-        nutrition=[{"id": "n1", "date": d1, "kcal": 2200, "protein": 150, "carbs": 200, "fat": 70, "fiber": 30, "source": "log"},
-                   {"id": "n2", "date": d2, "kcal": 2900, "protein": 150, "carbs": 300, "fat": 90, "fiber": 20, "source": "cronometer"}],
-        foodLog=[{"id": "e1", "date": d1, "time": "07:30", "foodId": None, "name": "Overnight oats", "grams": None, "qty": None,
-                  "unit": None, "label": "", "kcal": 600, "protein": 30, "carbs": 80, "fat": 15, "fiber": 10},
-                 {"id": "e2", "date": d1, "time": "12:10", "foodId": None, "name": "Chicken bowl", "grams": None, "qty": None,
-                  "unit": None, "label": "", "kcal": 1600, "protein": 120, "carbs": 120, "fat": 55, "fiber": 20}],
-        lifts=[{"id": "l1", "date": d1, "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
-        weights=[{"id": "w1", "date": d3, "lbs": 180}])
-    with app(pw, url, seed) as pg:
-        pg.evaluate("App.tab('calendar')"); pg.evaluate("App.month(-1)")
-        assert pg.locator(".cal .day .kbar.under").count() == 1
-        assert pg.locator(".cal .day .kbar.over").count() == 1
-        assert pg.locator(".cal .day .kbar").count() == 2  # weigh-in-only day gets no bar
-        pg.evaluate(f"App.selDay('{d1}')")
-        cards = pg.locator("#view .card").all_inner_texts()
-        food_i = next(i for i, c in enumerate(cards) if "Overnight oats" in c)
-        lift_i = next(i for i, c in enumerate(cards) if "PUSH DAY" in c.upper())
-        assert food_i < lift_i, (food_i, lift_i)
-        assert "Chicken bowl" in cards[food_i] and "2200" in cards[food_i]
-        assert not any("NUTRITION" in c for c in cards)  # old totals-only card replaced
-        pg.evaluate(f"App.selDay('{d2}')")
-        assert any("2900" in c for c in pg.locator("#view .card").all_inner_texts())  # Cronometer day: totals only
-        pg.evaluate(f"App.selDay('{d1}')")
-        pg.click("#calFoodOpen")
-        assert pg.evaluate("ui.tab") == "food" and pg.evaluate("ui.foodDay") == d1
 
 import datetime as _dt
 FUTURE = (_dt.date.today() + _dt.timedelta(days=10)).isoformat()
@@ -477,18 +196,6 @@ def assistant_unknown_class_adds_nothing(pw, url):
         r = last_tool_result(g.seen[1]["body"])
         assert "error" in r and "Modern Physics" in r["classes"]
 
-@test
-def assistant_reads_a_day_and_logs_food(pw, url):
-    seed = school_seed(lifts=[{"id": "l1", "date": "2026-09-28", "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
-                       nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 2350, "protein": 170, "carbs": 220, "fat": 75, "fiber": 30, "source": "cronometer"}])
-    g = scripted(gem_call("get_day", {"date": "2026-09-28"}), gem_call("log_food", {"name": "Protein shake", "kcal": 160, "protein": 30}), gem_text("Done."))
-    with app(pw, url, seed, gemini=g) as pg:
-        ask(pg, "what did I eat and lift on 9/28, and log a protein shake")
-        day = last_tool_result(g.seen[1]["body"])
-        assert day["food"]["kcal"] == 2350 and day["lifting"][0]["exercises"][0]["sets"] == "185x5"
-        s = stored(pg); e = s["foodLog"][0]
-        assert e["name"] == "Protein shake" and e["kcal"] == 160 and e["date"] == pg.evaluate("todayISO()")
-        assert any(r["date"] == e["date"] and r["source"] == "log" for r in s["nutrition"])
 
 @test
 def assistant_adds_todo(pw, url):
@@ -662,29 +369,7 @@ def voice_transcript_is_sent_when_speech_ends(pw, url):
         assert pg.evaluate("ui.aiMsgs[0].text") == "when is my next exam"
         assert len(g.seen) == 1
 
-@test
-def background_render_keeps_half_filled_forms(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.click("#fdAdd"); pg.click("#fdQuickLink")
-        pg.fill("#fqName", "Tacos"); pg.fill("#fqKcal", "450")
-        pg.evaluate("render()")
-        assert pg.input_value("#fqName") == "Tacos" and pg.input_value("#fqKcal") == "450"
-        pg.evaluate("App.foodOpen('search')"); pg.click("#fdCreateLink")
-        pg.fill("#fcName", "Mom's chili"); pg.fill("#fcKcal", "520"); pg.fill("#fcGrams", "300")
-        pg.evaluate("render()")
-        assert pg.input_value("#fcName") == "Mom's chili" and pg.input_value("#fcKcal") == "520" and pg.input_value("#fcGrams") == "300"
 
-@test
-def scanner_restarts_on_the_new_video_after_a_rerender(pw, url):
-    with app(pw, url, base()) as pg:
-        pg.evaluate("""() => { window.__starts = 0; window.__stops = 0;
-          window.ZXingBrowser = { BrowserMultiFormatOneDReader: class { async decodeFromConstraints(c, video){ window.__starts++; window.__video = video; return { stop(){ window.__stops++; } }; } } }; }""")
-        pg.click("#fdScan"); pg.wait_for_function("window.__starts === 1")
-        pg.evaluate("render()"); pg.wait_for_function("window.__starts === 2")
-        assert pg.evaluate("window.__stops") == 1
-        assert pg.evaluate("window.__video === document.querySelector('#fdScanVideo')")
-        pg.click("#fdSheet .fd-x")
-        assert pg.evaluate("window.__stops") == 2
 
 @test
 def assistant_sheet_fits_above_the_keyboard(pw, url):
@@ -694,6 +379,134 @@ def assistant_sheet_fits_above_the_keyboard(pw, url):
           window.visualViewport.dispatchEvent(new Event('resize')); }""")
         box = pg.locator("#aiInput").bounding_box()
         assert box["y"] + box["height"] <= 420, box
+
+
+TOKEN = "T" * 8 + "abcdEFGH1234_-xyz" + "Q" * 7  # 32 chars
+def sync_seed(**over):
+    d = base(**over)
+    d["crew"] = {"code": "ABC123", "name": "Landon", "config": {"apiKey": "AIzaTESTKEY", "projectId": "training-tracker-1d42d", "appId": "a"}}
+    d["settings"]["healthToken"] = TOKEN
+    return d
+def iso_shift(days): return (_dt.date.today() + _dt.timedelta(days=days)).isoformat()
+def dkey(iso): return "d" + iso.replace("-", "")
+
+@test
+def food_tab_is_view_only_with_day_navigation(pw, url):
+    y = iso_shift(-1)
+    seed = base(nutrition=[{"id": "n1", "date": y, "kcal": 2550, "protein": 172, "carbs": 260, "fat": 80, "fiber": 33, "source": "health"}])
+    with app(pw, url, seed) as pg:
+        assert pg.locator("#fdAdd").count() == 0 and pg.locator("#fdScan").count() == 0
+        card = pg.inner_text("#foodDay")
+        assert "today" in card.lower() and "no food data" in card.lower()
+        assert pg.locator("#fdNext").is_disabled()
+        pg.click("#fdPrev")
+        card = pg.inner_text("#foodDay")
+        assert "2550" in card and "172" in card and "260" in card and "33" in card
+        assert "150 over" in card.lower()  # goal is 2400
+        assert "cronometer" in card.lower()
+        pg.click("#fdNext")
+        assert pg.evaluate("ui.foodDay") == pg.evaluate("todayISO()")
+        assert "recent days" in pg.inner_text("#view").lower()
+
+@test
+def calendar_marks_calorie_goal_and_shows_food_first(pw, url):
+    ym = (_dt.date.today().replace(day=1) - _dt.timedelta(days=1)).isoformat()[:7]  # last month: all days in the past
+    d1, d2, d3 = f"{ym}-02", f"{ym}-03", f"{ym}-04"
+    seed = base(
+        nutrition=[{"id": "n1", "date": d1, "kcal": 2200, "protein": 150, "carbs": 200, "fat": 70, "fiber": 30, "source": "health"},
+                   {"id": "n2", "date": d2, "kcal": 2900, "protein": 150, "carbs": 300, "fat": 90, "fiber": 20, "source": "cronometer"}],
+        lifts=[{"id": "l1", "date": d1, "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
+        weights=[{"id": "w1", "date": d3, "lbs": 180}])
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('calendar')"); pg.evaluate("App.month(-1)")
+        assert pg.locator(".cal .day .kbar.under").count() == 1
+        assert pg.locator(".cal .day .kbar.over").count() == 1
+        assert pg.locator(".cal .day .kbar").count() == 2  # weigh-in-only day gets no bar
+        pg.evaluate(f"App.selDay('{d1}')")
+        cards = pg.locator("#view .card").all_inner_texts()
+        food_i = next(i for i, c in enumerate(cards) if c.strip().upper().startswith("FOOD"))
+        lift_i = next(i for i, c in enumerate(cards) if "PUSH DAY" in c.upper())
+        assert food_i < lift_i and "2200" in cards[food_i]
+        pg.click("#calFoodOpen")
+        assert pg.evaluate("ui.tab") == "food" and pg.evaluate("ui.foodDay") == d1
+
+@test
+def cronometer_csv_import_replaces_those_days(pw, url):
+    seed = base(nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 500, "protein": 0, "carbs": 0, "fat": 0, "fiber": 0, "source": "health"}])
+    csv = "Date,Energy (kcal),Protein (g),Carbs (g),Fat (g),Fiber (g)\n2026-09-27,2100,150,200,70,30\n2026-09-28,2300,160,210,75,32\n"
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.set_input_files("#csvFile", files=[{"name": "c.csv", "mimeType": "text/csv", "buffer": csv.encode()}])
+        pg.wait_for_function("JSON.parse(localStorage.getItem('ftrack-data-v2')).nutrition.length === 2")
+        rows = {r["date"]: r for r in stored(pg)["nutrition"]}
+        assert rows["2026-09-28"]["kcal"] == 2300 and rows["2026-09-28"]["source"] == "cronometer"
+
+@test
+def health_inbox_imports_cronometer_totals(pw, url):
+    y, t = iso_shift(-1), iso_shift(0)
+    seed = sync_seed(nutrition=[{"id": "old", "date": y, "kcal": 1000, "protein": 0, "carbs": 0, "fat": 0, "fiber": 0, "source": "cronometer"}])
+    with app(pw, url, seed) as pg:
+        pg.evaluate(FAKE_FS)
+        pg.evaluate(f"""() => {{ __fs['healthInbox/{TOKEN}'] = {{
+            {dkey(y)}: {{ kcal: "2,345.6", protein: "180.2", carbs: "250", fat: "70.4", fiber: "31" }},
+            {dkey(t)}: {{ kcal: "0" }}, {dkey(iso_shift(1))}: {{ kcal: "900" }} }}; }}""")
+        pg.evaluate("healthSync(true)")
+        rows = {r["date"]: r for r in stored(pg)["nutrition"]}
+        assert rows[y] == {"id": "old", "date": y, "kcal": 2346, "protein": 180, "carbs": 250, "fat": 70, "fiber": 31, "source": "health"} or \
+               (rows[y]["kcal"] == 2346 and rows[y]["source"] == "health")
+        assert t not in rows and iso_shift(1) not in rows
+        assert stored(pg)["settings"]["healthLast"] > 0
+
+@test
+def health_sync_runs_when_the_app_comes_back(pw, url):
+    y = iso_shift(-1)
+    with app(pw, url, sync_seed()) as pg:
+        pg.evaluate(FAKE_FS)
+        pg.evaluate(f"() => {{ __fs['healthInbox/{TOKEN}'] = {{ {dkey(y)}: {{ kcal: '2200', protein: '170' }} }}; }}")
+        pg.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        pg.wait_for_function(f"data.nutrition.some(n => n.date === '{y}' && n.source === 'health')")
+        pg.evaluate("App.tab('food')")
+        assert "synced" in pg.inner_text("#foodDay").lower() or pg.locator("#foodDay").count() == 1
+
+@test
+def health_inbox_is_trimmed_when_it_grows(pw, url):
+    with app(pw, url, sync_seed()) as pg:
+        pg.evaluate(FAKE_FS)
+        fields = ", ".join(f"{dkey(iso_shift(-i))}: {{ kcal: '2000' }}" for i in range(1, 71))
+        pg.evaluate(f"() => {{ __fs['healthInbox/{TOKEN}'] = {{ {fields} }}; }}")
+        pg.evaluate("healthSync(true)")
+        doc = pg.evaluate(f"__fs['healthInbox/{TOKEN}']")
+        assert 25 <= len(doc) <= 31 and dkey(iso_shift(-1)) in doc
+        assert len([n for n in stored(pg)["nutrition"] if n["source"] == "health"]) == 70
+
+@test
+def settings_walks_through_cronometer_sync_setup(pw, url):
+    seed = sync_seed(); del seed["settings"]["healthToken"]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.click("#healthSetupBtn")
+        token = stored(pg)["settings"]["healthToken"]
+        assert len(token) >= 32
+        pg.click("#healthSetup summary")
+        txt = pg.inner_text("#healthSetup")
+        for part in ["training-tracker-1d42d", token, "key=AIzaTESTKEY", "updateMask.fieldPaths=d", "healthInbox", "Cronometer"]:
+            assert part in txt, part
+        assert "stringValue" in txt  # request body template
+    with app(pw, url, base()) as pg:
+        pg.evaluate("App.tab('settings')")
+        assert "crew sync" in pg.inner_text("#nutritionSettings").lower()
+
+@test
+def assistant_reads_a_day_and_cannot_log_food(pw, url):
+    seed = school_seed(lifts=[{"id": "l1", "date": "2026-09-28", "split": "push", "exercises": [{"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}]}], "notes": ""}],
+                       nutrition=[{"id": "n1", "date": "2026-09-28", "kcal": 2350, "protein": 170, "carbs": 220, "fat": 75, "fiber": 30, "source": "health"}])
+    g = scripted(gem_call("get_day", {"date": "2026-09-28"}), gem_text("2350 kcal and bench."))
+    with app(pw, url, seed, gemini=g) as pg:
+        ask(pg, "what did I eat and lift on 9/28")
+        day = last_tool_result(g.seen[1]["body"])
+        assert day["food"]["kcal"] == 2350 and day["lifting"][0]["exercises"][0]["sets"] == "185x5"
+        names = [f["name"] for f in g.seen[0]["body"]["tools"][0]["functionDeclarations"]]
+        assert "log_food" not in names
 
 # --- tests above this line ---
 
