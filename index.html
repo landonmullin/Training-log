@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 87;
+const APP_VERSION = 88;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1263,11 +1263,13 @@ async function wahooSyncRun(manual){
       if (ws.length < 30) break;
     }
     items.sort((a, b) => new Date(b.starts || 0) - new Date(a.starts || 0));
-    const since = w.lastSync ? w.lastSync - 3 * 86400000 : Date.now() - 30 * 86400000; // new workouts: first sync looks back 30 days
+    const since = Date.now() - 30 * 86400000; // new workouts: always look back 30 days (Strava-forwarded ones can show up late)
     const recheckSince = Date.now() - 60 * 86400000;                                    // empty imports: re-checked for 60 days
     let added = 0, filled = 0;
     const debug = [];
     // an earlier import that came in without detail (no HR, no distance) gets re-fetched, up to 3 tries
+    // one fresh round of retries for imports that ran out before the summary endpoint was tried
+    if (!w.retryReset88){ data.cardio.forEach(c => { if (c.wahooId) c.wahooTries = 0; }); w.retryReset88 = true; }
     const thin = c => !c.hrHist && (!c.distanceMi || c.avgHr == null) && (c.wahooTries || 0) < 3;
     for (const item of items){
       const t = new Date(item.starts || 0).getTime();
@@ -1277,12 +1279,17 @@ async function wahooSyncRun(manual){
       if (!item.starts) continue;
       if (existing && !thin(existing)){ note(existing.hrHist ? "already imported with full detail" : "already imported (no more retries)"); continue; }
       if (existing ? t < recheckSince : t < since){ note(existing ? "too old to re-check" : "older than the import window"); continue; }
-      const full = item.workout_summary ? item : await get(`/v1/workouts/${item.id}`);
+      let full = item.workout_summary ? item : await get(`/v1/workouts/${item.id}`);
+      let summaryFrom = full.workout_summary ? "workout" : "none";
+      if (!full.workout_summary){ // some workouts (e.g. forwarded from Strava) only expose it on its own endpoint
+        try { const ws = await get(`/v1/workouts/${item.id}/workout_summary`); if (ws && typeof ws === "object" && !Array.isArray(ws)){ full = { ...full, workout_summary: ws.workout_summary || ws }; summaryFrom = "summary endpoint"; } }
+        catch (e) { summaryFrom = "summary endpoint: " + (e.message || "failed"); }
+      }
       const m = wahooMapWorkout(full);
       if (!m) continue;
       const summary = full.workout_summary || {};
       const dbg = { id: item.id, typeId: item.workout_type_id ?? null, name: m.name, date: m.date,
-        summary: Object.keys(summary).filter(k => summary[k] != null && summary[k] !== "" && k !== "file").sort(), file: "no file link" };
+        summary: Object.keys(summary).filter(k => summary[k] != null && summary[k] !== "" && k !== "file").sort(), from: summaryFrom, file: "no file link" };
       let fit = null;
       if (m.fitUrl){
         try {
@@ -1341,7 +1348,7 @@ function wahooSettingsHTML(){
     ${(w.debug || []).length ? `<details id="wahooDebug" style="margin-top:10px"><summary style="font-size:12px;color:var(--sub);cursor:pointer">Last import details</summary>
       <div class="mono" style="font-size:11px;color:var(--sub);line-height:1.5;margin-top:6px">${w.debug.map(d =>
         `<div style="padding:6px 0;border-top:1px solid var(--grid)">${esc(d.date || "")} · ${esc(d.name || "")} · id ${esc(d.id)} · type ${esc(d.typeId ?? "?")}<br>
-         summary: ${esc((d.summary || []).join(", ") || "empty")}<br>file: ${esc(d.file)}</div>`).join("")}</div></details>` : ""}
+         summary${d.from ? ` (${esc(d.from)})` : ""}: ${esc((d.summary || []).join(", ") || "empty")}<br>file: ${esc(d.file)}</div>`).join("")}</div></details>` : ""}
   </div>`;
   return `<div class="card" id="wahooCard">
     <div class="lbl" style="margin-bottom:8px">Wahoo auto-sync</div>

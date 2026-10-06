@@ -599,13 +599,16 @@ def make_fit(start_utc, seconds=600, power=150, cadence=86, hr0=125, sport=2):
     return header + bytes(body) + b"\x00\x00"
 
 REDIRECT = "/index.html"  # the page the harness serves
-def wahoo_api(workouts, fit=None, details=None, token_log=None):
+def wahoo_api(workouts, fit=None, details=None, token_log=None, summaries=None):
     """Fake Wahoo cloud: token endpoint, workouts list/detail, CDN FIT file."""
     def respond(req):
         u = req.url
         if "/oauth/token" in u:
             if token_log is not None: token_log.append(dict(x.split("=", 1) for x in (req.post_data or "").split("&")))
             return 200, json.dumps({"access_token": "ACC2", "refresh_token": "REF2", "expires_in": 7200, "token_type": "bearer"}), "application/json"
+        if "/workout_summary" in u:
+            wid = int(u.split("/v1/workouts/")[1].split("/")[0])
+            return (200, json.dumps((summaries or {})[wid]), "application/json") if wid in (summaries or {}) else (404, "{}", "application/json")
         if "/v1/workouts/" in u:
             wid = int(u.split("/v1/workouts/")[1].split("?")[0])
             return 200, json.dumps((details or {})[wid]), "application/json"
@@ -753,6 +756,34 @@ def wahoo_rechecks_empty_imports_from_weeks_ago_and_explains_skips(pw, url):
         assert c["distanceMi"] > 2 and c["hrHist"]
         dbg = {d["id"]: d for d in stored(pg)["wahooApi"]["debug"]}
         assert dbg[980]["file"] == "ok" and "already" in dbg[981]["file"]
+
+@test
+def wahoo_uses_the_summary_endpoint_and_a_30_day_window(pw, url):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    start = now - _dt.timedelta(days=4)              # older than lastSync - 3 days, arrived late from Strava
+    bare = {"id": 990, "starts": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "minutes": 44, "name": "Afternoon Walk", "workout_type_id": 6}
+    summ = {"distance_accum": "3500.0", "heart_rate_avg": "112.0", "duration_active_accum": "2640.0", "file": {"url": "https://cdn.wahooligan.com/990.fit"}}
+    api = wahoo_api([bare], details={990: bare}, summaries={990: summ}, fit=make_fit(start, seconds=2640, sport=11, power=0, cadence=0))
+    seed = base(); seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999, "lastSync": int(now.timestamp() * 1000)}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 990]
+        assert len(c) == 1 and c[0]["type"] == "walk" and c[0]["distanceMi"] > 1 and c[0]["hrHist"]
+
+@test
+def wahoo_gives_exhausted_empty_imports_one_fresh_round(pw, url):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    start = now - _dt.timedelta(days=8)
+    bare = {"id": 991, "starts": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "minutes": 44, "name": "Morning Walk", "workout_type_id": 6}
+    summ = {"distance_accum": "3500.0", "heart_rate_avg": "110.0", "duration_active_accum": "2640.0", "file": None}
+    api = wahoo_api([bare], details={991: bare}, summaries={991: summ})
+    seed = base(cardio=[{"id": "m", "date": start.astimezone().date().isoformat(), "type": "walk", "name": "Morning Walk", "distanceMi": 0,
+                         "durationSec": 2640, "avgHr": None, "source": "wahoo", "wahooId": 991, "wahooTries": 3}])
+    seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999, "lastSync": int(now.timestamp() * 1000)}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 991][0]
+        assert c["distanceMi"] > 2 and c["avgHr"] == 110
 
 # --- tests above this line ---
 
