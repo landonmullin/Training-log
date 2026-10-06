@@ -581,7 +581,7 @@ def food_tab_edits_the_calorie_goal_in_place(pw, url):
 
 
 import struct
-def make_fit(start_utc, seconds=600, power=150, cadence=86, hr0=125):
+def make_fit(start_utc, seconds=600, power=150, cadence=86, hr0=125, sport=2):
     """Minimal cycling FIT: 1 Hz records (timestamp, HR, distance, power, cadence) + a session message."""
     FIT_EPOCH = 631065600
     t0 = int(start_utc.timestamp()) - FIT_EPOCH
@@ -594,7 +594,7 @@ def make_fit(start_utc, seconds=600, power=150, cadence=86, hr0=125):
         hr = hr0 + (i * 25) // seconds
         body.extend(bytes([1]) + struct.pack("<IBIHB", t0 + i, hr, i * 700, power, cadence))
     define(2, 18, [(2, 4, 0x86), (5, 1, 0x00), (7, 4, 0x86), (8, 4, 0x86), (9, 4, 0x86), (16, 1, 0x02), (17, 1, 0x02), (20, 2, 0x84), (18, 1, 0x02)])
-    body.extend(bytes([2]) + struct.pack("<IBIIIBBHB", t0, 2, seconds * 1000, seconds * 1000, seconds * 700, hr0 + 12, hr0 + 25, power, cadence))
+    body.extend(bytes([2]) + struct.pack("<IBIIIBBHB", t0, sport, seconds * 1000, seconds * 1000, seconds * 700, hr0 + 12, hr0 + 25, power, cadence))
     header = bytes([14, 0x10]) + struct.pack("<HI", 2132, len(body)) + b".FIT" + b"\x00\x00"
     return header + bytes(body) + b"\x00\x00"
 
@@ -690,6 +690,18 @@ def wahoo_tokens_stay_out_of_backups(pw, url):
         assert "SECRET-WAHOO" not in blob and "CID" in blob
         pg.evaluate("async () => { ui.pendingRestore = await cloudFetchBackup('ABC123', 'landon'); App.confirmRestore(); }")
         assert stored(pg)["wahooApi"]["refreshToken"] == "SECRET-WAHOO-REFRESH"
+
+@test
+def wahoo_uses_the_ride_file_sport_when_wahoo_type_is_unknown(pw, url):
+    start = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)
+    w = ride(950, start, fit_url="https://cdn.wahooligan.com/950.fit"); w["workout_type_id"] = 777; w["name"] = "Evening walk"
+    api = wahoo_api([w], fit=make_fit(start, sport=11, power=0, cadence=0))
+    seed = base(); seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 950][0]
+        assert c["type"] == "walk", c["type"]
+        assert not c.get("avgPowerW")
 
 # --- tests above this line ---
 

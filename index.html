@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 84;
+const APP_VERSION = 85;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1265,7 +1265,8 @@ async function wahooSyncRun(manual){
       if (!m) continue;
       let fit = null;
       if (m.fitUrl){ try { const r = await fetch(m.fitUrl); if (r.ok) fit = parseFIT(await r.arrayBuffer()); } catch (_) {} }
-      const { fitUrl, ...entry } = m;
+      const { fitUrl, typeKnown, ...entry } = m;
+      if (fit && !typeKnown) entry.type = fit.type; // e.g. a Strava walk forwarded to Wahoo with a type id we don't know
       if (fit){
         Object.assign(entry, { durationSec: fit.durationSec || entry.durationSec, distanceMi: fit.distanceMi || entry.distanceMi,
           avgHr: fit.avgHr || entry.avgHr, maxHr: fit.maxHr || null, hrHist: fit.hrHist || null, splits: fit.splits || null,
@@ -2228,14 +2229,16 @@ function wahooMapWorkout(w){
   if (isNaN(d)) return null;
   const s = w.workout_summary || {};
   const n = v => { const x = parseFloat(v); return Number.isFinite(x) ? x : null; };
-  const type = Object.keys(WAHOO_TYPES).find(k => WAHOO_TYPES[k].includes(w.workout_type_id)) || "cycling";
+  const known = Object.keys(WAHOO_TYPES).find(k => WAHOO_TYPES[k].includes(w.workout_type_id));
+  const type = known || "cycling";
+  const typeKnown = !!known || [0, 11, 12, 13, 14, 15, 16, 61].includes(w.workout_type_id);
   const dist = n(s.distance_accum), dur = n(s.duration_active_accum) ?? n(s.duration_total_accum) ?? (n(w.minutes) != null ? n(w.minutes) * 60 : null);
   const round = v => v == null ? null : Math.round(v);
   return { wahooId: w.id, type, name: String(w.name || "").trim() || "Indoor ride",
     date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
     durationSec: round(dur), distanceMi: dist != null ? Math.round(dist / 1609.344 * 100) / 100 : 0,
     avgHr: round(n(s.heart_rate_avg)), avgPowerW: round(n(s.power_avg)), avgCadence: round(n(s.cadence_avg)),
-    kcal: round(n(s.calories_accum)), source: "wahoo", fitUrl: (s.file && s.file.url) || null };
+    kcal: round(n(s.calories_accum)), source: "wahoo", fitUrl: (s.file && s.file.url) || null, typeKnown };
 }
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
