@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 86;
+const APP_VERSION = 87;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1254,16 +1254,29 @@ async function wahooSyncRun(manual){
   try {
     const token = await wahooEnsureToken();
     const get = async u => { const r = await fetch(WAHOO_API + u, { headers: { Authorization: "Bearer " + token } }); if (!r.ok) throw new Error("Wahoo API " + r.status); return r.json(); };
-    const list = await get("/v1/workouts?page=1&per_page=30");
-    const since = w.lastSync ? w.lastSync - 3 * 86400000 : Date.now() - 30 * 86400000; // first sync: last 30 days
+    // newest first, up to 90 workouts (Wahoo's ordering isn't guaranteed)
+    let items = [];
+    for (let page = 1; page <= 3; page++){
+      const res = await get(`/v1/workouts?page=${page}&per_page=30`);
+      const ws = res.workouts || [];
+      items = items.concat(ws);
+      if (ws.length < 30) break;
+    }
+    items.sort((a, b) => new Date(b.starts || 0) - new Date(a.starts || 0));
+    const since = w.lastSync ? w.lastSync - 3 * 86400000 : Date.now() - 30 * 86400000; // new workouts: first sync looks back 30 days
+    const recheckSince = Date.now() - 60 * 86400000;                                    // empty imports: re-checked for 60 days
     let added = 0, filled = 0;
     const debug = [];
     // an earlier import that came in without detail (no HR, no distance) gets re-fetched, up to 3 tries
     const thin = c => !c.hrHist && (!c.distanceMi || c.avgHr == null) && (c.wahooTries || 0) < 3;
-    for (const item of list.workouts || []){
-      if (!item.starts || new Date(item.starts).getTime() < since) continue;
+    for (const item of items){
+      const t = new Date(item.starts || 0).getTime();
       const existing = data.cardio.find(c => c.wahooId === item.id);
-      if (existing && !thin(existing)) continue;
+      const note = file => { if (debug.length < 8) debug.push({ id: item.id, typeId: item.workout_type_id ?? null, name: item.name || "",
+        date: item.starts ? String(item.starts).slice(0, 10) : "", summary: [], file }); };
+      if (!item.starts) continue;
+      if (existing && !thin(existing)){ note(existing.hrHist ? "already imported with full detail" : "already imported (no more retries)"); continue; }
+      if (existing ? t < recheckSince : t < since){ note(existing ? "too old to re-check" : "older than the import window"); continue; }
       const full = item.workout_summary ? item : await get(`/v1/workouts/${item.id}`);
       const m = wahooMapWorkout(full);
       if (!m) continue;
@@ -1283,7 +1296,7 @@ async function wahooSyncRun(manual){
           }
         } catch (e) { dbg.file = e instanceof TypeError ? "download failed (blocked or offline)" : "unreadable: " + (e.message || e); }
       }
-      debug.push(dbg);
+      if (debug.length < 8) debug.push(dbg);
       const { fitUrl, typeKnown, ...entry } = m;
       if (fit && !typeKnown) entry.type = fit.type; // e.g. a Strava walk forwarded to Wahoo with a type id we don't know
       if (fit){

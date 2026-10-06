@@ -736,6 +736,24 @@ def wahoo_records_what_each_import_got(pw, url):
         for _ in range(4): pg.evaluate("wahooSync(true)")
         assert [x for x in stored(pg)["cardio"] if x.get("wahooId") == 970][0]["wahooTries"] == 3
 
+@test
+def wahoo_rechecks_empty_imports_from_weeks_ago_and_explains_skips(pw, url):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    old = now - _dt.timedelta(days=10)
+    w = ride(980, old, fit_url="https://cdn.wahooligan.com/980.fit"); w["workout_type_id"] = 6
+    done = ride(981, now - _dt.timedelta(days=1))
+    api = wahoo_api([done, w], fit=make_fit(old, sport=11, power=0, cadence=0))
+    seed = base(cardio=[
+        {"id": "a", "date": old.astimezone().date().isoformat(), "type": "walk", "name": "Walk", "distanceMi": 0, "durationSec": 2640, "avgHr": None, "source": "wahoo", "wahooId": 980},
+        {"id": "b", "date": "2026-10-05", "type": "cycling", "name": "Ride", "distanceMi": 9, "durationSec": 2700, "avgHr": 140, "hrHist": {"140": 2700}, "source": "wahoo", "wahooId": 981}])
+    seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999, "lastSync": int(now.timestamp() * 1000)}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 980][0]
+        assert c["distanceMi"] > 2 and c["hrHist"]
+        dbg = {d["id"]: d for d in stored(pg)["wahooApi"]["debug"]}
+        assert dbg[980]["file"] == "ok" and "already" in dbg[981]["file"]
+
 # --- tests above this line ---
 
 def main():
