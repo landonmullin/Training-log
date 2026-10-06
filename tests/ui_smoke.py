@@ -703,6 +703,39 @@ def wahoo_uses_the_ride_file_sport_when_wahoo_type_is_unknown(pw, url):
         assert c["type"] == "walk", c["type"]
         assert not c.get("avgPowerW")
 
+import gzip
+@test
+def wahoo_fills_in_earlier_imports_that_came_in_empty(pw, url):
+    start = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=20)
+    w = ride(960, start, fit_url="https://cdn.wahooligan.com/960.fit"); w["workout_type_id"] = 6; w["name"] = "Afternoon Walk"
+    api = wahoo_api([w], fit=gzip.compress(make_fit(start, sport=11, power=0, cadence=0)))   # forwarded file arrives gzipped
+    d = start.astimezone().date().isoformat()
+    seed = base(cardio=[{"id": "w1", "date": d, "type": "walk", "name": "Afternoon Walk", "distanceMi": 0, "durationSec": 2640,
+                         "avgHr": None, "source": "wahoo", "wahooId": 960}])
+    seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999, "lastSync": 1}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 960]
+        assert len(c) == 1 and c[0]["id"] == "w1"
+        assert c[0]["distanceMi"] > 2 and c[0]["hrHist"] and c[0]["avgHr"] and c[0]["type"] == "walk"
+
+@test
+def wahoo_records_what_each_import_got(pw, url):
+    start = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=2)
+    w = ride(970, start, fit_url="https://cdn.wahooligan.com/970.fit"); w["workout_summary"]["heart_rate_avg"] = None
+    api = wahoo_api([w], fit=None)   # file download fails
+    seed = base(); seed["wahooApi"] = {"clientId": "CID", "accessToken": "A", "refreshToken": "R", "expiresAt": 9999999999999}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        dbg = stored(pg)["wahooApi"]["debug"]
+        assert dbg[0]["id"] == 970 and dbg[0]["typeId"] == 12 and "failed" in dbg[0]["file"].lower()
+        assert "distance_accum" in dbg[0]["summary"] and "heart_rate_avg" not in dbg[0]["summary"]
+        pg.evaluate("App.tab('settings')"); pg.click("#wahooDebug summary")
+        assert "970" in pg.inner_text("#wahooDebug")
+        # a workout that keeps failing is retried at most 3 times
+        for _ in range(4): pg.evaluate("wahooSync(true)")
+        assert [x for x in stored(pg)["cardio"] if x.get("wahooId") == 970][0]["wahooTries"] == 3
+
 # --- tests above this line ---
 
 def main():

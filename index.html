@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 85;
+const APP_VERSION = 86;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1256,31 +1256,59 @@ async function wahooSyncRun(manual){
     const get = async u => { const r = await fetch(WAHOO_API + u, { headers: { Authorization: "Bearer " + token } }); if (!r.ok) throw new Error("Wahoo API " + r.status); return r.json(); };
     const list = await get("/v1/workouts?page=1&per_page=30");
     const since = w.lastSync ? w.lastSync - 3 * 86400000 : Date.now() - 30 * 86400000; // first sync: last 30 days
-    let added = 0;
+    let added = 0, filled = 0;
+    const debug = [];
+    // an earlier import that came in without detail (no HR, no distance) gets re-fetched, up to 3 tries
+    const thin = c => !c.hrHist && (!c.distanceMi || c.avgHr == null) && (c.wahooTries || 0) < 3;
     for (const item of list.workouts || []){
       if (!item.starts || new Date(item.starts).getTime() < since) continue;
-      if (data.cardio.some(c => c.wahooId === item.id)) continue;
+      const existing = data.cardio.find(c => c.wahooId === item.id);
+      if (existing && !thin(existing)) continue;
       const full = item.workout_summary ? item : await get(`/v1/workouts/${item.id}`);
       const m = wahooMapWorkout(full);
       if (!m) continue;
+      const summary = full.workout_summary || {};
+      const dbg = { id: item.id, typeId: item.workout_type_id ?? null, name: m.name, date: m.date,
+        summary: Object.keys(summary).filter(k => summary[k] != null && summary[k] !== "" && k !== "file").sort(), file: "no file link" };
       let fit = null;
-      if (m.fitUrl){ try { const r = await fetch(m.fitUrl); if (r.ok) fit = parseFIT(await r.arrayBuffer()); } catch (_) {} }
+      if (m.fitUrl){
+        try {
+          const r = await fetch(m.fitUrl);
+          if (!r.ok) dbg.file = "download failed (HTTP " + r.status + ")";
+          else {
+            let buf = await r.arrayBuffer();
+            const b = new Uint8Array(buf, 0, 2);
+            if (b[0] === 0x1f && b[1] === 0x8b) buf = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+            fit = parseFIT(buf); dbg.file = "ok";
+          }
+        } catch (e) { dbg.file = e instanceof TypeError ? "download failed (blocked or offline)" : "unreadable: " + (e.message || e); }
+      }
+      debug.push(dbg);
       const { fitUrl, typeKnown, ...entry } = m;
       if (fit && !typeKnown) entry.type = fit.type; // e.g. a Strava walk forwarded to Wahoo with a type id we don't know
       if (fit){
         Object.assign(entry, { durationSec: fit.durationSec || entry.durationSec, distanceMi: fit.distanceMi || entry.distanceMi,
           avgHr: fit.avgHr || entry.avgHr, maxHr: fit.maxHr || null, hrHist: fit.hrHist || null, splits: fit.splits || null,
+          route: fit.route || null, elevGainFt: fit.elevGainFt ?? null,
           avgPowerW: fit.avgPowerW ?? entry.avgPowerW, avgCadence: fit.avgCadence ?? entry.avgCadence });
+      }
+      if (existing){
+        const keep = { id: existing.id, name: existing.name, wahooTries: (existing.wahooTries || 0) + 1 };
+        for (const [k, v] of Object.entries(entry)) if (v != null && v !== 0) existing[k] = v;
+        Object.assign(existing, keep);
+        if (!thin(existing) || existing.hrHist) filled++;
+        continue;
       }
       // a ride already imported by hand (FIT file) on the same day with the same length: link it instead
       const dup = data.cardio.find(c => !c.wahooId && c.date === entry.date && c.type === entry.type && entry.durationSec && Math.abs((c.durationSec || 0) - entry.durationSec) < 120);
       if (dup){ Object.assign(dup, { ...entry, id: dup.id, name: dup.name }); continue; }
-      data.cardio.push({ id: uid(), ...entry });
+      data.cardio.push({ id: uid(), ...entry, wahooTries: 1 });
       added++;
     }
+    if (debug.length) w.debug = debug.concat(w.debug || []).slice(0, 8);
     w.lastSync = Date.now(); delete w.lastError;
     save();
-    if (added){ if (data.crew?.code) crewPushStats().catch(() => {}); toast(`Synced ${added} ride${added > 1 ? "s" : ""} from Wahoo ✓`); render(); }
+    if (added || filled){ if (data.crew?.code) crewPushStats().catch(() => {}); toast(`Wahoo: ${added ? `${added} new` : ""}${added && filled ? ", " : ""}${filled ? `${filled} updated` : ""} ✓`); render(); }
     else if (manual){ toast("Wahoo: up to date ✓"); render(); }
   } catch (e) {
     w.lastError = (e instanceof TypeError) ? "Couldn't reach Wahoo from the app (network or blocked request)" : String(e.message || e);
@@ -1297,6 +1325,10 @@ function wahooSettingsHTML(){
     <div style="font-size:12px;color:var(--sub);margin:4px 0 10px">Rides from the Wahoo app import automatically when you open Training Log.${w.lastSync ? ` Last checked ${esc(new Date(w.lastSync).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}.` : ""}</div>
     <button class="btn" id="wahooSyncBtn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-bottom:10px" onclick="App.wahooSyncNow()">Sync now</button>
     ${delBtn("wahoo-disc", "App.wahooDisconnect()", "disconnect wahoo")}${err}
+    ${(w.debug || []).length ? `<details id="wahooDebug" style="margin-top:10px"><summary style="font-size:12px;color:var(--sub);cursor:pointer">Last import details</summary>
+      <div class="mono" style="font-size:11px;color:var(--sub);line-height:1.5;margin-top:6px">${w.debug.map(d =>
+        `<div style="padding:6px 0;border-top:1px solid var(--grid)">${esc(d.date || "")} · ${esc(d.name || "")} · id ${esc(d.id)} · type ${esc(d.typeId ?? "?")}<br>
+         summary: ${esc((d.summary || []).join(", ") || "empty")}<br>file: ${esc(d.file)}</div>`).join("")}</div></details>` : ""}
   </div>`;
   return `<div class="card" id="wahooCard">
     <div class="lbl" style="margin-bottom:8px">Wahoo auto-sync</div>
