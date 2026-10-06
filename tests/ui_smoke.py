@@ -21,11 +21,17 @@ def start_server():
 
 def fixture(name): return (FIX / name).read_text()
 
-def router(offline, gemini=None):
+def router(offline, gemini=None, wahoo=None):
     def handle(route):
         url = route.request.url
         if url.startswith("http://127.0.0.1"): return route.continue_()
         if offline: return route.abort()
+        if "wahooligan.com" in url:
+            if wahoo is None: return route.abort()
+            out = wahoo(route.request)
+            if out is None: return route.abort()
+            status, body, ctype = out
+            return route.fulfill(status=status, content_type=ctype, body=body, headers={**CORS, "Access-Control-Allow-Headers": "*"})
         if "generativelanguage.googleapis.com" in url:
             if gemini is None: return route.abort()
             status, body = gemini(route.request)
@@ -47,17 +53,17 @@ EGG = {"id": "f-egg", "name": "Egg, whole", "brand": "", "barcode": "",
        "source": "usda", "sourceId": "171287", "uses": 3, "lastUsed": 1}
 
 @contextlib.contextmanager
-def app(pw, url, seed=None, offline=False, gemini=None):
+def app(pw, url, seed=None, offline=False, gemini=None, wahoo=None, path=""):
     b = pw.chromium.launch(executable_path=CHROME)
     ctx = b.new_context(viewport={"width": 390, "height": 844})
     if seed is not None:
         ctx.add_init_script(
-            f"if(!sessionStorage.getItem('seeded')){{localStorage.setItem({json.dumps(KEY)},{json.dumps(json.dumps(seed))});"
-            "sessionStorage.setItem('seeded','1');}")
+            f"try{{if(!sessionStorage.getItem('seeded')){{localStorage.setItem({json.dumps(KEY)},{json.dumps(json.dumps(seed))});"
+            "sessionStorage.setItem('seeded','1');}}catch(e){}")
     pg = ctx.new_page(); errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.route("**/*", router(offline, gemini))
-    pg.goto(url); pg.evaluate("App.tab('food')")
+    pg.route("**/*", router(offline, gemini, wahoo))
+    pg.goto(url + path); pg.evaluate("App.tab('food')")
     try:
         yield pg
         assert not errors, f"page errors: {errors}"
@@ -572,6 +578,118 @@ def food_tab_edits_the_calorie_goal_in_place(pw, url):
         assert pg.get_attribute("#foodDay .kbig", "data-zone") == "green"
         assert pg.locator("#tSave").count() == 0                               # editor closes after saving
         assert "bulk" in pg.inner_text("#foodGoalBtn").lower()
+
+
+import struct
+def make_fit(start_utc, seconds=600, power=150, cadence=86, hr0=125):
+    """Minimal cycling FIT: 1 Hz records (timestamp, HR, distance, power, cadence) + a session message."""
+    FIT_EPOCH = 631065600
+    t0 = int(start_utc.timestamp()) - FIT_EPOCH
+    body = bytearray()
+    def define(local, glob, fields):
+        body.extend(bytes([0x40 | local, 0, 0]) + struct.pack("<H", glob) + bytes([len(fields)]))
+        for num, size, base in fields: body.extend(bytes([num, size, base]))
+    define(1, 20, [(253, 4, 0x86), (3, 1, 0x02), (5, 4, 0x86), (7, 2, 0x84), (4, 1, 0x02)])
+    for i in range(seconds):
+        hr = hr0 + (i * 25) // seconds
+        body.extend(bytes([1]) + struct.pack("<IBIHB", t0 + i, hr, i * 700, power, cadence))
+    define(2, 18, [(2, 4, 0x86), (5, 1, 0x00), (7, 4, 0x86), (8, 4, 0x86), (9, 4, 0x86), (16, 1, 0x02), (17, 1, 0x02), (20, 2, 0x84), (18, 1, 0x02)])
+    body.extend(bytes([2]) + struct.pack("<IBIIIBBHB", t0, 2, seconds * 1000, seconds * 1000, seconds * 700, hr0 + 12, hr0 + 25, power, cadence))
+    header = bytes([14, 0x10]) + struct.pack("<HI", 2132, len(body)) + b".FIT" + b"\x00\x00"
+    return header + bytes(body) + b"\x00\x00"
+
+REDIRECT = "/index.html"  # the page the harness serves
+def wahoo_api(workouts, fit=None, details=None, token_log=None):
+    """Fake Wahoo cloud: token endpoint, workouts list/detail, CDN FIT file."""
+    def respond(req):
+        u = req.url
+        if "/oauth/token" in u:
+            if token_log is not None: token_log.append(dict(x.split("=", 1) for x in (req.post_data or "").split("&")))
+            return 200, json.dumps({"access_token": "ACC2", "refresh_token": "REF2", "expires_in": 7200, "token_type": "bearer"}), "application/json"
+        if "/v1/workouts/" in u:
+            wid = int(u.split("/v1/workouts/")[1].split("?")[0])
+            return 200, json.dumps((details or {})[wid]), "application/json"
+        if "/v1/workouts" in u:
+            return 200, json.dumps({"workouts": workouts, "total": len(workouts)}), "application/json"
+        if u.endswith(".fit"):
+            return (200, fit, "application/octet-stream") if fit is not None else None
+        return None
+    return respond
+def ride(wid, start, summary=True, fit_url=None):
+    w = {"id": wid, "starts": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "minutes": 10, "name": "KICKR ride", "workout_type_id": 12}
+    if summary:
+        w["workout_summary"] = {"duration_active_accum": "600.0", "distance_accum": "4200.0", "heart_rate_avg": "131.0",
+            "power_avg": "152.0", "cadence_avg": "88.0", "calories_accum": "110.0", "file": {"url": fit_url} if fit_url else None}
+    return w
+
+@test
+def wahoo_connect_starts_pkce_login(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.fill("#wahooClientId", "  MYCLIENTID ")
+        with pg.expect_request(lambda r: "api.wahooligan.com/oauth/authorize" in r.url) as req:
+            pg.click("#wahooConnect")
+        from urllib.parse import urlparse, parse_qs
+        q = {k: v[0] for k, v in parse_qs(urlparse(req.value.url).query).items()}
+        assert q["client_id"] == "MYCLIENTID" and q["state"] == "wahoo" and q["code_challenge_method"] == "S256"
+        assert q["scope"] == "user_read workouts_read offline_data" and q["redirect_uri"].endswith("/index.html")
+        assert len(q["code_challenge"]) == 43
+
+@test
+def wahoo_callback_imports_rides_with_fit_detail(pw, url):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    start = now - _dt.timedelta(hours=3)
+    old = now - _dt.timedelta(days=60)
+    log = []
+    api = wahoo_api([ride(901, start, fit_url="https://cdn.wahooligan.com/901.fit"), ride(900, old)], fit=make_fit(start), token_log=log)
+    seed = base(); seed["wahooApi"] = {"clientId": "CID", "pkceVerifier": "v" * 64}
+    seed["settings"]["maxHr"] = 220
+    with app(pw, url, seed, wahoo=api, path="?code=AUTHCODE&state=wahoo") as pg:
+        pg.wait_for_function("data.cardio.some(c => c.wahooId === 901)")
+        assert "code=" not in pg.evaluate("location.href")
+        assert log[0]["grant_type"] == "authorization_code" and log[0]["code"] == "AUTHCODE" and log[0]["code_verifier"] == "v" * 64 and log[0]["client_id"] == "CID"
+        st = stored(pg)
+        c = [x for x in st["cardio"] if x.get("wahooId") == 901][0]
+        assert c["type"] == "cycling" and c["avgPowerW"] == 150 and c["avgCadence"] == 86 and c["hrHist"] and c["maxHr"] >= 145  # ride file wins over summary
+        assert not any(x.get("wahooId") == 900 for x in st["cardio"])          # older than the first-sync window
+        assert st["wahooApi"]["refreshToken"] == "REF2" and "pkceVerifier" not in st["wahooApi"]
+        pg.evaluate("App.tab('calendar')"); pg.evaluate(f"App.selDay('{start.astimezone().date().isoformat()}')")
+        assert "150 W" in pg.inner_text("#view")
+
+@test
+def wahoo_uses_summary_when_fit_is_unreachable(pw, url):
+    start = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=2)
+    api = wahoo_api([ride(902, start, fit_url="https://cdn.wahooligan.com/902.fit")], fit=None)
+    seed = base(); seed["wahooApi"] = {"clientId": "CID", "accessToken": "ACC", "refreshToken": "REF", "expiresAt": 9999999999999}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 902][0]
+        assert c["avgHr"] == 131 and c["durationSec"] == 600 and c["avgPowerW"] == 152 and not c.get("hrHist")
+
+@test
+def wahoo_refreshes_expired_token_and_skips_known_rides(pw, url):
+    start = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=5)
+    log = []
+    detail = {904: ride(904, start)}
+    api = wahoo_api([ride(903, start), ride(904, start, summary=False)], details=detail, token_log=log)
+    seed = base(cardio=[{"id": "x", "date": "2026-10-01", "type": "cycling", "name": "old", "distanceMi": 2.6, "durationSec": 600, "wahooId": 903}])
+    seed["wahooApi"] = {"clientId": "CID", "accessToken": "OLD", "refreshToken": "REF", "expiresAt": 1}
+    with app(pw, url, seed, wahoo=api) as pg:
+        pg.evaluate("wahooSync(true)")
+        assert log and log[0]["grant_type"] == "refresh_token" and log[0]["refresh_token"] == "REF"
+        ids = [x.get("wahooId") for x in stored(pg)["cardio"]]
+        assert ids.count(903) == 1 and ids.count(904) == 1
+        assert stored(pg)["wahooApi"]["accessToken"] == "ACC2"
+
+@test
+def wahoo_tokens_stay_out_of_backups(pw, url):
+    seed = backup_seed(); seed["wahooApi"] = {"clientId": "CID", "clientSecret": "SECRET-WAHOO-SECRET", "accessToken": "SECRET-WAHOO-ACCESS", "refreshToken": "SECRET-WAHOO-REFRESH", "expiresAt": 5}
+    with app(pw, url, seed) as pg:
+        pg.evaluate(FAKE_FS); pg.evaluate("cloudBackup(true)")
+        blob = json.dumps(pg.evaluate("__fs"))
+        assert "SECRET-WAHOO" not in blob and "CID" in blob
+        pg.evaluate("async () => { ui.pendingRestore = await cloudFetchBackup('ABC123', 'landon'); App.confirmRestore(); }")
+        assert stored(pg)["wahooApi"]["refreshToken"] == "SECRET-WAHOO-REFRESH"
 
 # --- tests above this line ---
 

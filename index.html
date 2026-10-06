@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 83;
+const APP_VERSION = 84;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -378,7 +378,8 @@ function parseFIT(buf){
       recs.push({
         t: msg[253], lat: msg[0], lon: msg[1], hr: msg[3],
         ele: msg[78]!=null ? msg[78]/5-500 : (msg[2]!=null ? msg[2]/5-500 : null),
-        dist: msg[5]!=null ? msg[5]/100 : null
+        dist: msg[5]!=null ? msg[5]/100 : null,
+        pw: msg[7], cad: msg[4]
       });
     } else if (global === 18){
       if (msg[5]!=null) sess.sport = msg[5];
@@ -390,6 +391,8 @@ function parseFIT(buf){
       if (msg[16]!=null) sess.avgHr = msg[16];
       if (msg[17]!=null) sess.maxHr = msg[17];
       if (msg[22]!=null) sess.ascent = msg[22];
+      if (msg[20]!=null) sess.avgPower = msg[20];
+      if (msg[18]!=null) sess.avgCadence = msg[18];
     } else if (global === 12 && sportMsg==null){
       sportMsg = msg[0];
     }
@@ -443,7 +446,7 @@ function parseFIT(buf){
     t: toDate(r.t),
     lat: r.lat!=null ? semi(r.lat) : null,
     lon: r.lon!=null ? semi(r.lon) : null,
-    ele: r.ele, hr: r.hr, dist: r.dist
+    ele: r.ele, hr: r.hr, dist: r.dist, pw: r.pw, cad: r.cad
   }));
   if (!pts.length) throw new Error("No activity data in FIT file");
   const gps = pts.filter(p=>p.lat!=null && p.lon!=null);
@@ -543,8 +546,15 @@ function parseFIT(buf){
     maxHr: hrMax ?? sess.maxHr ?? null,
     hrHist: hrTime>0 ? Object.fromEntries(Object.entries(hrHist).map(([k,v])=>[k,Math.round(v)])) : null,
     splits: Object.keys(splits).length ? splits : null,
-    route
+    route,
+    ...fitPowerCadence(pts, sess)
   };
+}
+// average power (zeros included, like head units) and cadence (pedaling only) from the record stream
+function fitPowerCadence(pts, sess){
+  const pw = pts.map(p => p.pw).filter(v => v != null), cad = pts.map(p => p.cad).filter(v => v > 0);
+  const avg = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null;
+  return { avgPowerW: sess.avgPower ?? avg(pw), avgCadence: sess.avgCadence ?? avg(cad) };
 }
 
 function parseGPX(text){
@@ -1209,6 +1219,95 @@ async function stravaSync(manual){
   } finally { stravaSyncing = false; }
 }
 
+// ================= wahoo auto-sync (rides from the Wahoo app; PKCE OAuth, per user) =================
+const WAHOO_API = "https://api.wahooligan.com";
+const WAHOO_REDIRECT = () => location.origin + location.pathname;
+async function wahooToken(body){
+  const w = data.wahooApi;
+  const params = new URLSearchParams({ client_id: w.clientId, ...body });
+  if (w.clientSecret) params.set("client_secret", w.clientSecret);
+  const r = await fetch(WAHOO_API + "/oauth/token", { method: "POST", body: params });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error(j.error_description || j.error || ("token error " + r.status));
+  Object.assign(w, { accessToken: j.access_token, refreshToken: j.refresh_token || w.refreshToken,
+    expiresAt: Date.now() + (j.expires_in || 7200) * 1000 });
+  save();
+  return w.accessToken;
+}
+async function wahooEnsureToken(){
+  const w = data.wahooApi;
+  if (!w?.refreshToken) throw new Error("not connected");
+  if (w.accessToken && w.expiresAt > Date.now() + 60000) return w.accessToken;
+  return wahooToken({ grant_type: "refresh_token", refresh_token: w.refreshToken });
+}
+let wahooSyncing = null, wahooSyncAt = 0;
+function wahooSync(manual){
+  const w = data.wahooApi;
+  if (wahooSyncing) return wahooSyncing; // a sync is already running: wait for it
+  if (!w?.refreshToken) return Promise.resolve();
+  if (!manual && Date.now() - wahooSyncAt < 10 * 60000) return Promise.resolve();
+  wahooSyncAt = Date.now();
+  return (wahooSyncing = wahooSyncRun(manual).finally(() => { wahooSyncing = null; }));
+}
+async function wahooSyncRun(manual){
+  const w = data.wahooApi;
+  try {
+    const token = await wahooEnsureToken();
+    const get = async u => { const r = await fetch(WAHOO_API + u, { headers: { Authorization: "Bearer " + token } }); if (!r.ok) throw new Error("Wahoo API " + r.status); return r.json(); };
+    const list = await get("/v1/workouts?page=1&per_page=30");
+    const since = w.lastSync ? w.lastSync - 3 * 86400000 : Date.now() - 30 * 86400000; // first sync: last 30 days
+    let added = 0;
+    for (const item of list.workouts || []){
+      if (!item.starts || new Date(item.starts).getTime() < since) continue;
+      if (data.cardio.some(c => c.wahooId === item.id)) continue;
+      const full = item.workout_summary ? item : await get(`/v1/workouts/${item.id}`);
+      const m = wahooMapWorkout(full);
+      if (!m) continue;
+      let fit = null;
+      if (m.fitUrl){ try { const r = await fetch(m.fitUrl); if (r.ok) fit = parseFIT(await r.arrayBuffer()); } catch (_) {} }
+      const { fitUrl, ...entry } = m;
+      if (fit){
+        Object.assign(entry, { durationSec: fit.durationSec || entry.durationSec, distanceMi: fit.distanceMi || entry.distanceMi,
+          avgHr: fit.avgHr || entry.avgHr, maxHr: fit.maxHr || null, hrHist: fit.hrHist || null, splits: fit.splits || null,
+          avgPowerW: fit.avgPowerW ?? entry.avgPowerW, avgCadence: fit.avgCadence ?? entry.avgCadence });
+      }
+      // a ride already imported by hand (FIT file) on the same day with the same length: link it instead
+      const dup = data.cardio.find(c => !c.wahooId && c.date === entry.date && c.type === entry.type && entry.durationSec && Math.abs((c.durationSec || 0) - entry.durationSec) < 120);
+      if (dup){ Object.assign(dup, { ...entry, id: dup.id, name: dup.name }); continue; }
+      data.cardio.push({ id: uid(), ...entry });
+      added++;
+    }
+    w.lastSync = Date.now(); delete w.lastError;
+    save();
+    if (added){ if (data.crew?.code) crewPushStats().catch(() => {}); toast(`Synced ${added} ride${added > 1 ? "s" : ""} from Wahoo ✓`); render(); }
+    else if (manual){ toast("Wahoo: up to date ✓"); render(); }
+  } catch (e) {
+    w.lastError = (e instanceof TypeError) ? "Couldn't reach Wahoo from the app (network or blocked request)" : String(e.message || e);
+    save();
+    if (manual){ toast("Wahoo sync failed — see Settings", true); render(); }
+  }
+}
+function wahooSettingsHTML(){
+  const w = data.wahooApi || {};
+  const err = w.lastError ? `<div style="font-size:12px;color:var(--danger);margin-top:8px">last error: ${esc(w.lastError)}</div>` : "";
+  if (w.refreshToken) return `<div class="card" id="wahooCard">
+    <div class="lbl" style="margin-bottom:8px">Wahoo auto-sync</div>
+    <div style="font-size:14px"><b>Connected</b></div>
+    <div style="font-size:12px;color:var(--sub);margin:4px 0 10px">Rides from the Wahoo app import automatically when you open Training Log.${w.lastSync ? ` Last checked ${esc(new Date(w.lastSync).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}.` : ""}</div>
+    <button class="btn" id="wahooSyncBtn" style="background:transparent;border:1px solid var(--ink);color:var(--ink);margin-bottom:10px" onclick="App.wahooSyncNow()">Sync now</button>
+    ${delBtn("wahoo-disc", "App.wahooDisconnect()", "disconnect wahoo")}${err}
+  </div>`;
+  return `<div class="card" id="wahooCard">
+    <div class="lbl" style="margin-bottom:8px">Wahoo auto-sync</div>
+    <div style="font-size:13px;color:var(--sub);line-height:1.5;margin-bottom:10px">Rides you record in the Wahoo app import automatically, with heart-rate zones, power and cadence. Use the Client ID from your app at developers.wahooligan.com.</div>
+    <div class="lbl">Client ID</div>
+    <input class="mono" id="wahooClientId" value="${esc(w.clientId || "")}" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-bottom:8px">
+    <details style="margin-bottom:10px"><summary style="font-size:12px;color:var(--sub);cursor:pointer">Client secret (only if your Wahoo app is "confidential")</summary>
+      <input class="mono" id="wahooClientSecret" value="${esc(w.clientSecret || "")}" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-top:6px"></details>
+    <button class="btn ink" id="wahooConnect" onclick="App.wahooConnect()">Connect Wahoo</button>${err}
+  </div>`;
+}
+
 // ================= crew sync (Firebase) =================
 let fb = null;          // {auth, db, uid}
 let fbLoadPromise = null;
@@ -1466,6 +1565,7 @@ function backupCore(){
   core.settings = { ...data.settings };
   delete core.settings.aiKey; delete core.settings.usdaKey;
   if (data.stravaApi){ const { clientSecret, refreshToken, accessToken, expiresAt, ...rest } = data.stravaApi; core.stravaApi = rest; }
+  if (data.wahooApi){ const { clientSecret, refreshToken, accessToken, expiresAt, pkceVerifier, ...rest } = data.wahooApi; core.wahooApi = rest; }
   return JSON.stringify(core);
 }
 const BK_CORE_CHARS = 300000; // ≤ ~900 KB even if every character needs 3 bytes; Firestore caps a doc at 1 MiB
@@ -1761,6 +1861,7 @@ function renderCalendar(){
           ${c.distanceMi>0?stat("dist", c.distanceMi+" mi"):""}${stat("time", fmtDur(c.durationSec))}${cardioPaceStat(c)}
           ${c.speedMph?stat("speed", c.speedMph+" mph"):""}${c.inclinePct!=null?stat("incline", c.inclinePct+"%"):""}
           ${c.avgHr?stat("avg hr", c.avgHr):""}${c.maxHr?stat("max hr", c.maxHr):""}
+          ${c.avgPowerW?stat("avg pwr", c.avgPowerW+" W"):""}${c.avgCadence?stat("cadence", c.avgCadence+" rpm"):""}
         </div>
         ${c.hrHist?zoneBar(c.hrHist):""}
         ${c.route ? `<button class="routebtn" onclick="App.toggleMap('${c.id}')">${ui.openMaps.has(c.id)?"Hide route ▾":"View route ▸"}</button>` : ""}
@@ -2110,6 +2211,32 @@ function pickFlashModel(list, exclude = []){
   };
   return newest(/^gemini-([\d.]+)-flash$/) || newest(/^gemini-([\d.]+)-flash-lite$/);
 }
+// ----- Wahoo Cloud API (OAuth with PKCE: no client secret in the app) -----
+async function pkceChallenge(verifier){
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return makeHealthToken(new Uint8Array(hash));
+}
+function wahooAuthURL(clientId, redirect, challenge){
+  const q = new URLSearchParams({ client_id: clientId, redirect_uri: redirect, response_type: "code",
+    scope: "user_read workouts_read offline_data", code_challenge: challenge, code_challenge_method: "S256", state: "wahoo" });
+  return "https://api.wahooligan.com/oauth/authorize?" + q.toString().replace(/\+/g, "%20");
+}
+const WAHOO_TYPES = { run: [1, 3, 4], treadmill: [5], walk: [6, 7, 8, 9] }; // everything else is a ride
+function wahooMapWorkout(w){
+  if (!w || !w.starts) return null;
+  const d = new Date(w.starts);
+  if (isNaN(d)) return null;
+  const s = w.workout_summary || {};
+  const n = v => { const x = parseFloat(v); return Number.isFinite(x) ? x : null; };
+  const type = Object.keys(WAHOO_TYPES).find(k => WAHOO_TYPES[k].includes(w.workout_type_id)) || "cycling";
+  const dist = n(s.distance_accum), dur = n(s.duration_active_accum) ?? n(s.duration_total_accum) ?? (n(w.minutes) != null ? n(w.minutes) * 60 : null);
+  const round = v => v == null ? null : Math.round(v);
+  return { wahooId: w.id, type, name: String(w.name || "").trim() || "Indoor ride",
+    date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+    durationSec: round(dur), distanceMi: dist != null ? Math.round(dist / 1609.344 * 100) / 100 : 0,
+    avgHr: round(n(s.heart_rate_avg)), avgPowerW: round(n(s.power_avg)), avgCadence: round(n(s.cadence_avg)),
+    kcal: round(n(s.calories_accum)), source: "wahoo", fitUrl: (s.file && s.file.url) || null };
+}
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
 const NUTRI_SOURCE = { health: "from Cronometer · Apple Health sync", cronometer: "from a Cronometer CSV import", log: "logged in this app", manual: "entered manually" };
@@ -2242,7 +2369,7 @@ async function healthSync(manual){
   } catch (e) { if (manual) toast("Couldn't reach Firebase — check connection", true); }
   finally { healthSyncing = false; }
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") healthSync(false); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible"){ healthSync(false); wahooSync(false); } });
 // sheets size themselves to the visible area so the iOS keyboard never covers their inputs
 function syncVisualViewport(){
   const vv = window.visualViewport; if (!vv) return;
@@ -3245,6 +3372,7 @@ function renderSettings(){
       </button>`).join("")}</div>`
       : `<div style="font-size:12px;color:var(--sub);margin-top:10px">No backups found for that crew code.</div>`) : ""}
   </div>` : ""}
+  ${wahooSettingsHTML()}
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Strava auto-sync — optional, needs a Strava subscription</div>
     ${data.stravaApi?.refreshToken ? `
@@ -4316,6 +4444,20 @@ window.App = {
   },
 
   // strava (optional per-user)
+  async wahooConnect(){
+    const id = ($("#wahooClientId")?.value || "").trim(), secret = ($("#wahooClientSecret")?.value || "").trim();
+    if (!id){ toast("Paste your Wahoo Client ID first", true); return; }
+    const verifier = makeHealthToken(crypto.getRandomValues(new Uint8Array(48)));
+    data.wahooApi = { ...(data.wahooApi || {}), clientId: id, clientSecret: secret || undefined, pkceVerifier: verifier };
+    save();
+    location.href = wahooAuthURL(id, WAHOO_REDIRECT(), await pkceChallenge(verifier));
+  },
+  wahooSyncNow(){ toast("Checking Wahoo…"); wahooSync(true); },
+  wahooDisconnect(){
+    if (!confirmDel("wahoo-disc")) return;
+    if (data.wahooApi){ for (const k of ["accessToken", "refreshToken", "expiresAt", "lastSync", "lastError", "pkceVerifier"]) delete data.wahooApi[k]; }
+    save(); toast("Wahoo disconnected"); render();
+  },
   stravaEditKeys(){ ui.stravaSetupOpen = !ui.stravaSetupOpen; render(); },
   stravaSaveAndConnect(){
     const id = $("#stravaId").value.trim(), secret = $("#stravaSecret").value.trim();
@@ -4646,13 +4788,14 @@ window.App = {
   // backup
   confirmRestore(){
     if (!ui.pendingRestore) return;
-    const mine = { aiKey: data.settings?.aiKey, usdaKey: data.settings?.usdaKey }, myStrava = data.stravaApi;
+    const mine = { aiKey: data.settings?.aiKey, usdaKey: data.settings?.usdaKey }, myStrava = data.stravaApi, myWahoo = data.wahooApi;
     data = { ...structuredClone(EMPTY), ...ui.pendingRestore };
     if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalTarget:null, proteinTarget:null };
     // backups don't carry keys or tokens, so keep this phone's
     for (const [k, v] of Object.entries(mine)) if (v && !data.settings[k]) data.settings[k] = v;
     if (myStrava?.refreshToken && !data.stravaApi?.refreshToken && (!data.stravaApi?.clientId || data.stravaApi.clientId === myStrava.clientId))
       data.stravaApi = { ...(data.stravaApi || {}), ...myStrava };
+    if (myWahoo?.refreshToken && !data.wahooApi?.refreshToken) data.wahooApi = { ...(data.wahooApi || {}), ...myWahoo };
     // same normalization as app start: only list fields get reset (school is an object, not a list)
     for (const k of Object.keys(EMPTY)) if (Array.isArray(EMPTY[k]) && !Array.isArray(data[k])) data[k] = [];
     if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = structuredClone(EMPTY.school);
@@ -4738,10 +4881,28 @@ setTimeout(checkBirthdayCelebration, 900); // after crew data has a chance to lo
 if (data.crew?.code) crewSync(false);
 healthSync(false);
 // handle Strava OAuth redirect + auto-sync (only for users who configured it)
+(async function wahooBoot(){
+  const q = new URLSearchParams(location.search);
+  if (q.get("state") === "wahoo"){
+    history.replaceState({}, "", location.pathname);
+    const w = data.wahooApi;
+    if (q.get("error") || !q.get("code") || !w?.pkceVerifier){ toast("Wahoo connection was cancelled", true); return; }
+    toast("Finishing Wahoo connection…");
+    try {
+      await wahooToken({ grant_type: "authorization_code", code: q.get("code"), redirect_uri: WAHOO_REDIRECT(), code_verifier: w.pkceVerifier });
+      delete w.pkceVerifier; save();
+      toast("Wahoo connected ✓");
+      await wahooSync(true);
+    } catch (e) {
+      w.lastError = (e instanceof TypeError) ? "Couldn't reach Wahoo from the app (network or blocked request)" : String(e.message || e);
+      save(); toast("Wahoo connection failed — see Settings", true); ui.tab = "settings"; render();
+    }
+  } else if (data.wahooApi?.refreshToken) wahooSync(false);
+})();
 (async function stravaBoot(){
   const q = new URLSearchParams(location.search);
   const code = q.get("code");
-  if (code && data.stravaApi?.clientId){
+  if (code && q.get("state") !== "wahoo" && data.stravaApi?.clientId){
     history.replaceState({}, "", location.pathname);
     toast("Finishing Strava connection…");
     try {

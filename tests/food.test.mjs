@@ -106,3 +106,31 @@ test("healthToken-style ids: makeHealthToken is 32 url-safe characters", () => {
   const t = C.makeHealthToken(new Uint8Array(24).fill(255));
   assert.equal(t.length, 32); assert.match(t, /^[A-Za-z0-9_-]+$/);
 });
+
+test("pkceChallenge matches the RFC 7636 example", async () => {
+  assert.equal(await C.pkceChallenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+});
+test("wahooAuthURL asks for read-only scopes with PKCE", () => {
+  const u = new URL(C.wahooAuthURL("CID 1", "https://landonmullin.github.io/Training-log/", "CHAL"));
+  assert.equal(u.origin + u.pathname, "https://api.wahooligan.com/oauth/authorize");
+  const q = Object.fromEntries(u.searchParams);
+  assert.deepEqual(q, { client_id: "CID 1", redirect_uri: "https://landonmullin.github.io/Training-log/", response_type: "code",
+    scope: "user_read workouts_read offline_data", code_challenge: "CHAL", code_challenge_method: "S256", state: "wahoo" });
+});
+test("wahooMapWorkout turns a Wahoo workout + summary into a cardio entry", () => {
+  const w = { id: 123, starts: "2026-10-05T12:00:00.000Z", minutes: 46, name: "KICKR ride", workout_type_id: 12,
+    workout_summary: { duration_active_accum: "2700.0", distance_accum: "20921.5", heart_rate_avg: "142.4", power_avg: "148.2",
+      cadence_avg: "85.6", calories_accum: "420.0", file: { url: "https://cdn.wahooligan.com/x.fit" } } };
+  assert.deepEqual(C.wahooMapWorkout(w), { wahooId: 123, type: "cycling", name: "KICKR ride", date: "2026-10-05", durationSec: 2700,
+    distanceMi: 13, avgHr: 142, avgPowerW: 148, avgCadence: 86, kcal: 420, source: "wahoo", fitUrl: "https://cdn.wahooligan.com/x.fit" });
+});
+test("wahooMapWorkout: types, missing summary, missing fields", () => {
+  const base = { id: 1, starts: "2026-10-05T12:00:00Z", minutes: 30 };
+  assert.equal(C.wahooMapWorkout({ ...base, workout_type_id: 1 }).type, "run");
+  assert.equal(C.wahooMapWorkout({ ...base, workout_type_id: 5 }).type, "treadmill");
+  assert.equal(C.wahooMapWorkout({ ...base, workout_type_id: 6 }).type, "walk");
+  assert.equal(C.wahooMapWorkout({ ...base, workout_type_id: 99 }).type, "cycling");
+  const m = C.wahooMapWorkout(base);
+  assert.equal(m.durationSec, 1800); assert.equal(m.avgHr, null); assert.equal(m.fitUrl, null); assert.equal(m.name, "Indoor ride");
+  assert.equal(C.wahooMapWorkout({ id: 2 }), null); // no start time
+});
