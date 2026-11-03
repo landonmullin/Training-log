@@ -785,6 +785,99 @@ def wahoo_gives_exhausted_empty_imports_one_fresh_round(pw, url):
         c = [x for x in stored(pg)["cardio"] if x.get("wahooId") == 991][0]
         assert c["distanceMi"] > 2 and c["avgHr"] == 110
 
+
+@test
+def schedule_is_off_by_default_and_hidden(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("App.tab('calendar')")
+        assert pg.locator("#planCard").count() == 0
+        assert stored(pg) is None or not (stored(pg).get("settings") or {}).get("scheduleEnabled")
+
+@test
+def schedule_seeds_for_landon_and_sits_first_on_calendar(pw, url):
+    seed = base(); seed["crew"] = {"name": "Landon"}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.click("button[aria-label='Daily schedule']")
+        p = stored(pg)["planner"]
+        assert len(p["templates"]["SU"]) > 10 and len(p["alt"]["MO"]) > 5
+        assert any(b["title"] == "Therapy" for b in p["alt"]["MO"])
+        pg.evaluate("App.tab('calendar')")
+        first = pg.evaluate("document.querySelector('#view').firstElementChild.id")
+        assert first == "planCard", first
+        assert pg.locator("#planCard .plrow").count() > 5
+
+@test
+def schedule_for_other_users_starts_empty(pw, url):
+    seed = base(); seed["crew"] = {"name": "Avery"}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.click("button[aria-label='Daily schedule']")
+        assert not stored(pg)["planner"]["templates"]
+        pg.evaluate("App.tab('planner')")
+        assert pg.locator("text=Start from Landon's week").count() == 1
+
+@test
+def schedule_now_line_and_current_slot(pw, url):
+    seed = base(settings={"kcalTarget": 2400, "proteinTarget": 180, "scheduleEnabled": True})
+    blocks = [{"id": "a", "start": "04:00", "end": "23:59", "title": "All day thing", "note": ""},
+              {"id": "b", "start": "03:59", "end": "", "title": "Bed", "note": ""}]
+    seed["planner"] = {"templates": {d: blocks for d in ["SU","MO","TU","WE","TH","FR","SA"]}, "alt": {}, "overrides": {}, "flags": {}, "seeded": True}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('calendar')")
+        assert pg.locator("#planCard .plnow").count() == 1
+        hr = pg.evaluate("new Date().getHours()")
+        if 4 <= hr < 23:
+            assert pg.locator("#planCard .plcur").inner_text().find("All day thing") >= 0
+
+@test
+def schedule_day_edit_creates_override_and_resets(pw, url):
+    seed = base(settings={"kcalTarget": 2400, "proteinTarget": 180, "scheduleEnabled": True})
+    seed["planner"] = {"templates": {"WE": [{"id": "w", "start": "09:00", "end": "", "title": "Wake up", "note": ""}]},
+                       "alt": {}, "overrides": {}, "flags": {}, "seeded": True}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('calendar')")
+        pg.evaluate("App.selDay('2026-11-04')")  # a Wednesday, not today
+        card = pg.locator("#planCard").last
+        assert "Wake up" in card.inner_text()
+        card.locator("#planEditBtn").click()
+        pg.fill("#plStart", "11:00"); pg.fill("#plTitle", "Dentist"); pg.click("#plSave")
+        ov = stored(pg)["planner"]["overrides"]["2026-11-04"]
+        assert [b["title"] for b in ov] == ["Wake up", "Dentist"]
+        assert stored(pg)["planner"]["templates"]["WE"][0]["title"] == "Wake up" and len(stored(pg)["planner"]["templates"]["WE"]) == 1
+        pg.locator("text=Reset this day").click()
+        assert "2026-11-04" not in stored(pg)["planner"]["overrides"]
+
+@test
+def schedule_therapy_checkbox_swaps_monday(pw, url):
+    seed = base(settings={"kcalTarget": 2400, "proteinTarget": 180, "scheduleEnabled": True})
+    seed["crew"] = {"name": "Landon"}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.planLoadSample(); App.tab('calendar'); App.selDay('2026-11-09')")
+        card = pg.locator("#planCard").last
+        assert "Therapy" not in card.locator(".plrow").all_inner_texts()[3]
+        card.locator("#planTherapy").check()
+        assert stored(pg)["planner"]["flags"]["2026-11-09"]["therapy"] is True
+        txt = pg.locator("#planCard").last.inner_text()
+        assert "8:15am" in txt and "Therapy" in txt and "therapy week" in txt
+
+@test
+def schedule_builder_edits_weekday_template(pw, url):
+    seed = base(settings={"kcalTarget": 2400, "proteinTarget": 180, "scheduleEnabled": True})
+    seed["planner"] = {"templates": {}, "alt": {}, "overrides": {}, "flags": {}, "seeded": True}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('planner'); App.planPickDow('TU')")
+        pg.fill("#plStart", "09:00"); pg.fill("#plTitle", "Wake up"); pg.click("#plSave")
+        pg.fill("#plStart", "08:00"); pg.fill("#plEnd", "08:30"); pg.fill("#plTitle", "Coffee"); pg.click("#plSave")
+        assert [b["title"] for b in stored(pg)["planner"]["templates"]["TU"]] == ["Coffee", "Wake up"]
+        pg.evaluate("App.planCopyDow('TU','TH')")
+        assert len(stored(pg)["planner"]["templates"]["TH"]) == 2
+        pg.click("button[aria-label='edit'] >> nth=0")
+        pg.fill("#plTitle", "Coffee & soda"); pg.click("#plSave")
+        assert stored(pg)["planner"]["templates"]["TU"][0]["title"] == "Coffee & soda"
+        pg.click("button.del >> nth=0"); pg.click("button.del >> nth=0")
+        assert len(stored(pg)["planner"]["templates"]["TU"]) == 1
+
 # --- tests above this line ---
 
 def main():

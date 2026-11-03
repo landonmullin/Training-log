@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 88;
+const APP_VERSION = 89;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -248,6 +248,7 @@ if (typeof data.settings !== "object" || !data.settings) data.settings = { kcalT
 if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled = true;
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
+if (typeof data.settings.scheduleEnabled === "undefined") data.settings.scheduleEnabled = false;
 if (!SPLIT_STYLES[data.settings.splitStyle]) data.settings.splitStyle = "ppl";
 if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] };
 for (const k of ["classes","tasks","dates","sessions","assignments","schedule"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
@@ -1745,12 +1746,13 @@ const ui = {
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
+  planEdit: null, planEditDay: null, planShowPast: false, planDow: null,
 };
 
 // ================= views =================
 function render(){
   renderNav();
-  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay, school:renderSchool }[ui.tab];
+  const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay, school:renderSchool, planner:renderPlanner }[ui.tab];
   $("#view").innerHTML = v();
   afterRender();
 }
@@ -1823,6 +1825,185 @@ function calendarLegend(){
     })() : ""}
   </div>`;
 }
+// ================= daily schedule (planner) =================
+const DOG_TRAIN_NOTE = "15 minutes each, one in the crate, alternating. SHORT AND SIMPLE WINS. STOP ON A GOOD FUCKING NOTE!";
+function planSeed(){
+  const B = (start, end, title, note) => ({ id: uid(), start, end: end || "", title, note: note || "" });
+  const morning = () => [B("09:00","","Wake up"), B("09:15","","Bed is made"), B("09:45","","Showered, contacts/glasses in")];
+  const bfastNote = "Soda/coffee, etc. (Avery already fed and took dogs potty, then put back in crate.)";
+  const bed = () => B("01:00","","In bed, no phone","1:00am at the latest");
+  const weeknightTail = () => [B("19:15","19:45","Eat, unload bag, etc."), B("19:45","20:45","Gym"), B("20:45","21:15","Home from gym, shower"),
+    B("21:15","22:30","Phone time"), B("22:30","01:00","School"), bed()];
+  const dogMorning = () => [B("09:45","10:00","Dogs potty, sit in yard, drink soda"), B("10:00","10:30","Dogs put up, make breakfast"),
+    B("10:30","","Breakfast done & cleaned up"), B("10:30","10:50","Walk 1 dog"), B("10:50","11:05","Flirt pole, other dog"),
+    B("11:05","13:00","School","Dogs put up"), B("13:00","13:30","Dog training", DOG_TRAIN_NOTE)];
+  const tuth = () => [...morning(), ...dogMorning(), B("13:30","14:00","Phone time / pack backpack & lab bag / lunch"),
+    B("14:00","20:00","School"), B("20:00","20:30","Home, gear up, go to gym","In the gym by 8:30 at the latest"),
+    B("20:30","21:30","Gym"), B("21:30","","Home from gym"), B("21:30","22:30","Phone time"), B("22:30","01:00","School"), bed()];
+  return {
+    templates: {
+      SU: [...morning(), B("10:00","","Breakfast in progress", bfastNote), B("10:30","","Breakfast done & cleaned up"),
+        B("10:30","12:00","Schoolwork","Phone left in the kitchen"), B("12:00","13:00","Time for Avery & me","No phones"),
+        B("13:00","13:30","Family walk"), B("13:30","14:00","Dog training", DOG_TRAIN_NOTE), B("14:00","14:30","Lunch / phone time"),
+        B("14:30","15:30","Get ready for work"), B("15:30","01:00","Work","Phone put away"), bed()],
+      MO: [...morning(), B("10:00","","Breakfast in progress", bfastNote), B("10:30","","Breakfast done & cleaned up"),
+        B("10:30","19:15","School"), ...weeknightTail()],
+      TU: tuth(),
+      WE: [...morning(), B("09:45","10:00","Dogs potty & play with a toy in the yard, drink soda"), B("10:00","10:30","Dogs up, breakfast"),
+        B("10:30","19:15","School"), ...weeknightTail()],
+      TH: tuth(),
+      FR: [...morning(), ...dogMorning(), B("13:30","14:30","Relax, phone, etc."), B("14:30","15:30","Get ready for work, chores, etc."),
+        B("15:30","01:00","Work"), bed()],
+      SA: [...morning(), ...dogMorning(), B("13:30","13:50","Get ready for gym"), B("13:50","14:45","Gym"),
+        B("14:45","","Home from gym, shower","Proceed with evening")],
+    },
+    alt: {
+      MO: [B("08:15","","Wake up","Therapy week"), B("08:30","","Bed is made"), B("08:55","","Showered, contacts/glasses in"),
+        B("09:00","10:00","Therapy"), B("10:00","","Breakfast in progress", bfastNote), B("10:30","","Breakfast done & cleaned up"),
+        B("10:30","19:15","School"), ...weeknightTail()],
+    },
+  };
+}
+function planner(){
+  if (!data.planner || typeof data.planner !== "object") data.planner = {};
+  const p = data.planner;
+  for (const k of ["templates","alt","overrides","flags"]) if (!p[k] || typeof p[k] !== "object" || Array.isArray(p[k])) p[k] = {};
+  return p;
+}
+// keep the now-line moving while the calendar is open (skip while typing)
+setInterval(()=>{ if (ui.tab==="calendar" && data.settings.scheduleEnabled && !ui.planEditDay && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||"")) render(); }, 60000);
+const PLAN_DAY_NAMES = { SU:"Sunday", MO:"Monday", TU:"Tuesday", WE:"Wednesday", TH:"Thursday", FR:"Friday", SA:"Saturday" };
+const planFmt = t => t ? fmtTime(t).replace(":00","") : "";
+// which date the schedule card shows: tapping "today" before 4am still means last night's schedule
+function planDateFor(sel){ return sel === todayISO() ? planDayISO(new Date()) : sel; }
+// scope: "day" (one calendar date), "tpl" (weekday template), "alt" (therapy-week Monday)
+function planGet(scope, key){
+  const p = planner();
+  if (scope === "day") return planResolve(p, key).blocks;
+  return planSorted((scope === "alt" ? p.alt : p.templates)[key] || []);
+}
+function planSet(scope, key, blocks){
+  const p = planner();
+  if (scope === "day") p.overrides[key] = blocks;
+  else (scope === "alt" ? p.alt : p.templates)[key] = blocks;
+}
+function planEditorForm(scope, key){
+  const ed = ui.planEdit && ui.planEdit.scope === scope && ui.planEdit.key === key ? ui.planEdit : null;
+  const b = ed?.id ? (planGet(scope, key).find(x=>x.id===ed.id) || {}) : {};
+  return `<div class="planform" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--grid)">
+    <div class="lbl" style="margin-bottom:6px">${ed?.id ? "Edit slot" : "Add a slot"}</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <label style="flex:1"><span class="lbl">Start</span><input id="plStart" type="time" value="${esc(b.start||"")}"></label>
+      <label style="flex:1"><span class="lbl">End (optional)</span><input id="plEnd" type="time" value="${esc(b.end||"")}"></label>
+    </div>
+    <input id="plTitle" placeholder="What's happening" value="${esc(b.title||"")}" style="margin-bottom:8px">
+    <input id="plNote" placeholder="Note (optional)" value="${esc(b.note||"")}" style="margin-bottom:8px">
+    <div style="display:flex;gap:8px">
+      <button class="btn ink" id="plSave" style="flex:2" onclick="App.planSaveSlot('${scope}','${key}')">${ed?.id ? "Save slot" : "+ Add slot"}</button>
+      ${ed?.id ? `<button class="btn" style="flex:1;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.planCancelEdit()">Cancel</button>` : ""}
+    </div>
+  </div>`;
+}
+function planRowsHTML(scope, key, blocks, opts={}){
+  const { now=null, editing=false } = opts;
+  const tl = planTimeline(blocks, now ?? -1);
+  const live = now != null;
+  const firstShown = live && !ui.planShowPast ? Math.max(0, tl.rows.findIndex(r=>r.state!=="past") - 1) : 0;
+  const hidden = live && !ui.planShowPast ? (tl.rows.length && tl.rows.every(r=>r.state==="past") ? tl.rows.length - 1 : firstShown) : 0;
+  const nowLine = () => {
+    const d = new Date();
+    return `<div class="plnow" style="display:flex;align-items:center;gap:6px;margin:2px 0">
+      <span style="width:9px;height:9px;border-radius:50%;background:#E03131;flex:none"></span>
+      <span style="flex:1;height:2px;background:#E03131"></span>
+      <span style="font-family:var(--mono);font-size:10px;font-weight:700;color:#E03131">NOW ${fmtTime(`${d.getHours()}:${String(d.getMinutes()).padStart(2,"0")}`)}</span>
+    </div>`;
+  };
+  let html = "";
+  if (hidden > 0) html += `<button onclick="App.planTogglePast()" style="background:none;border:none;color:var(--sub);font-family:var(--mono);font-size:11px;cursor:pointer;padding:0 0 6px">\u25B8 ${hidden} earlier</button>`;
+  else if (live && ui.planShowPast && tl.rows.some(r=>r.state==="past")) html += `<button onclick="App.planTogglePast()" style="background:none;border:none;color:var(--sub);font-family:var(--mono);font-size:11px;cursor:pointer;padding:0 0 6px">\u25BE hide earlier</button>`;
+  tl.rows.forEach((r, i) => {
+    if (live && i === tl.lineAt) html += nowLine();
+    if (i < hidden) return;
+    const st = live ? r.state : "later";
+    const isNow = st === "now";
+    const past = st === "past";
+    const color = isNow ? "#E03131" : st === "next" ? "var(--cardio)" : "var(--line)";
+    html += `<div class="plrow ${isNow?"plcur":""}" data-plid="${r.id}" style="display:flex;gap:10px;padding:7px 0;${past?"opacity:.45;":""}${isNow?"background:rgba(224,49,49,.06);border-radius:8px;margin:0 -6px;padding:7px 6px;":""}">
+      <span style="width:3px;border-radius:2px;background:${color};flex:none"></span>
+      <span style="width:62px;flex:none;font-family:var(--mono);font-size:11px;color:${isNow?"#E03131":"var(--sub)"};line-height:1.35;padding-top:1px">${planFmt(r.start)}${r.end?`<br>\u2013${planFmt(r.end)}`:""}</span>
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-size:14px;font-weight:${isNow?800:600};color:var(--ink);line-height:1.3">${esc(r.title||"")}</span>
+        ${r.note?`<span style="display:block;font-size:12px;color:var(--sub);line-height:1.35;margin-top:2px">${esc(r.note)}</span>`:""}
+        ${isNow && r.pct!=null?`<span style="display:block;height:4px;border-radius:2px;background:var(--grid);margin-top:5px;overflow:hidden"><span style="display:block;height:100%;width:${r.pct}%;background:#E03131"></span></span>`:""}
+      </span>
+      ${editing?`<span style="display:flex;gap:4px;align-items:flex-start;flex:none">
+        <button onclick="App.planEditSlot('${scope}','${key}','${r.id}')" style="background:none;border:1px solid var(--line);border-radius:6px;padding:3px 7px;font-size:12px;cursor:pointer;color:var(--ink)" aria-label="edit">\u270E</button>
+        ${delBtn(`pl-${r.id}`, `App.planDelSlot('${scope}','${key}','${r.id}')`, "\u2715")}
+      </span>`:""}
+    </div>`;
+  });
+  if (live && tl.lineAt === tl.rows.length && tl.rows.length) html += nowLine();
+  if (!tl.rows.length) html += `<div style="font-size:13px;color:var(--sub);padding:4px 0">Nothing scheduled${editing?" yet — add a slot below.":"."}</div>`;
+  return html;
+}
+function planCardHTML(iso){
+  const p = planner();
+  const live = iso === planDayISO(new Date());
+  const r = planResolve(p, iso);
+  const editing = ui.planEditDay === iso;
+  const isMon = r.dow === "MO";
+  const therapy = !!p.flags[iso]?.therapy;
+  const dayLabel = live ? "Today" : prettyDate(iso);
+  const srcTag = r.source === "override" ? "edited for this day" : r.source === "therapy" ? "therapy week" : `${PLAN_DAY_NAMES[r.dow]} routine`;
+  return `<div class="card" id="planCard" style="padding:12px 14px;border-top:3px solid ${live?"#E03131":"var(--ink)"}">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+      <div><div class="lbl" style="margin:0">Schedule \u00B7 ${esc(dayLabel)}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:2px">${srcTag}</div></div>
+      <div style="display:flex;gap:6px">
+        <button onclick="App.planEditToggle('${iso}')" style="background:${editing?"var(--ink)":"transparent"};color:${editing?"#fff":"var(--ink)"};border:1px solid var(--ink);border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer" id="planEditBtn">${editing?"Done":"Edit day"}</button>
+        <button onclick="App.tab('planner')" style="background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;color:var(--sub)" aria-label="Weekly schedule">Week</button>
+      </div>
+    </div>
+    ${isMon ? `<label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;cursor:pointer">
+      <input type="checkbox" id="planTherapy" ${therapy?"checked":""} onchange="App.planSetTherapy('${iso}', this.checked)"> Therapy week
+      ${r.source==="override"&&!editing?`<span style="font-family:var(--mono);font-size:10px;color:var(--sub);font-weight:400;margin-left:auto">day was edited \u2014 reset to apply</span>`:""}
+    </label>` : ""}
+    ${planRowsHTML("day", iso, r.blocks, { now: live ? planNowMin(new Date()) : null, editing })}
+    ${editing ? planEditorForm("day", iso) + (r.source==="override" ? `<button onclick="App.planResetDay('${iso}')" style="background:none;border:none;color:var(--cardio);font-size:12px;font-weight:700;cursor:pointer;padding:10px 0 0;font-family:var(--body)">\u21BA Reset this day to the ${r.dow==="MO"&&therapy?"therapy-week":PLAN_DAY_NAMES[r.dow]} routine</button>` : "") : ""}
+  </div>`;
+}
+function renderPlanner(){
+  const p = planner();
+  const key = ui.planDow || "MO";
+  const scope = key === "MO_ALT" ? "alt" : "tpl";
+  const k = scope === "alt" ? "MO" : key;
+  const empty = !Object.values(p.templates).some(a=>Array.isArray(a) && a.length);
+  return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0 10px">
+      <button onclick="App.tab('calendar')" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 6px 0 0;color:var(--ink)" aria-label="Back">\u2039</button>
+      <div class="h2" style="margin:0">Weekly schedule</div>
+    </div>
+    ${empty ? `<div class="card" style="padding:12px 14px">
+      <div style="font-size:13px;color:var(--sub);margin-bottom:8px;line-height:1.45">Build a routine for each weekday. It shows at the top of the calendar, with a line marking where you are in the day.</div>
+      <button class="btn ghost" onclick="App.planLoadSample()">Start from Landon's week</button>
+    </div>` : ""}
+    <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">
+      ${["SU","MO","TU","WE","TH","FR","SA"].map(d=>`<button class="${key===d?"on":""}" onclick="App.planPickDow('${d}')">${PLAN_DAY_NAMES[d].slice(0,3)}</button>`).join("")}
+      <button class="${key==="MO_ALT"?"on":""}" onclick="App.planPickDow('MO_ALT')" style="flex-basis:100%">Monday \u2014 therapy week</button>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:8px">${scope==="alt" ? "Used on Mondays you tick \u201CTherapy week\u201D" : `Every ${PLAN_DAY_NAMES[k]}`}</div>
+      ${planRowsHTML(scope, k, planGet(scope, k), { editing:true })}
+      ${planEditorForm(scope, k)}
+    </div>
+    ${scope==="tpl" ? `<div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:8px">Copy ${PLAN_DAY_NAMES[k]} to\u2026</div>
+      <div class="seg" style="margin-bottom:0">
+        ${["SU","MO","TU","WE","TH","FR","SA"].filter(d=>d!==k).map(d=>`<button onclick="App.planCopyDow('${k}','${d}')">${PLAN_DAY_NAMES[d].slice(0,3)}</button>`).join("")}
+      </div>
+      <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">replaces that day's routine \u00B7 days you edited on the calendar keep their edits</div>
+    </div>` : ""}`;
+}
+
 function renderCalendar(){
   repairBirthdayEvents();
   collectNewEvents();
@@ -1975,7 +2156,10 @@ function renderCalendar(){
       </div>`;
     }
   }
-  return `${banner}${rankStrip}${todaySched}${eventsCard}<div class="card">
+  const planToday = planDayISO(new Date());
+  const planCard = data.settings.scheduleEnabled ? planCardHTML(planToday) : "";
+  const planSel = data.settings.scheduleEnabled && planDateFor(ui.selected) !== planToday ? planCardHTML(ui.selected) : "";
+  return `${planCard}${banner}${rankStrip}${todaySched}${eventsCard}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
@@ -1984,7 +2168,7 @@ function renderCalendar(){
       <div class="cal">${["S","M","T","W","T","F","S"].map(d=>`<div class="dow">${d}</div>`).join("")}${cells}</div>
       ${calendarLegend()}
     </div>
-    <div class="h2">${prettyDate(ui.selected)}</div>${detail}`;
+    <div class="h2">${prettyDate(ui.selected)}</div>${planSel}${detail}`;
 }
 const stat = (k,v)=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
 function cardioPaceStat(c){
@@ -2291,6 +2475,55 @@ function wahooMapWorkout(w){
     durationSec: round(dur), distanceMi: dist != null ? Math.round(dist / 1609.344 * 100) / 100 : 0,
     avgHr: round(n(s.heart_rate_avg)), avgPowerW: round(n(s.power_avg)), avgCadence: round(n(s.cadence_avg)),
     kcal: round(n(s.calories_accum)), source: "wahoo", fitUrl: (s.file && s.file.url) || null, typeKnown };
+}
+// ---- daily schedule (planner): pure helpers ----
+// the planner's day runs 4am → 4am so "1:00am bed" belongs to the evening before
+function planMin(t){
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(t ?? ""));
+  if (!m) return null;
+  const v = (+m[1]) * 60 + (+m[2]);
+  return v < 240 ? v + 1440 : v;
+}
+function planDayISO(now){
+  const d = new Date(now.getTime() - 4 * 3600 * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function planNowMin(now){
+  const v = now.getHours() * 60 + now.getMinutes();
+  return v < 240 ? v + 1440 : v;
+}
+function planSorted(blocks){
+  return [...(blocks || [])].filter(b => planMin(b.start) != null).sort((a, b) =>
+    (planMin(a.start) - planMin(b.start)) || ((a.end ? 1 : 0) - (b.end ? 1 : 0)));
+}
+const PLAN_DOW = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+function planResolve(p, iso){
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = PLAN_DOW[new Date(y, m - 1, d).getDay()];
+  const ov = p?.overrides?.[iso];
+  if (Array.isArray(ov)) return { source: "override", dow, blocks: planSorted(ov) };
+  const alt = p?.alt?.[dow];
+  if (p?.flags?.[iso]?.therapy && Array.isArray(alt) && alt.length) return { source: "therapy", dow, blocks: planSorted(alt) };
+  return { source: "template", dow, blocks: planSorted(p?.templates?.[dow] || []) };
+}
+function planTimeline(sorted, now){
+  let nextSeen = false;
+  const rows = sorted.map((b, i) => {
+    const s = planMin(b.start);
+    let e = b.end ? planMin(b.end) : null;
+    if (e != null && e <= s) e += 1440;
+    const implicitEnd = e ?? (i + 1 < sorted.length ? planMin(sorted[i + 1].start) : s + 30);
+    let state;
+    if (implicitEnd <= now) state = "past";
+    else if (s <= now && now < implicitEnd) state = "now";
+    else if (!nextSeen){ state = "next"; nextSeen = true; }
+    else state = "later";
+    const pct = state === "now" && e != null ? Math.round((now - s) / (e - s) * 100) : null;
+    return { ...b, s, e, state, pct };
+  });
+  let lineAt = rows.findIndex(r => r.s > now);
+  if (lineAt < 0) lineAt = rows.length;
+  return { rows, lineAt };
 }
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
@@ -3303,6 +3536,8 @@ function renderSettings(){
     <div class="lbl" style="margin-bottom:8px">Features</div>
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
     ${setRow("Pay tracker", "Log restaurant shifts & pay periods", !!s.payEnabled, "App.togglePayFeature()")}
+    ${setRow("Daily schedule", "Your routine for the day at the top of the calendar", !!s.scheduleEnabled, "App.toggleScheduleFeature()")}
+    ${s.scheduleEnabled?`<button onclick="App.tab('planner')" style="background:none;border:none;color:var(--cardio);font-size:12px;font-weight:700;cursor:pointer;padding:0 0 8px;font-family:var(--body)">Edit weekly schedule \u203A</button>`:""}
     ${setRow("School", "Classes, assignments, grades & study log", !!s.schoolEnabled, "App.toggleSchoolFeature()")}
     ${setRow("AI assistant", "Ask questions or add tasks by voice or text — replaces the title", !!s.aiEnabled, "App.toggleAiFeature()")}
   </div>
@@ -4048,7 +4283,7 @@ function afterRender(){
 
 // ================= actions =================
 window.App = {
-  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
+  tab(t){ if(t==="todo" && !data.settings.todoEnabled) return; if(t==="pay" && !data.settings.payEnabled) return; if(t==="school" && !data.settings.schoolEnabled) return; if(t==="planner" && !data.settings.scheduleEnabled) return; if(t==="planner"){ ui.planEdit=null; if(!ui.planDow){ const dw=PLAN_DOW[new Date().getDay()]; ui.planDow=dw; } } if(t==="school") ui.schoolTab="cal"; ui.tab=t; ui.confirmKey=null; if(t==="progress") ui.trendView=null; render(); },
   month(dir){ let {y,m}=ui.ym; m+=dir; if(m<0){m=11;y--;} if(m>11){m=0;y++;} ui.ym={y,m}; render(); },
   selDay(iso){ ui.selected=iso; ui.confirmKey=null; render(); },
   toggleLift(id){ ui.expandedLifts.has(id) ? ui.expandedLifts.delete(id) : ui.expandedLifts.add(id); render(); },
@@ -4362,6 +4597,52 @@ window.App = {
   delSchedule(id){ if(!confirmDel("sc-"+id))return; data.school.schedule = data.school.schedule.filter(x=>x.id!==id); save(); render(); },
   schoolGradeClass(id){ ui.schoolGradeClass = id; ui.gradingId = null; render(); },
   schoolShowDone(v){ ui.schoolShowDone = v; render(); },
+  toggleScheduleFeature(){
+    data.settings.scheduleEnabled = !data.settings.scheduleEnabled;
+    if (data.settings.scheduleEnabled){
+      const p = planner();
+      if (!p.seeded && !Object.keys(p.templates).length && /^landon\b/i.test(String(data.crew?.name||"").trim())){ Object.assign(p, planSeed()); }
+      p.seeded = true;
+    } else if (ui.tab==="planner") ui.tab = "settings";
+    save(); render();
+  },
+  planLoadSample(){ const p = planner(); const sd = planSeed(); p.templates = sd.templates; p.alt = sd.alt; p.seeded = true; save(); toast("Loaded \u2713"); render(); },
+  planPickDow(d){ ui.planDow = d; ui.planEdit = null; ui.confirmKey = null; render(); },
+  planTogglePast(){ ui.planShowPast = !ui.planShowPast; render(); },
+  planEditToggle(iso){ ui.planEditDay = ui.planEditDay === iso ? null : iso; ui.planEdit = null; ui.confirmKey = null; render(); },
+  planEditSlot(scope, key, id){ ui.planEdit = { scope, key, id }; render(); setTimeout(()=>{ const f=$("#plTitle"); if(f){ f.scrollIntoView({block:"center"}); } }, 0); },
+  planCancelEdit(){ ui.planEdit = null; render(); },
+  planSaveSlot(scope, key){
+    const start = $("#plStart")?.value || "", end = $("#plEnd")?.value || "";
+    const title = ($("#plTitle")?.value || "").trim(), note = ($("#plNote")?.value || "").trim();
+    if (!start){ toast("Pick a start time", true); return; }
+    if (!title){ toast("Say what's happening", true); return; }
+    const blocks = planGet(scope, key).map(b=>({...b}));
+    const ed = ui.planEdit && ui.planEdit.scope===scope && ui.planEdit.key===key ? ui.planEdit : null;
+    const hit = ed?.id ? blocks.find(b=>b.id===ed.id) : null;
+    if (hit) Object.assign(hit, { start, end, title, note });
+    else blocks.push({ id: uid(), start, end, title, note });
+    planSet(scope, key, planSorted(blocks));
+    ui.planEdit = null; save(); render();
+  },
+  planDelSlot(scope, key, id){
+    if (!confirmDel("pl-"+id)) return;
+    planSet(scope, key, planGet(scope, key).filter(b=>b.id!==id).map(b=>({...b})));
+    if (ui.planEdit?.id === id) ui.planEdit = null;
+    save(); render();
+  },
+  planResetDay(iso){ delete planner().overrides[iso]; ui.planEdit = null; save(); toast("Back to the weekly routine"); render(); },
+  planSetTherapy(iso, on){
+    const p = planner();
+    if (on) p.flags[iso] = { ...(p.flags[iso]||{}), therapy: true };
+    else delete p.flags[iso];
+    save(); render();
+  },
+  planCopyDow(from, to){
+    const p = planner();
+    p.templates[to] = planGet("tpl", from).map(b=>({ ...b, id: uid() }));
+    save(); toast(`Copied to ${PLAN_DAY_NAMES[to]} \u2713`); render();
+  },
   toggleSchoolFeature(){
     data.settings.schoolEnabled = !data.settings.schoolEnabled;
     if (!data.settings.schoolEnabled && ui.tab==="school") ui.tab = "settings";
