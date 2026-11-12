@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 89;
+const APP_VERSION = 90;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -249,6 +249,7 @@ if (typeof data.settings.todoEnabled === "undefined") data.settings.todoEnabled 
 if (typeof data.settings.payEnabled === "undefined") data.settings.payEnabled = false;
 if (typeof data.settings.schoolEnabled === "undefined") data.settings.schoolEnabled = false;
 if (typeof data.settings.scheduleEnabled === "undefined") data.settings.scheduleEnabled = false;
+if (typeof data.settings.programEnabled === "undefined") data.settings.programEnabled = false;
 if (!SPLIT_STYLES[data.settings.splitStyle]) data.settings.splitStyle = "ppl";
 if (!data.school || typeof data.school !== "object" || Array.isArray(data.school)) data.school = { classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] };
 for (const k of ["classes","tasks","dates","sessions","assignments","schedule"]) if (!Array.isArray(data.school[k])) data.school[k] = [];
@@ -1746,6 +1747,7 @@ const ui = {
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
+  liftMode: null, progEditing: false, restEnd: null,
   planEdit: null, planEditDay: null, planShowPast: false, planDow: null,
 };
 
@@ -2159,7 +2161,7 @@ function renderCalendar(){
   const planToday = planDayISO(new Date());
   const planCard = data.settings.scheduleEnabled ? planCardHTML(planToday) : "";
   const planSel = data.settings.scheduleEnabled && planDateFor(ui.selected) !== planToday ? planCardHTML(ui.selected) : "";
-  return `${planCard}${banner}${rankStrip}${todaySched}${eventsCard}<div class="card">
+  return `${planCard}${progCalendarCardHTML()}${banner}${rankStrip}${todaySched}${eventsCard}<div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
         <button onclick="App.month(-1)" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 10px">‹</button>
         <div class="h2" style="margin:0">${monthName}</div>
@@ -2210,7 +2212,180 @@ function lastPerfHTML(name){
     <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:2px">${lines.join("<br>")}</div>
   </div>`;
 }
+// ================= strength program (UI) =================
+const PROG_REST = { main: 180, pull: 120, neg: 60, acc: 90 };
+const PROG_BW = new Set(["Ab Wheel"]);
+function progFmtW(w){ return w == null || w === "" ? "?" : String(+w); }
+function progTargetText(it){
+  if (it.kind === "main") return `3 × ${it.target} @ ${progFmtW(it.sets[0].w)} lb`;
+  if (it.kind === "pull") return `${it.sets.length} sets: ${it.sets.map(s=>s.r).join(" · ")} reps${it.added ? ` with +${it.added} lb` : ""}`;
+  if (it.kind === "neg") return `3 slow negatives · ${it.note}`;
+  return `${it.sets.length} × ${it.lo}–${it.hi}${PROG_BW.has(it.name) ? "" : ` @ ${it.sets[0].w == null ? "pick a weight" : progFmtW(it.sets[0].w) + " lb"}`}`;
+}
+function progAnalysisHTML(a){
+  const line = (label, x, reps) => x
+    ? `<div style="padding:7px 0;border-bottom:1px solid var(--grid)"><b>${label}</b> — best ${x.best.weight}×${x.best.reps} on ${shortDate(x.best.date)} (est. max ${x.best.e1rm})<br>
+       <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${x.weeksSinceBest} wk since that set · last done ${shortDate(x.last)} → start 3×5 @ ${x.heavy}, 3×8 @ ${x.volume}</span></div>`
+    : `<div style="padding:7px 0;border-bottom:1px solid var(--grid)"><b>${label}</b> — no logged sets yet. Start light and let the first week feel easy.</div>`;
+  return `<div style="font-size:13px;line-height:1.45">
+    <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:4px">${a.workouts} workouts in your log</div>
+    ${line("Bench", a.bench)}${line("Squat", a.squat)}
+    <div style="padding:7px 0"><b>Pull-ups</b> — ${a.pullup ? `best ${a.pullup.bestReps} bodyweight reps in a set (last ${shortDate(a.pullup.last)})` : "none logged yet"}</div>
+  </div>`;
+}
+function progSetupHTML(editing){
+  const a = progAnalyze(data.lifts, todayISO());
+  const p = data.program || {};
+  const v = (k, fb) => editing ? p.main?.[k]?.w : fb;
+  const accNames = Object.keys(PROG_ACC).filter(n => !PROG_BW.has(n));
+  const pullMax = editing ? Math.max(...(p.pull?.reps || [2])) : Math.min(4, a.pullup?.bestReps || 3);
+  const inp = (id, val, ph) => `<input id="${id}" type="number" inputmode="decimal" value="${val ?? ""}" placeholder="${ph}" style="font-family:var(--mono)">`;
+  return `${editing ? "" : `<div class="card"><div class="lbl" style="margin-bottom:6px">What your log says</div>${progAnalysisHTML(a)}</div>`}
+  <div class="card">
+    <div class="lbl" style="margin-bottom:8px">${editing ? "Adjust working weights" : "Starting weights"}</div>
+    <div style="font-size:12px;color:var(--sub);margin-bottom:10px;line-height:1.45">${editing ? "Change any number; the rotation and your history stay put." : "Filled in from your log, backed off for time away. The first two weeks should feel easy — that's on purpose."}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 10px">
+      <label><span class="lbl">Bench 3×5 (heavy)</span>${inp("pgBenchH", v("benchH", a.bench?.heavy ?? 95), "95")}</label>
+      <label><span class="lbl">Bench 3×8</span>${inp("pgBenchV", v("benchV", a.bench?.volume ?? 85), "85")}</label>
+      <label><span class="lbl">Squat 3×5 (heavy)</span>${inp("pgSquatH", v("squatH", a.squat?.heavy ?? 115), "115")}</label>
+      <label><span class="lbl">Squat 3×8</span>${inp("pgSquatV", v("squatV", a.squat?.volume ?? 95), "95")}</label>
+      <label style="grid-column:1/-1"><span class="lbl">Strict pull-ups you can do right now (max)</span>${inp("pgPull", pullMax, "3")}</label>
+    </div>
+  </div>
+  <div class="card">
+    <div class="lbl" style="margin-bottom:8px">Accessory weights (lb)</div>
+    <div style="font-size:12px;color:var(--sub);margin-bottom:10px">Leave blank if you're not sure — you'll set it on the first set and the app remembers.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 10px">
+      ${accNames.map((n,i)=>`<label><span class="lbl">${esc(n)}</span>${inp("pgAcc"+i, editing ? p.acc?.[n]?.w : a.acc[n], "")}</label>`).join("")}
+    </div>
+  </div>
+  <button class="btn ink" onclick="App.progSaveSetup(${editing ? "true" : "false"})">${editing ? "Save weights" : "Start the program"}</button>
+  ${editing ? `<button class="btn" style="margin-top:8px;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.progEditDone()">Cancel</button>` : ""}`;
+}
+function progNextBlurb(p){
+  const s = progSession(p, p.next);
+  const m = s.items[0];
+  return `${s.name} · ${m.name} 3×${m.target} @ ${progFmtW(m.sets[0].w)}`;
+}
+function progCalendarCardHTML(){
+  const p = data.program;
+  if (!data.settings.programEnabled || !p?.main) return "";
+  const live = p.live;
+  const doneToday = (p.log || []).some(l => l.date === todayISO());
+  return `<div class="card" style="padding:12px 14px;border-left:4px solid var(--push)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div style="min-width:0">
+        <div class="lbl" style="margin:0">${live ? "Workout in progress" : doneToday ? "Lifted today ✓ · next up" : "Next lift"}</div>
+        <div style="font-size:14px;font-weight:700;margin-top:3px">${esc(live ? `${PROG_DAYS[live.day].name} · ${progDoneCount(live)}/${progSetCount(live)} sets` : progNextBlurb(p))}</div>
+      </div>
+      <button class="btn ink" style="width:auto;padding:9px 14px;flex:none" onclick="App.progOpen()">${live ? "Resume" : "Start"}</button>
+    </div>
+  </div>`;
+}
+const progSetCount = live => live.items.reduce((n, it) => n + it.sets.length, 0);
+const progDoneCount = live => live.items.reduce((n, it) => n + it.sets.filter(s => s.done).length, 0);
+function progLiveHTML(){
+  const live = data.program.live;
+  const D = PROG_DAYS[live.day];
+  let h = `<div class="card" style="padding:12px 14px;border-top:3px solid var(--push)">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <div class="h2" style="margin:0">${D.name} <span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${D.sub}</span></div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--sub)" id="pgCount">${progDoneCount(live)}/${progSetCount(live)}</div>
+    </div>
+    <div style="font-size:12px;color:var(--sub);margin-top:4px">Tap the box when a set is done. Did different reps or weight? Change the number first.</div>
+  </div>`;
+  live.items.forEach((it, ii) => {
+    const allDone = it.sets.every(s => s.done);
+    h += `<div class="card" style="padding:12px 14px;${allDone ? "opacity:.6;" : ""}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+        <div style="font-size:15px;font-weight:800">${allDone ? "✓ " : ""}${esc(it.name)}</div>
+        ${it.kind === "main" ? `<span style="font-family:var(--mono);font-size:10px;color:var(--push);font-weight:700">MAIN LIFT</span>` : ""}
+      </div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin:3px 0 8px">${esc(progTargetText(it))}</div>
+      ${it.kind === "main" ? `<div style="font-size:12px;color:var(--sub);margin-bottom:8px">Warm-up: ${progWarmup(+it.sets[0].w || 45).map(x=>`${x.w}×${x.r}`).join(", ")}</div>` : ""}
+      ${it.sets.map((s, si) => `<div class="pgset" style="display:grid;grid-template-columns:44px 34px 1fr 14px 1fr;gap:8px;align-items:center;margin-bottom:6px">
+        <button class="pgchk" data-done="${s.done ? 1 : 0}" onclick="App.progCheck(${ii},${si})" aria-label="${esc(it.name)} set ${si + 1}"
+          style="width:44px;height:40px;border-radius:9px;border:2px solid ${s.done ? "#2B8A3E" : "var(--line)"};background:${s.done ? "#2B8A3E" : "transparent"};color:#fff;font-size:20px;font-weight:800;cursor:pointer">${s.done ? "✓" : ""}</button>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">S${si + 1}</span>
+        ${it.kind === "neg" || PROG_BW.has(it.name) || (it.kind === "pull" && !it.added) ? `<span style="font-family:var(--mono);font-size:12px;color:var(--sub)">body wt</span>` :
+          `<input id="pgw-${ii}-${si}" type="number" inputmode="decimal" value="${s.w ?? ""}" placeholder="lb" oninput="App.progSet(${ii},${si},'w',this.value)" style="padding:8px;font-family:var(--mono)">`}
+        <span style="text-align:center;color:var(--sub)">×</span>
+        <input type="number" inputmode="numeric" value="${s.r}" oninput="App.progSet(${ii},${si},'r',this.value)" style="padding:8px;font-family:var(--mono)">
+      </div>`).join("")}
+    </div>`;
+  });
+  h += `<button class="btn" style="background:var(--push);color:#fff" onclick="App.progFinish()">Finish workout</button>
+    <div style="text-align:center;margin-top:8px">${delBtn("pg-abandon", "App.progAbandon()", "discard this session")}</div>
+    <div id="restBar" style="display:none;position:fixed;left:12px;right:12px;bottom:150px;z-index:30;background:var(--ink);color:#fff;border-radius:12px;padding:12px 14px;font-family:var(--mono);font-size:15px;font-weight:700;box-shadow:0 6px 20px rgba(0,0,0,.25);justify-content:space-between;align-items:center"></div>`;
+  return h;
+}
+function progOverviewHTML(){
+  const p = data.program;
+  const s = progSession(p, p.next);
+  const last = (p.log || [])[p.log.length - 1];
+  const wk = (p.log || []).filter(l => progDaysBetween(l.date, todayISO()) < 7).length;
+  return `<div class="card" style="padding:14px;border-top:3px solid var(--push)">
+      <div class="lbl" style="margin:0">Next session</div>
+      <div class="h2" style="margin:4px 0 2px">${s.name} <span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${s.sub}</span></div>
+      <div style="font-size:13px;line-height:1.6;margin:6px 0 12px">${s.items.map(it => `<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(it.name)}</span><span style="font-family:var(--mono);font-size:12px;color:var(--sub);text-align:right">${esc(progTargetText(it).replace(/^3 slow negatives · .*/, "3 slow negatives"))}</span></div>`).join("")}</div>
+      <button class="btn ink" onclick="App.progStart()">Start ${s.name}</button>
+      <div style="display:flex;justify-content:space-between;margin-top:8px">
+        <button class="linkbtn" style="font-size:12px;padding:4px 0;color:var(--sub)" onclick="App.progSkip()">skip to ${PROG_DAYS[PROG_ORDER[(PROG_ORDER.indexOf(p.next) + 1) % 4]].name} ›</button>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--sub);padding-top:6px">${wk}/4 this week</span>
+      </div>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:8px">Rotation · aim for Mon / Tue / Thu / Sat</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+        ${PROG_ORDER.map(k => `<div style="border:1px solid ${k===p.next?"var(--push)":"var(--line)"};background:${k===p.next?"rgba(232,89,12,.08)":"transparent"};border-radius:8px;padding:7px 4px;text-align:center">
+          <div style="font-size:12px;font-weight:800">${PROG_DAYS[k].name}</div><div style="font-family:var(--mono);font-size:10px;color:var(--sub)">${PROG_DAYS[k].sub}</div></div>`).join("")}
+      </div>
+      <div style="font-size:12px;color:var(--sub);margin-top:8px;line-height:1.45">Miss a day? Nothing breaks — you just do the next one in line.</div>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:6px">Where you're at</div>
+      ${[["Bench 3×5","benchH"],["Bench 3×8","benchV"],["Squat 3×5","squatH"],["Squat 3×8","squatV"]].map(([l,k]) => `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--grid);font-size:13px"><span>${l}</span><span style="font-family:var(--mono)">${p.main[k].w} lb${p.main[k].fails ? ` <span style="color:#E8590C">· retry</span>` : ""}</span></div>`).join("")}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;font-size:13px"><span>Pull-ups</span><span style="font-family:var(--mono)">${p.pull.reps.join("·")} (${p.pull.reps.reduce((a,b)=>a+b,0)} reps)${p.pull.added ? ` +${p.pull.added} lb` : ""}</span></div>
+      <button class="linkbtn" style="font-size:12px;padding:6px 0 0" onclick="App.progEdit()">adjust weights ›</button>
+    </div>
+    ${last ? `<div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:6px">Last session · ${PROG_DAYS[last.day].name} · ${shortDate(last.date)}</div>
+      ${last.changes.map(c => `<div style="font-size:13px;padding:3px 0">${esc(c)}</div>`).join("")}
+    </div>` : ""}
+    <div class="card" style="padding:12px 14px;font-size:12px;color:var(--sub);line-height:1.5">
+      <b style="color:var(--ink)">How it moves:</b> hit every rep on bench or squat and next time is +5 lb (squat +10 until your first miss). Miss and you repeat the weight; miss twice in a row and it drops 10% to rebuild. Pull-ups add one rep per session until 30 total, then you add weight. Accessories: hit the top of the rep range on every set and the weight goes up.
+    </div>`;
+}
+function renderProgram(){
+  const p = data.program;
+  if (ui.progEditing && p?.main) return progSetupHTML(true);
+  if (!p?.main) return progSetupHTML(false);
+  if (p.live) return progLiveHTML();
+  return progOverviewHTML();
+}
+// rest timer (updates its own bar; never re-renders the page)
+setInterval(() => {
+  const bar = document.getElementById("restBar");
+  if (!bar) return;
+  if (!ui.restEnd){ bar.style.display = "none"; return; }
+  const left = Math.round((ui.restEnd - Date.now()) / 1000);
+  if (left <= 0){
+    ui.restEnd = null; bar.style.display = "none";
+    try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch(e){}
+    toast("Rest's up — next set");
+    return;
+  }
+  bar.style.display = "flex";
+  bar.innerHTML = `<span>Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}</span><button onclick="App.progRestSkip()" style="background:none;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:8px;padding:4px 10px;font-family:var(--mono);cursor:pointer">skip</button>`;
+}, 1000);
+
+function liftModeSeg(){
+  if (!data.settings.programEnabled) return "";
+  const m = ui.liftMode === "free" ? "free" : "program";
+  return `<div class="seg" style="margin-bottom:12px"><button class="${m==="program"?"on":""}" onclick="App.liftMode('program')">Program</button><button class="${m==="free"?"on":""}" onclick="App.liftMode('free')">Log freely</button></div>`;
+}
 function renderLift(){
+  if (data.settings.programEnabled && ui.liftMode !== "free") return liftModeSeg() + renderProgram();
   const d = ui.draft;
   const restoreNote = ui.draftRestored && d.exercises.length ? `<div class="card" style="background:#FFF8E6;border-color:#E0C878">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
@@ -2218,7 +2393,7 @@ function renderLift(){
       <button style="background:none;border:none;color:#7a5c00;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" onclick="App.dismissRestore()">got it</button>
     </div>
   </div>` : "";
-  let html = `<div class="card"><div class="lbl">Date</div>
+  let html = liftModeSeg() + `<div class="card"><div class="lbl">Date</div>
     <input type="date" value="${d.date}" onchange="App.draftDate(this.value)"></div>
     <div class="card"><div class="lbl">Split</div>
       <div class="seg" style="margin-bottom:0">
@@ -2524,6 +2699,116 @@ function planTimeline(sorted, now){
   let lineAt = rows.findIndex(r => r.s > now);
   if (lineAt < 0) lineAt = rows.length;
   return { rows, lineAt };
+}
+// ---- strength program (progressive overload): pure helpers ----
+function progE1RM(w, r){ return r <= 1 ? w : w * (1 + r / 30); }
+function progRound5(x){ return Math.max(45, Math.round(x / 5) * 5); }
+const PROG_MATCH = {
+  bench: /^(barbell )?(flat )?bench( press)?$/i,
+  squat: /^(barbell |back |high[- ]bar |low[- ]bar )?squats?$/i,
+  pullup: /^(strict |weighted )?(pull[- ]?ups?|chin[- ]?ups?)$/i,
+};
+const PROG_ACC = {
+  "Barbell Row": [3, 8, 12], "Tricep Pushdown": [3, 10, 15],
+  "Bulgarian Split Squat": [3, 8, 12], "Leg Curl": [3, 10, 15], "Calf Raise": [3, 10, 15],
+  "Dumbbell Shoulder Press": [3, 8, 12], "Lat Pulldown": [3, 8, 12], "Dumbbell Curl": [3, 10, 15],
+  "Leg Press": [3, 10, 15], "Leg Extension": [3, 10, 15], "Ab Wheel": [3, 8, 12],
+};
+const PROG_DAYS = {
+  UA: { name: "Upper A", sub: "heavy bench", split: "upper", main: "benchH", reps: 5, pull: true, acc: ["Barbell Row", "Tricep Pushdown"] },
+  LA: { name: "Lower A", sub: "heavy squat", split: "lower", main: "squatH", reps: 5, pull: false, acc: ["Bulgarian Split Squat", "Leg Curl", "Calf Raise"] },
+  UB: { name: "Upper B", sub: "volume bench", split: "upper", main: "benchV", reps: 8, pull: true, acc: ["Dumbbell Shoulder Press", "Lat Pulldown", "Dumbbell Curl"] },
+  LB: { name: "Lower B", sub: "volume squat", split: "lower", main: "squatV", reps: 8, pull: false, acc: ["Leg Press", "Leg Extension", "Ab Wheel"] },
+};
+const PROG_ORDER = ["UA", "LA", "UB", "LB"];
+function progDaysBetween(a, b){
+  const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+// read every logged lift and suggest where to restart each movement
+function progAnalyze(lifts, today){
+  const sets = { bench: [], squat: [], pullup: [] };
+  const acc = {};
+  const dates = new Set();
+  for (const w of lifts || []){
+    if (w?.date) dates.add(w.id || w.date);
+    for (const ex of w?.exercises || []){
+      const name = String(ex.name || "").trim();
+      for (const s of ex.sets || []){
+        const weight = +s.weight || 0, reps = +s.reps || 0;
+        if (reps <= 0) continue;
+        for (const k of Object.keys(PROG_MATCH)) if (PROG_MATCH[k].test(name)) sets[k].push({ weight, reps, date: w.date });
+        if (PROG_ACC[name] && weight > 0) acc[name] = Math.max(acc[name] || 0, weight);
+      }
+    }
+  }
+  const barbell = list => {
+    const ok = list.filter(s => s.weight > 0 && s.reps <= 15);
+    if (!ok.length) return null;
+    let best = ok[0];
+    for (const s of ok) if (progE1RM(s.weight, s.reps) > progE1RM(best.weight, best.reps)) best = s;
+    const last = ok.reduce((m, s) => s.date > m ? s.date : m, ok[0].date);
+    const e1 = progE1RM(best.weight, best.reps);
+    const weeksSinceBest = progDaysBetween(best.date, today) / 7;
+    const f = weeksSinceBest <= 3 ? 0.9 : weeksSinceBest <= 12 ? 0.8 : 0.7;
+    const recent = ok.filter(s => progDaysBetween(s.date, today) <= 42);
+    const recentE1 = recent.length ? Math.max(...recent.map(s => progE1RM(s.weight, s.reps))) : 0;
+    const pick = (repDiv) => Math.max(e1 * f, recentE1 * 0.9) / repDiv;
+    return { best: { ...best, e1rm: Math.round(e1) }, last, weeksSinceBest: Math.round(weeksSinceBest),
+      heavy: progRound5(pick(1 + 5 / 30)), volume: progRound5(pick(1 + 8 / 30)) };
+  };
+  const bw = sets.pullup.filter(s => s.weight === 0);
+  return {
+    workouts: dates.size,
+    bench: barbell(sets.bench), squat: barbell(sets.squat),
+    pullup: bw.length ? { bestReps: Math.max(...bw.map(s => s.reps)), last: bw.reduce((m, s) => s.date > m ? s.date : m, bw[0].date) } : null,
+    acc,
+  };
+}
+function progNextMain(st, done, target){
+  const ok = done.length > 0 && done.every(r => r >= target);
+  if (ok) return { ...st, w: st.w + st.inc, fails: 0 };
+  if ((st.fails || 0) + 1 >= 2) return { ...st, w: progRound5(st.w * 0.9), fails: 0, inc: 5 };
+  return { ...st, fails: (st.fails || 0) + 1, inc: 5 };
+}
+function progNextPull(st, done){
+  const ok = st.reps.every((t, i) => (done[i] || 0) >= t);
+  if (!ok) return { ...st, reps: [...st.reps] };
+  if (st.added > 0) return { reps: [...st.reps], added: st.added + 5 };
+  const reps = [...st.reps];
+  const lo = Math.min(...reps);
+  reps[reps.indexOf(lo)] += 1;
+  if (reps.reduce((a, b) => a + b, 0) >= 30) return { reps: [5, 5, 5], added: 5 };
+  return { reps, added: 0 };
+}
+function progNextAcc(st, done, lo, hi, inc){
+  if (st.w == null) return { ...st };
+  return done.length && done.every(r => r >= hi) ? { ...st, w: st.w + inc } : { ...st };
+}
+function progWarmup(w){
+  const out = [{ w: 45, r: 10 }];
+  for (const [pct, r] of [[0.5, 5], [0.7, 3], [0.85, 1]]){
+    const x = Math.round(w * pct / 5) * 5;
+    if (x > out[out.length - 1].w && x < w) out.push({ w: x, r });
+  }
+  return out;
+}
+function progSession(prog, day){
+  const D = PROG_DAYS[day];
+  const lift = D.main.startsWith("bench") ? "Bench Press" : "Squat";
+  const m = prog.main[D.main];
+  const items = [{ key: D.main, kind: "main", name: lift, target: D.reps, sets: [0, 1, 2].map(() => ({ w: m.w, r: D.reps, done: false })) }];
+  if (D.pull){
+    items.push({ key: "pull", kind: "pull", name: "Pull-Up", added: prog.pull.added,
+      sets: prog.pull.reps.map(r => ({ w: prog.pull.added, r, done: false })) });
+    if (!prog.pull.added) items.push({ key: "neg", kind: "neg", name: "Pull-up negatives", note: "5 seconds down, step back up", sets: [0, 1, 2].map(() => ({ w: 0, r: 1, done: false })) });
+  }
+  for (const name of D.acc){
+    const [n, lo, hi] = PROG_ACC[name];
+    const w = prog.acc?.[name]?.w ?? null;
+    items.push({ key: name, kind: "acc", name, lo, hi, sets: Array.from({ length: n }, () => ({ w, r: lo, done: false })) });
+  }
+  return { day, name: D.name, sub: D.sub, split: D.split, items };
 }
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
@@ -3536,6 +3821,7 @@ function renderSettings(){
     <div class="lbl" style="margin-bottom:8px">Features</div>
     ${setRow("To-do list", "Checklist button in the top bar", !!s.todoEnabled, "App.toggleTodoFeature()")}
     ${setRow("Pay tracker", "Log restaurant shifts & pay periods", !!s.payEnabled, "App.togglePayFeature()")}
+    ${setRow("Strength program", "Bench, squat & pull-up plan with checkboxes and automatic progression", !!s.programEnabled, "App.toggleProgramFeature()")}
     ${setRow("Daily schedule", "Your routine for the day at the top of the calendar", !!s.scheduleEnabled, "App.toggleScheduleFeature()")}
     ${s.scheduleEnabled?`<button onclick="App.tab('planner')" style="background:none;border:none;color:var(--cardio);font-size:12px;font-weight:700;cursor:pointer;padding:0 0 8px;font-family:var(--body)">Edit weekly schedule \u203A</button>`:""}
     ${setRow("School", "Classes, assignments, grades & study log", !!s.schoolEnabled, "App.toggleSchoolFeature()")}
@@ -4597,6 +4883,108 @@ window.App = {
   delSchedule(id){ if(!confirmDel("sc-"+id))return; data.school.schedule = data.school.schedule.filter(x=>x.id!==id); save(); render(); },
   schoolGradeClass(id){ ui.schoolGradeClass = id; ui.gradingId = null; render(); },
   schoolShowDone(v){ ui.schoolShowDone = v; render(); },
+  // strength program
+  toggleProgramFeature(){ data.settings.programEnabled = !data.settings.programEnabled; save(); render(); },
+  liftMode(m){ ui.liftMode = m; render(); },
+  progOpen(){ ui.tab = "lift"; ui.liftMode = "program"; ui.progEditing = false; render(); window.scrollTo(0, 0); },
+  progEdit(){ ui.progEditing = true; render(); window.scrollTo(0, 0); },
+  progEditDone(){ ui.progEditing = false; render(); },
+  progSaveSetup(editing){
+    const num = id => { const v = $("#" + id)?.value; return v === "" || v == null ? null : +v; };
+    const W = { benchH: num("pgBenchH"), benchV: num("pgBenchV"), squatH: num("pgSquatH"), squatV: num("pgSquatV") };
+    if (Object.values(W).some(v => !(v > 0))){ toast("Fill in all four bench/squat weights", true); return; }
+    const pullMax = Math.max(1, num("pgPull") || 1);
+    const accNames = Object.keys(PROG_ACC).filter(n => !PROG_BW.has(n));
+    const acc = {};
+    accNames.forEach((n, i) => { const v = num("pgAcc" + i); acc[n] = { w: v > 0 ? v : null }; });
+    for (const n of PROG_BW) acc[n] = { w: 0 };
+    const old = data.program || {};
+    const main = {};
+    for (const k of Object.keys(W)){
+      const prev = old.main?.[k];
+      const inc = prev ? prev.inc : (k === "squatH" ? 10 : 5);
+      main[k] = { w: W[k], fails: prev && prev.w === W[k] ? prev.fails : 0, inc };
+    }
+    const perSet = Math.max(1, Math.round(pullMax * 0.6));
+    const oldMax = old.pull ? Math.max(...old.pull.reps) : null;
+    const pull = editing && old.pull && oldMax === pullMax ? old.pull : { reps: [perSet, perSet, perSet, perSet, perSet], added: 0 };
+    if (editing){
+      Object.assign(data.program, { main, pull, acc });
+      ui.progEditing = false; save(); toast("Weights updated ✓"); render(); return;
+    }
+    data.program = { startedAt: todayISO(), next: "UA", main, pull, acc, log: [], live: null };
+    data.settings.splitStyle = "ul";
+    save(); toast("Program ready — Upper A is first"); render(); window.scrollTo(0, 0);
+  },
+  progStart(){
+    const p = data.program;
+    p.live = { day: p.next, date: todayISO(), items: progSession(p, p.next).items };
+    ui.restEnd = null; save(); render(); window.scrollTo(0, 0);
+  },
+  progCheck(ii, si){
+    const live = data.program?.live; if (!live) return;
+    const it = live.items[ii], s = it.sets[si];
+    s.done = !s.done;
+    if (s.done && progDoneCount(live) < progSetCount(live)) ui.restEnd = Date.now() + PROG_REST[it.kind] * 1000;
+    else if (!s.done) ui.restEnd = null;
+    save(); render();
+  },
+  progSet(ii, si, f, v){
+    const live = data.program?.live; if (!live) return;
+    const it = live.items[ii];
+    const val = v === "" ? (f === "w" ? null : 0) : +v;
+    const before = it.sets[si][f];
+    it.sets[si][f] = val;
+    // changing a weight carries to the later sets you haven't done yet
+    if (f === "w") for (let j = si + 1; j < it.sets.length; j++) if (!it.sets[j].done && it.sets[j].w === before){ it.sets[j].w = val; const el = $(`#pgw-${ii}-${j}`); if (el) el.value = val ?? ""; }
+    save();
+  },
+  progRestSkip(){ ui.restEnd = null; const b = $("#restBar"); if (b) b.style.display = "none"; },
+  progAbandon(){
+    if (!confirmDel("pg-abandon")) return;
+    data.program.live = null; ui.restEnd = null; save(); toast("Session discarded"); render();
+  },
+  progSkip(){
+    const p = data.program;
+    p.next = PROG_ORDER[(PROG_ORDER.indexOf(p.next) + 1) % 4];
+    save(); render();
+  },
+  progFinish(){
+    const p = data.program, live = p?.live; if (!live) return;
+    if (!progDoneCount(live)){ toast("Check off at least one set first", true); return; }
+    const changes = [], exercises = [];
+    for (const it of live.items){
+      const done = it.sets.filter(s => s.done);
+      const reps = it.sets.map(s => s.done ? (+s.r || 0) : 0);
+      if (done.length) exercises.push({ name: it.kind === "neg" ? "Pull-Up Negative" : it.name, ss: false,
+        sets: done.map(s => ({ weight: +s.w || 0, reps: +s.r || 0, rpe: null, drop: false })) });
+      if (it.kind === "main"){
+        const st = { ...p.main[it.key] };
+        if (done.length) st.w = Math.min(...done.map(s => +s.w || st.w));
+        const nx = progNextMain(st, reps, it.target);
+        p.main[it.key] = nx;
+        changes.push(nx.w > st.w ? `✓ ${it.name} ${st.w} → ${nx.w} lb next time`
+          : nx.w < st.w ? `${it.name}: two misses in a row — reset to ${nx.w} lb to rebuild`
+          : `${it.name}: missed reps at ${st.w} — same weight next time`);
+      } else if (it.kind === "pull"){
+        const nx = progNextPull(p.pull, reps);
+        const hit = JSON.stringify(nx) !== JSON.stringify(p.pull);
+        p.pull = nx;
+        changes.push(hit ? `✓ Pull-ups → next: ${nx.reps.join("·")}${nx.added ? ` with +${nx.added} lb` : ""}` : `Pull-ups: repeat ${nx.reps.join("·")} next time`);
+      } else if (it.kind === "acc" && done.length){
+        const bw = PROG_BW.has(it.name);
+        const used = bw ? 0 : Math.max(...done.map(s => +s.w || 0)) || null;
+        const nx = progNextAcc({ w: used }, reps, it.lo, it.hi, bw ? 0 : 5);
+        p.acc[it.name] = nx;
+        if (!bw && nx.w != null && nx.w > used) changes.push(`✓ ${it.name} → ${nx.w} lb next time`);
+      }
+    }
+    data.lifts.push({ id: uid(), date: live.date, split: PROG_DAYS[live.day].split, exercises, notes: `Program · ${PROG_DAYS[live.day].name}`, program: live.day });
+    p.log = [...(p.log || []), { date: live.date, day: live.day, changes }].slice(-60);
+    p.next = PROG_ORDER[(PROG_ORDER.indexOf(live.day) + 1) % 4];
+    p.live = null; ui.restEnd = null;
+    save(); toast("Workout saved ✓"); render(); window.scrollTo(0, 0);
+  },
   toggleScheduleFeature(){
     data.settings.scheduleEnabled = !data.settings.scheduleEnabled;
     if (data.settings.scheduleEnabled){

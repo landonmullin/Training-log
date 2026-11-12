@@ -878,6 +878,126 @@ def schedule_builder_edits_weekday_template(pw, url):
         pg.click("button.del >> nth=0"); pg.click("button.del >> nth=0")
         assert len(stored(pg)["planner"]["templates"]["TU"]) == 1
 
+
+import datetime as _dt
+def _ago(days): return (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+def _prog_seed(**settings):
+    d = base(settings={"kcalTarget": 2400, "proteinTarget": 180, **settings})
+    d["lifts"] = [
+        {"id": "h1", "date": _ago(200), "split": "push", "notes": "", "exercises": [
+            {"name": "Bench Press", "sets": [{"weight": 185, "reps": 5}, {"weight": 185, "reps": 5}]},
+            {"name": "Barbell Row", "sets": [{"weight": 115, "reps": 10}]}]},
+        {"id": "h2", "date": _ago(190), "split": "legs", "notes": "", "exercises": [
+            {"name": "Squat", "sets": [{"weight": 225, "reps": 5}]},
+            {"name": "Pull-Up", "sets": [{"weight": 0, "reps": 3}]}]},
+    ]
+    return d
+
+@test
+def program_off_by_default(pw, url):
+    with app(pw, url, _prog_seed()) as pg:
+        pg.evaluate("App.tab('lift')")
+        assert pg.locator("text=Log freely").count() == 0
+        assert pg.locator("text=+ Add movement").count() == 1
+        pg.evaluate("App.tab('calendar')")
+        assert pg.locator("text=Next lift").count() == 0
+
+@test
+def program_setup_reads_history(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')")
+        txt = pg.inner_text("#view")
+        assert "best 185×5" in txt and "best 225×5" in txt and "best 3 bodyweight reps" in txt, txt[:600]
+        assert pg.input_value("#pgBenchH") == "130"      # 185x5 -> 5RM ~185, 28 wk away -> x0.7
+        assert pg.input_value("#pgSquatH") == "160"
+        assert pg.input_value("#pgPull") == "3"
+        pg.click("text=Start the program")
+        st = stored(pg)
+        assert st["program"]["next"] == "UA" and st["settings"]["splitStyle"] == "ul"
+        assert st["program"]["main"]["benchH"]["w"] == 130 and st["program"]["main"]["squatH"]["inc"] == 10
+        assert st["program"]["pull"]["reps"] == [2, 2, 2, 2, 2]
+        assert st["program"]["acc"]["Barbell Row"]["w"] == 115
+        assert "Start Upper A" in pg.inner_text("#view")
+
+def _start_program(pg):
+    pg.evaluate("App.tab('lift')")
+    pg.click("text=Start the program")
+    pg.click("text=Start Upper A")
+
+@test
+def program_full_session_progresses(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        n_before = len(stored(pg)["lifts"])
+        for i in range(3): pg.click(f"button[aria-label='Bench Press set {i+1}']")
+        assert pg.locator("#restBar").count() == 1
+        pg.wait_for_function("document.getElementById('restBar').style.display === 'flex'", timeout=3000)
+        for i in range(5): pg.click(f"button[aria-label='Pull-Up set {i+1}']")
+        # row: change set 1 weight to 120 and it carries to later sets
+        row = pg.locator(".card", has_text="Barbell Row").locator("input[inputmode=decimal]")
+        row.nth(0).fill("120")
+        assert row.nth(2).input_value() == "120"
+        for i in range(3):
+            pg.locator(".card", has_text="Barbell Row").locator("input[inputmode=numeric]").nth(i).fill("12")
+            pg.click(f"button[aria-label='Barbell Row set {i+1}']")
+        pg.click("text=Finish workout")
+        st = stored(pg)
+        assert len(st["lifts"]) == n_before + 1
+        w = st["lifts"][-1]
+        assert w["split"] == "upper" and w["program"] == "UA"
+        assert [e["name"] for e in w["exercises"]] == ["Bench Press", "Pull-Up", "Barbell Row"]
+        assert [s["weight"] for s in w["exercises"][0]["sets"]] == [130, 130, 130]
+        p = st["program"]
+        assert p["main"]["benchH"]["w"] == 135
+        assert p["pull"]["reps"] == [3, 2, 2, 2, 2]
+        assert p["acc"]["Barbell Row"]["w"] == 125
+        assert p["next"] == "LA" and p["live"] is None
+        txt = pg.inner_text("#view")
+        assert "Lower A" in txt and "130 → 135" in txt
+
+@test
+def program_missed_set_repeats_then_deloads(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        for k in range(2):
+            if k: pg.evaluate("data.program.next='UA'; save(); render();"); pg.click("text=Start Upper A")
+            pg.click("button[aria-label='Bench Press set 1']")
+            pg.click("button[aria-label='Bench Press set 2']")
+            pg.click("text=Finish workout")
+        m = stored(pg)["program"]["main"]["benchH"]
+        assert m["w"] == 115 and m["fails"] == 0, m   # 130 -> miss -> miss -> 0.9 x 130 = 117 -> 115
+
+@test
+def program_calendar_card_and_resume(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        pg.click("button[aria-label='Bench Press set 1']")
+        pg.evaluate("App.tab('calendar')")
+        card = pg.locator(".card", has_text="Workout in progress")
+        assert "1/" in card.inner_text()
+        card.locator("text=Resume").click()
+        assert pg.locator("button[aria-label='Bench Press set 1'][data-done='1']").count() == 1
+
+@test
+def program_free_logging_still_works(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')")
+        pg.click("text=Log freely")
+        assert pg.locator("text=+ Add movement").count() == 1
+        pg.evaluate("App.addExercise('Dips')")
+        pg.fill(".setgrid input >> nth=0", "0"); pg.fill(".setgrid input >> nth=1", "10")
+        pg.click("text=Save workout")
+        assert stored(pg)["lifts"][-1]["exercises"][0]["name"] == "Dips"
+
+@test
+def program_adjust_weights(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')"); pg.click("text=Start the program")
+        pg.click("text=adjust weights")
+        pg.fill("#pgSquatH", "185"); pg.click("text=Save weights")
+        p = stored(pg)["program"]
+        assert p["main"]["squatH"]["w"] == 185 and p["next"] == "UA"
+
 # --- tests above this line ---
 
 def main():
