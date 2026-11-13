@@ -123,17 +123,18 @@ test("triviaSeason and triviaPick favor the holiday", () => {
   assert.equal(C.triviaSeason("2026-11-13").tags.thanksgiving, 6);
   assert.equal(C.triviaSeason("2026-07-02").tags.july4, 7);
   // over many seeds, December picks are mostly Christmas-y
-  const xmas = new Set(["\u{1F384}", "\u{1F98C}", "\u{1F385}", "\u{1F381}", "\u{1F36C}", "\u{1F36A}", "\u{1F6F7}", "☕", "⛄", "\u{1F9E6}"]);
+  const xmas = new Set(["tree", "reindeer", "santa", "present", "candycane", "gingerbread", "snowman", "cocoa"]);
   let hits = 0, total = 0;
-  for (let i = 0; i < 50; i++) for (const p of C.triviaPick(12000, "2026-12-15", "s" + i, 3)){ total++; if (xmas.has(p.emoji)) hits++; }
+  for (let i = 0; i < 50; i++) for (const p of C.triviaPick(12000, "2026-12-15", "s" + i, 3)){ total++; if (xmas.has(p.art)) hits++; }
   assert.ok(hits / total > 0.6, `${hits}/${total}`);
   // no summer items in December
-  for (let i = 0; i < 30; i++) assert.ok(!C.triviaPick(12000, "2026-12-15", "x" + i, 3).some(p => p.emoji === "\u{1F349}"));
+  for (let i = 0; i < 30; i++) assert.ok(!C.triviaPick(12000, "2026-12-15", "x" + i, 3).some(p => p.art === "watermelon"));
   const a = C.triviaPick(12000, "2026-12-15", "same", 3), b = C.triviaPick(12000, "2026-12-15", "same", 3);
   assert.deepEqual(a, b);                         // stable per workout
   assert.equal(new Set(a.map(x => x.name)).size, 3);
   for (const x of a) assert.ok(x.count >= 1);
   assert.deepEqual(C.triviaPick(0, "2026-12-15", "z"), []);
+  for (const it of C.TRIVIA_ITEMS) assert.ok(typeof it[0] === "string" && /^[a-z]+$/.test(it[0]), it[0]);
 });
 
 test("planApplyFixes swaps ab wheel for cable crunch and keeps progress", () => {
