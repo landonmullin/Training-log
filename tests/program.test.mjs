@@ -91,6 +91,10 @@ test("progSession builds the day's checklist", () => {
   assert.equal(lb.split, "lower");
   assert.deepEqual(lb.items[0].sets.map(s => [s.w, s.r]), [[155, 8], [155, 8], [155, 8]]);
   assert.ok(!lb.items.some(i => /dead/i.test(i.name)));
+  // abs close out both lower days
+  assert.equal(lb.items[lb.items.length - 1].name, "Ab Wheel");
+  const la = C.progSession(prog, "LA");
+  assert.equal(la.items[la.items.length - 1].name, "Cable Crunch");
 });
 
 test("progWarmup ramps to the work weight", () => {

@@ -998,6 +998,17 @@ def program_adjust_weights(pw, url):
         p = stored(pg)["program"]
         assert p["main"]["squatH"]["w"] == 185 and p["next"] == "UA"
 
+
+@test
+def program_awake_toggle_and_abs(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        assert pg.is_checked("#pgAwake")
+        pg.uncheck("#pgAwake")
+        assert stored(pg)["settings"]["progAwake"] is False
+        pg.evaluate("data.program.live=null; data.program.next='LA'; save(); render();")
+        assert "Cable Crunch" in pg.inner_text("#view")
+
 # --- tests above this line ---
 
 def main():

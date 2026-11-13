@@ -189,7 +189,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 90;
+const APP_VERSION = 91;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2293,6 +2293,7 @@ function progLiveHTML(){
       <div style="font-family:var(--mono);font-size:12px;color:var(--sub)" id="pgCount">${progDoneCount(live)}/${progSetCount(live)}</div>
     </div>
     <div style="font-size:12px;color:var(--sub);margin-top:4px">Tap the box when a set is done. Did different reps or weight? Change the number first.</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--sub);margin-top:8px;cursor:pointer"><input type="checkbox" id="pgAwake" ${data.settings.progAwake !== false ? "checked" : ""} onchange="App.progAwake(this.checked)"> Keep screen awake during the workout</label>
   </div>`;
   live.items.forEach((it, ii) => {
     const allDone = it.sets.every(s => s.done);
@@ -2363,6 +2364,35 @@ function renderProgram(){
   if (p.live) return progLiveHTML();
   return progOverviewHTML();
 }
+// beep when rest is up (audio is unlocked by the checkbox tap that started the rest)
+let progAudio = null;
+function progAudioUnlock(){
+  try { if (!progAudio) progAudio = new (window.AudioContext || window.webkitAudioContext)(); if (progAudio.state === "suspended") progAudio.resume(); } catch(e){}
+}
+function progBeep(){
+  try {
+    if (!progAudio) return;
+    [0, 0.25, 0.5].forEach(t => {
+      const o = progAudio.createOscillator(), g = progAudio.createGain();
+      o.frequency.value = 880; o.connect(g); g.connect(progAudio.destination);
+      const at = progAudio.currentTime + t;
+      g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.4, at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, at + 0.18);
+      o.start(at); o.stop(at + 0.2);
+    });
+  } catch(e){}
+}
+// keep the screen on while a workout is in progress (setting, on by default)
+let progWakeLock = null;
+async function progWakeSync(){
+  const want = !!(data.settings.programEnabled && data.program?.live && data.settings.progAwake !== false && document.visibilityState === "visible");
+  try {
+    if (want && !progWakeLock && navigator.wakeLock){
+      progWakeLock = await navigator.wakeLock.request("screen");
+      progWakeLock.addEventListener("release", () => { progWakeLock = null; });
+    } else if (!want && progWakeLock){ const l = progWakeLock; progWakeLock = null; await l.release(); }
+  } catch(e){ progWakeLock = null; }
+}
+document.addEventListener("visibilitychange", () => progWakeSync());
 // rest timer (updates its own bar; never re-renders the page)
 setInterval(() => {
   const bar = document.getElementById("restBar");
@@ -2372,6 +2402,7 @@ setInterval(() => {
   if (left <= 0){
     ui.restEnd = null; bar.style.display = "none";
     try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch(e){}
+    progBeep();
     toast("Rest's up — next set");
     return;
   }
@@ -2712,11 +2743,11 @@ const PROG_ACC = {
   "Barbell Row": [3, 8, 12], "Tricep Pushdown": [3, 10, 15],
   "Bulgarian Split Squat": [3, 8, 12], "Leg Curl": [3, 10, 15], "Calf Raise": [3, 10, 15],
   "Dumbbell Shoulder Press": [3, 8, 12], "Lat Pulldown": [3, 8, 12], "Dumbbell Curl": [3, 10, 15],
-  "Leg Press": [3, 10, 15], "Leg Extension": [3, 10, 15], "Ab Wheel": [3, 8, 12],
+  "Leg Press": [3, 10, 15], "Leg Extension": [3, 10, 15], "Ab Wheel": [3, 8, 12], "Cable Crunch": [3, 10, 15],
 };
 const PROG_DAYS = {
   UA: { name: "Upper A", sub: "heavy bench", split: "upper", main: "benchH", reps: 5, pull: true, acc: ["Barbell Row", "Tricep Pushdown"] },
-  LA: { name: "Lower A", sub: "heavy squat", split: "lower", main: "squatH", reps: 5, pull: false, acc: ["Bulgarian Split Squat", "Leg Curl", "Calf Raise"] },
+  LA: { name: "Lower A", sub: "heavy squat", split: "lower", main: "squatH", reps: 5, pull: false, acc: ["Bulgarian Split Squat", "Leg Curl", "Calf Raise", "Cable Crunch"] },
   UB: { name: "Upper B", sub: "volume bench", split: "upper", main: "benchV", reps: 8, pull: true, acc: ["Dumbbell Shoulder Press", "Lat Pulldown", "Dumbbell Curl"] },
   LB: { name: "Lower B", sub: "volume squat", split: "lower", main: "squatV", reps: 8, pull: false, acc: ["Leg Press", "Leg Extension", "Ab Wheel"] },
 };
@@ -4565,6 +4596,7 @@ function afterRender(){
   if (cs && ui.focusClassSearch){ cs.focus(); ui.focusClassSearch=false; }
   initMaps();
   initSwipe();
+  progWakeSync();
 }
 
 // ================= actions =================
@@ -4925,6 +4957,7 @@ window.App = {
     const live = data.program?.live; if (!live) return;
     const it = live.items[ii], s = it.sets[si];
     s.done = !s.done;
+    progAudioUnlock();
     if (s.done && progDoneCount(live) < progSetCount(live)) ui.restEnd = Date.now() + PROG_REST[it.kind] * 1000;
     else if (!s.done) ui.restEnd = null;
     save(); render();
@@ -4939,6 +4972,7 @@ window.App = {
     if (f === "w") for (let j = si + 1; j < it.sets.length; j++) if (!it.sets[j].done && it.sets[j].w === before){ it.sets[j].w = val; const el = $(`#pgw-${ii}-${j}`); if (el) el.value = val ?? ""; }
     save();
   },
+  progAwake(on){ data.settings.progAwake = !!on; save(); progWakeSync(); },
   progRestSkip(){ ui.restEnd = null; const b = $("#restBar"); if (b) b.style.display = "none"; },
   progAbandon(){
     if (!confirmDel("pg-abandon")) return;
