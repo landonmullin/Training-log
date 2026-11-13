@@ -906,6 +906,7 @@ def program_off_by_default(pw, url):
 def program_setup_reads_history(pw, url):
     with app(pw, url, _prog_seed(programEnabled=True)) as pg:
         pg.evaluate("App.tab('lift')")
+        pg.click("text=Bench · Squat · Pull-ups")
         txt = pg.inner_text("#view")
         assert "best 185×5" in txt and "best 225×5" in txt and "best 3 bodyweight reps" in txt, txt[:600]
         assert pg.input_value("#pgBenchH") == "130"      # 185x5 -> 5RM ~185, 28 wk away -> x0.7
@@ -914,13 +915,17 @@ def program_setup_reads_history(pw, url):
         pg.click("text=Start the program")
         st = stored(pg)
         assert st["program"]["next"] == "UA" and st["settings"]["splitStyle"] == "ul"
-        assert st["program"]["main"]["benchH"]["w"] == 130 and st["program"]["main"]["squatH"]["inc"] == 10
-        assert st["program"]["pull"]["reps"] == [2, 2, 2, 2, 2]
-        assert st["program"]["acc"]["Barbell Row"]["w"] == 115
+        assert st["program"]["state"]["benchH"]["w"] == 130 and st["program"]["state"]["squatH"]["inc"] == 10
+        assert st["program"]["state"]["pull"]["reps"] == [2, 2, 2, 2, 2]
+        assert st["program"]["state"]["Barbell Row"]["w"] == 115
         assert "Start Upper A" in pg.inner_text("#view")
+
+def _close_celebrate(pg):
+    if pg.locator("#celebrate").count(): pg.click("#celebrate >> text=Nice")
 
 def _start_program(pg):
     pg.evaluate("App.tab('lift')")
+    pg.click("text=Bench · Squat · Pull-ups")
     pg.click("text=Start the program")
     pg.click("text=Start Upper A")
 
@@ -948,10 +953,12 @@ def program_full_session_progresses(pw, url):
         assert [e["name"] for e in w["exercises"]] == ["Bench Press", "Pull-Up", "Barbell Row"]
         assert [s["weight"] for s in w["exercises"][0]["sets"]] == [130, 130, 130]
         p = st["program"]
-        assert p["main"]["benchH"]["w"] == 135
-        assert p["pull"]["reps"] == [3, 2, 2, 2, 2]
-        assert p["acc"]["Barbell Row"]["w"] == 125
+        assert p["state"]["benchH"]["w"] == 135
+        assert p["state"]["pull"]["reps"] == [3, 2, 2, 2, 2]
+        assert p["state"]["Barbell Row"]["w"] == 125
         assert p["next"] == "LA" and p["live"] is None
+        assert "lb" in pg.inner_text("#celebrate") and "That's about" in pg.inner_text("#celebrate")
+        _close_celebrate(pg)
         txt = pg.inner_text("#view")
         assert "Lower A" in txt and "130 → 135" in txt
 
@@ -964,7 +971,8 @@ def program_missed_set_repeats_then_deloads(pw, url):
             pg.click("button[aria-label='Bench Press set 1']")
             pg.click("button[aria-label='Bench Press set 2']")
             pg.click("text=Finish workout")
-        m = stored(pg)["program"]["main"]["benchH"]
+            _close_celebrate(pg)
+        m = stored(pg)["program"]["state"]["benchH"]
         assert m["w"] == 115 and m["fails"] == 0, m   # 130 -> miss -> miss -> 0.9 x 130 = 117 -> 115
 
 @test
@@ -990,14 +998,17 @@ def program_free_logging_still_works(pw, url):
         assert stored(pg)["lifts"][-1]["exercises"][0]["name"] == "Dips"
 
 @test
-def program_adjust_weights(pw, url):
+def program_edit_plan_changes_weights(pw, url):
     with app(pw, url, _prog_seed(programEnabled=True)) as pg:
-        pg.evaluate("App.tab('lift')"); pg.click("text=Start the program")
-        pg.click("text=adjust weights")
-        pg.fill("#pgSquatH", "185"); pg.click("text=Save weights")
+        pg.evaluate("App.tab('lift')"); pg.click("text=Bench \u00B7 Squat \u00B7 Pull-ups"); pg.click("text=Start the program")
+        pg.click("text=Edit plan")
+        pg.click(".seg >> text=Lower A")
+        pg.click("button[aria-label='edit Squat']")
+        pg.fill(".pbedit input[placeholder='blank = set later']", "185")
+        pg.click("text=Save plan")
         p = stored(pg)["program"]
-        assert p["main"]["squatH"]["w"] == 185 and p["next"] == "UA"
-
+        assert p["state"]["squatH"]["w"] == 185 and p["next"] == "UA"
+        assert p["state"]["benchH"]["w"] == 130          # untouched exercises keep their weights
 
 @test
 def program_awake_toggle_and_abs(pw, url):
@@ -1008,6 +1019,101 @@ def program_awake_toggle_and_abs(pw, url):
         assert stored(pg)["settings"]["progAwake"] is False
         pg.evaluate("data.program.live=null; data.program.next='LA'; save(); render();")
         assert "Cable Crunch" in pg.inner_text("#view")
+
+
+SAMPLE_PLAN = {"format": "training-log-plan", "version": 1, "name": "Push Legs", "schedule": "weekdays",
+  "workouts": [
+    {"name": "Push", "split": "push", "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], "exercises": [
+      {"name": "Bench Press", "main": True, "sets": 3, "reps": 5, "weight": 135, "progression": {"type": "linear", "increment": 5}},
+      {"name": "Push-Up", "bodyweight": True, "sets": 2, "reps": 10, "progression": {"type": "reps"}}]},
+    {"name": "Legs", "days": [], "exercises": [{"name": "Squat", "sets": 3, "repRange": [8, 12], "weight": None, "progression": {"type": "double", "increment": 5}}]}]}
+
+@test
+def plan_import_from_claude_reply(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')")
+        pg.click("text=Import a plan from Claude")
+        reply = "Here you go!\n```json\n" + json.dumps(SAMPLE_PLAN) + "\n```\nEnjoy"
+        pg.fill("#pfText", reply)
+        pg.click("text=Check plan")
+        assert "push legs" in pg.inner_text("#view").lower()
+        pg.click("text=Use this plan")
+        p = stored(pg)["program"]
+        assert p["plan"]["name"] == "Push Legs" and p["plan"]["schedule"] == "weekdays"
+        assert p["state"]["Legs:Squat"]["w"] == 225      # filled from last logged squat
+        assert "Start Push" in pg.inner_text("#view")    # Push runs every day → today
+        pg.click("text=Start Push")
+        for i in range(3): pg.click(f"button[aria-label='Bench Press set {i+1}']")
+        pg.click("text=Finish workout")
+        assert stored(pg)["lifts"][-1]["split"] == "push"
+        assert stored(pg)["program"]["state"]["Push:Bench Press"]["w"] == 140
+
+@test
+def plan_import_shows_errors(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')"); pg.click("text=Import a plan from Claude")
+        pg.fill("#pfText", '{"workouts":[{"name":"A","exercises":[{"name":"Row","sets":3}]}]}')
+        pg.click("text=Check plan")
+        txt = pg.inner_text("#view")
+        assert "can't be imported" in txt and "reps must be" in txt
+        assert pg.locator("text=Use this plan").count() == 0
+
+@test
+def plan_builder_build_drag_and_save(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        pg.evaluate("App.tab('lift')"); pg.click("text=Build your own")
+        pg.fill("#pbName", "My Split"); pg.fill("#pbWName", "Chest Day")
+        pg.click("button.pbday >> text=Mon"); pg.click("button.pbday >> text=Thu")
+        for n in ["Bench Press", "Dumbbell Fly", "Pull-Up"]:
+            pg.fill("#pbNewEx", n); pg.click("button:text-is('Add')")
+        names = lambda: [x["name"] for x in pg.evaluate("ui.planDraft.workouts[0].exercises")]
+        assert names() == ["Bench Press", "Dumbbell Fly", "Pull-Up"]
+        assert pg.evaluate("ui.planDraft.workouts[0].exercises[2].bodyweight") is True
+        # drag Pull-Up to the top
+        pg.evaluate("App.pbToggle(2)")
+        h = pg.locator(".pbhandle").nth(2).bounding_box(); t = pg.locator(".pbhandle").nth(0).bounding_box()
+        pg.mouse.move(h["x"] + 5, h["y"] + 5); pg.mouse.down()
+        pg.mouse.move(t["x"] + 5, t["y"] + 2, steps=8); pg.mouse.move(t["x"] + 5, t["y"] - 10, steps=4); pg.mouse.up()
+        assert names() == ["Pull-Up", "Bench Press", "Dumbbell Fly"], names()
+        pg.click("button[aria-label='edit Bench Press']")
+        pg.click(".pbedit >> text=Fixed reps")
+        pg.select_option(".pbedit select", "linear")
+        pg.fill(".pbedit input[placeholder='blank = set later']", "155")
+        pg.click("text=Save plan")
+        p = stored(pg)["program"]
+        assert p["plan"]["name"] == "My Split" and p["plan"]["workouts"][0]["days"] == ["Mon", "Thu"]
+        b = p["plan"]["workouts"][0]["exercises"][1]
+        assert b["progression"]["type"] == "linear" and b["reps"] == 8
+        assert p["state"]["W1:Bench Press"]["w"] == 155
+
+@test
+def plan_migrates_old_program(pw, url):
+    seed = _prog_seed(programEnabled=True)
+    seed["program"] = {"startedAt": "2026-11-12", "next": "UB", "log": [], "live": None,
+        "main": {"benchH": {"w": 160, "fails": 0, "inc": 5}, "benchV": {"w": 140, "fails": 0, "inc": 5}, "squatH": {"w": 145, "fails": 0, "inc": 10}, "squatV": {"w": 115, "fails": 0, "inc": 5}},
+        "pull": {"reps": [3, 3, 2, 2, 2], "added": 0}, "acc": {"Lat Pulldown": {"w": 120}}}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('lift')")
+        txt = pg.inner_text("#view")
+        assert "Upper B" in txt and "140 lb" in txt and "3·3·2·2·2" in txt, txt[:500]
+        pg.click("text=Start Upper B")
+        assert pg.input_value("#pgw-0-0") == "140"
+        assert stored(pg)["program"]["state"]["Lat Pulldown"]["w"] == 120
+
+@test
+def trivia_counts_bodyweight_and_shows_on_level(pw, url):
+    seed = _prog_seed()
+    seed["weights"] = [{"id": "w1", "date": _ago(3), "lbs": 180}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('lift')")
+        pg.evaluate("App.addExercise('Pull-Up')")
+        pg.fill(".setgrid input >> nth=0", "0"); pg.fill(".setgrid input >> nth=1", "3")
+        pg.click("text=Save workout")
+        txt = pg.inner_text("#celebrate")
+        assert "540 lb" in txt and "180 lb" in txt, txt
+        _close_celebrate(pg)
+        pg.evaluate("App.tab('progress')")
+        assert "lifetime weight moved" in pg.inner_text("#view").lower()
 
 # --- tests above this line ---
 

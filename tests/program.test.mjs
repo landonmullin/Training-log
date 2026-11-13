@@ -75,28 +75,6 @@ test("progNextAcc: double progression", () => {
   assert.equal(C.progNextAcc({ w: null }, [10, 10, 10], 8, 12, 5).w, null);
 });
 
-test("progSession builds the day's checklist", () => {
-  const prog = {
-    main: { benchH: { w: 135, fails: 0, inc: 5 }, benchV: { w: 115, fails: 0, inc: 5 }, squatH: { w: 185, fails: 0, inc: 10 }, squatV: { w: 155, fails: 0, inc: 5 } },
-    pull: { reps: [2, 2, 2, 2, 2], added: 0 }, acc: { "Barbell Row": { w: 95 } },
-  };
-  const ua = C.progSession(prog, "UA");
-  assert.equal(ua.split, "upper");
-  assert.equal(ua.items[0].name, "Bench Press");
-  assert.deepEqual(ua.items[0].sets.map(s => [s.w, s.r]), [[135, 5], [135, 5], [135, 5]]);
-  assert.equal(ua.items[1].name, "Pull-Up");
-  assert.equal(ua.items[1].sets.length, 5);
-  assert.equal(ua.items.find(i => i.name === "Barbell Row").sets[0].w, 95);
-  const lb = C.progSession(prog, "LB");
-  assert.equal(lb.split, "lower");
-  assert.deepEqual(lb.items[0].sets.map(s => [s.w, s.r]), [[155, 8], [155, 8], [155, 8]]);
-  assert.ok(!lb.items.some(i => /dead/i.test(i.name)));
-  // abs close out both lower days
-  assert.equal(lb.items[lb.items.length - 1].name, "Ab Wheel");
-  const la = C.progSession(prog, "LA");
-  assert.equal(la.items[la.items.length - 1].name, "Cable Crunch");
-});
-
 test("progWarmup ramps to the work weight", () => {
   assert.deepEqual(C.progWarmup(185).map(x => x.w), [45, 95, 130, 155]);
   assert.deepEqual(C.progWarmup(65).map(x => x.w), [45, 55]);

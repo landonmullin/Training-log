@@ -163,6 +163,12 @@
   .fd-row .t,.fd-row .k{font-family:var(--mono);font-size:12px;color:var(--sub)}
   .fd-row .a{color:var(--sub);font-size:12px}
   .linkbtn{background:none;border:none;color:var(--pull);font-weight:600;font-size:14px;cursor:pointer;padding:6px}
+  @keyframes tvpop{0%{transform:scale(.85);opacity:0}100%{transform:scale(1);opacity:1}}
+  @keyframes tvbounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+  @keyframes tvfloat{0%,100%{transform:translateY(0) rotate(0)}50%{transform:translateY(3px) rotate(8deg)}}
+  .tvbounce{display:inline-block;animation:tvbounce 1.6s ease-in-out infinite}
+  .tvfloat{animation:tvfloat 3s ease-in-out infinite}
+  @media (prefers-reduced-motion: reduce){ .tvbounce,.tvfloat{animation:none} }
 </style>
 </head>
 <body>
@@ -189,7 +195,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 91;
+const APP_VERSION = 92;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1747,7 +1753,7 @@ const ui = {
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
-  liftMode: null, progEditing: false, restEnd: null,
+  liftMode: null, progView: null, restEnd: null, planDraft: null, pbW: 0, pbOpenEx: null, pfText: "", pfResult: null, celebrate: null,
   planEdit: null, planEditDay: null, planShowPast: false, planDow: null,
 };
 
@@ -1755,7 +1761,7 @@ const ui = {
 function render(){
   renderNav();
   const v = { calendar:renderCalendar, lift:renderLift, cardio:renderCardio, food:renderFood, weight:renderWeight, progress:renderProgress, todo:renderTodo, settings:renderSettings, pay:renderPay, school:renderSchool, planner:renderPlanner }[ui.tab];
-  $("#view").innerHTML = v();
+  $("#view").innerHTML = v() + celebrateHTML();
   afterRender();
 }
 const NAV_ICONS = {
@@ -2074,6 +2080,7 @@ function renderCalendar(){
           ${ex.sets.map(s=>`<div style="font-family:var(--mono);font-size:13px;padding:2px 0 0 ${s.drop?"22px":"10px"};color:${s.drop?"var(--sub)":"var(--ink)"}">${s.drop?"\u21B3 ":""}${s.weight} lb × ${s.reps}${s.rpe?`<span style="color:var(--sub)"> @ RPE ${s.rpe}</span>`:""}</div>`).join("")}
         </div>`).join("")}
         ${w.notes?`<div style="margin-top:10px;font-size:13px;color:var(--sub);font-style:italic">${esc(w.notes)}</div>`:""}
+        ${triviaLineHTML(w)}
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--grid)">
           <div class="lbl" style="margin-bottom:6px">${w.split?"Change tag":"Tag this workout"}</div>
           <div class="seg" style="margin-bottom:0">
@@ -2212,18 +2219,41 @@ function lastPerfHTML(name){
     <div style="font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink);margin-top:2px">${lines.join("<br>")}</div>
   </div>`;
 }
-// ================= strength program (UI) =================
-const PROG_REST = { main: 180, pull: 120, neg: 60, acc: 90 };
-const PROG_BW = new Set(["Ab Wheel"]);
-function progFmtW(w){ return w == null || w === "" ? "?" : String(+w); }
-function progTargetText(it){
-  if (it.kind === "main") return `3 × ${it.target} @ ${progFmtW(it.sets[0].w)} lb`;
-  if (it.kind === "pull") return `${it.sets.length} sets: ${it.sets.map(s=>s.r).join(" · ")} reps${it.added ? ` with +${it.added} lb` : ""}`;
-  if (it.kind === "neg") return `3 slow negatives · ${it.note}`;
-  return `${it.sets.length} × ${it.lo}–${it.hi}${PROG_BW.has(it.name) ? "" : ` @ ${it.sets[0].w == null ? "pick a weight" : progFmtW(it.sets[0].w) + " lb"}`}`;
+// ================= workout plans (UI) =================
+function progData(){
+  if (data.program && !data.program.plan && data.program.main) data.program = progMigrate(data.program);
+  return data.program;
 }
+function progFmtW(w){ return w == null || w === "" ? "?" : String(+w); }
+function progWorkout(p, id){ return p.plan.workouts.find(w => w.id === id) || p.plan.workouts[0]; }
+function progProgLabel(t){ return { linear: "add weight when all reps are hit", double: "rep range, then add weight", reps: "add a rep each session", none: "no automatic progression" }[t] || t; }
+function progItemTarget(it){
+  const t = it.prog.type, w = it.sets[0]?.w;
+  const wTxt = it.bw ? (it.added ? ` with +${it.added} lb` : "") : w == null ? " @ pick a weight" : ` @ ${progFmtW(w)} lb`;
+  if (t === "reps") return `${it.sets.length} sets: ${it.sets.map(s => s.r).join(" · ")} reps${wTxt}`;
+  const reps = Array.isArray(it.target) ? `${it.target[0]}–${it.target[1]}` : it.target;
+  return `${it.sets.length} × ${reps}${wTxt}${it.note ? ` · ${it.note}` : ""}`;
+}
+function progLastWeights(lifts){
+  const out = {};
+  [...(lifts || [])].sort((a, b) => a.date < b.date ? -1 : 1).forEach(l => (l.exercises || []).forEach(ex => {
+    const top = Math.max(0, ...(ex.sets || []).map(s => +s.weight || 0));
+    if (top > 0) out[ex.name] = top;
+  }));
+  return out;
+}
+// ---------- start screen ----------
+function progChooseHTML(){
+  const opt = (icon, title, sub, fn) => `<button onclick="${fn}" style="display:flex;gap:12px;align-items:center;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px;cursor:pointer;color:var(--ink)">
+    <span style="font-size:28px;flex:none">${icon}</span><span><span style="display:block;font-weight:800;font-size:15px">${title}</span><span style="display:block;font-size:12px;color:var(--sub);margin-top:3px;line-height:1.4">${sub}</span></span></button>`;
+  return `<div class="h2" style="margin:2px 0 10px">Set up a workout plan</div>
+    ${opt("\u{1F3CB}️", "Bench · Squat · Pull-ups", "4-day upper/lower with checkboxes and automatic progression. Starting weights come from your log.", "App.progView('setup')")}
+    ${opt("\u{1F9E9}", "Build your own", "Make your workouts, drag exercises into order, pick the days they repeat, and choose how each one progresses.", "App.pbOpen(true)")}
+    ${opt("\u{1F4C4}", "Import a plan from Claude", "Paste or open a plan file Claude wrote for you. Tap here to copy the prompt that teaches Claude the format.", "App.progView('import')")}`;
+}
+// ---------- built-in plan setup (reads history) ----------
 function progAnalysisHTML(a){
-  const line = (label, x, reps) => x
+  const line = (label, x) => x
     ? `<div style="padding:7px 0;border-bottom:1px solid var(--grid)"><b>${label}</b> — best ${x.best.weight}×${x.best.reps} on ${shortDate(x.best.date)} (est. max ${x.best.e1rm})<br>
        <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${x.weeksSinceBest} wk since that set · last done ${shortDate(x.last)} → start 3×5 @ ${x.heavy}, 3×8 @ ${x.volume}</span></div>`
     : `<div style="padding:7px 0;border-bottom:1px solid var(--grid)"><b>${label}</b> — no logged sets yet. Start light and let the first week feel easy.</div>`;
@@ -2233,63 +2263,64 @@ function progAnalysisHTML(a){
     <div style="padding:7px 0"><b>Pull-ups</b> — ${a.pullup ? `best ${a.pullup.bestReps} bodyweight reps in a set (last ${shortDate(a.pullup.last)})` : "none logged yet"}</div>
   </div>`;
 }
-function progSetupHTML(editing){
+function progBuiltinAccNames(){ return [...new Set(planBuiltin().workouts.flatMap(w => w.exercises.filter(e => e.progression.type === "double" && !e.bodyweight).map(e => e.name)))]; }
+function progSetupHTML(){
   const a = progAnalyze(data.lifts, todayISO());
-  const p = data.program || {};
-  const v = (k, fb) => editing ? p.main?.[k]?.w : fb;
-  const accNames = Object.keys(PROG_ACC).filter(n => !PROG_BW.has(n));
-  const pullMax = editing ? Math.max(...(p.pull?.reps || [2])) : Math.min(4, a.pullup?.bestReps || 3);
   const inp = (id, val, ph) => `<input id="${id}" type="number" inputmode="decimal" value="${val ?? ""}" placeholder="${ph}" style="font-family:var(--mono)">`;
-  return `${editing ? "" : `<div class="card"><div class="lbl" style="margin-bottom:6px">What your log says</div>${progAnalysisHTML(a)}</div>`}
+  return `<button class="linkbtn" style="font-size:13px;padding:0 0 8px" onclick="App.progView(null)">‹ back</button>
+  <div class="card"><div class="lbl" style="margin-bottom:6px">What your log says</div>${progAnalysisHTML(a)}</div>
   <div class="card">
-    <div class="lbl" style="margin-bottom:8px">${editing ? "Adjust working weights" : "Starting weights"}</div>
-    <div style="font-size:12px;color:var(--sub);margin-bottom:10px;line-height:1.45">${editing ? "Change any number; the rotation and your history stay put." : "Filled in from your log, backed off for time away. The first two weeks should feel easy — that's on purpose."}</div>
+    <div class="lbl" style="margin-bottom:8px">Starting weights</div>
+    <div style="font-size:12px;color:var(--sub);margin-bottom:10px;line-height:1.45">Filled in from your log, backed off for time away. The first two weeks should feel easy — that's on purpose.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 10px">
-      <label><span class="lbl">Bench 3×5 (heavy)</span>${inp("pgBenchH", v("benchH", a.bench?.heavy ?? 95), "95")}</label>
-      <label><span class="lbl">Bench 3×8</span>${inp("pgBenchV", v("benchV", a.bench?.volume ?? 85), "85")}</label>
-      <label><span class="lbl">Squat 3×5 (heavy)</span>${inp("pgSquatH", v("squatH", a.squat?.heavy ?? 115), "115")}</label>
-      <label><span class="lbl">Squat 3×8</span>${inp("pgSquatV", v("squatV", a.squat?.volume ?? 95), "95")}</label>
-      <label style="grid-column:1/-1"><span class="lbl">Strict pull-ups you can do right now (max)</span>${inp("pgPull", pullMax, "3")}</label>
+      <label><span class="lbl">Bench 3×5 (heavy)</span>${inp("pgBenchH", a.bench?.heavy ?? 95, "95")}</label>
+      <label><span class="lbl">Bench 3×8</span>${inp("pgBenchV", a.bench?.volume ?? 85, "85")}</label>
+      <label><span class="lbl">Squat 3×5 (heavy)</span>${inp("pgSquatH", a.squat?.heavy ?? 115, "115")}</label>
+      <label><span class="lbl">Squat 3×8</span>${inp("pgSquatV", a.squat?.volume ?? 95, "95")}</label>
+      <label style="grid-column:1/-1"><span class="lbl">Strict pull-ups you can do right now (max)</span>${inp("pgPull", Math.min(4, a.pullup?.bestReps || 3), "3")}</label>
     </div>
   </div>
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Accessory weights (lb)</div>
     <div style="font-size:12px;color:var(--sub);margin-bottom:10px">Leave blank if you're not sure — you'll set it on the first set and the app remembers.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 10px">
-      ${accNames.map((n,i)=>`<label><span class="lbl">${esc(n)}</span>${inp("pgAcc"+i, editing ? p.acc?.[n]?.w : a.acc[n], "")}</label>`).join("")}
+      ${progBuiltinAccNames().map((n,i)=>`<label><span class="lbl">${esc(n)}</span>${inp("pgAcc"+i, a.acc[n], "")}</label>`).join("")}
     </div>
   </div>
-  <button class="btn ink" onclick="App.progSaveSetup(${editing ? "true" : "false"})">${editing ? "Save weights" : "Start the program"}</button>
-  ${editing ? `<button class="btn" style="margin-top:8px;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.progEditDone()">Cancel</button>` : ""}`;
+  <button class="btn ink" onclick="App.progSaveSetup()">Start the program</button>`;
 }
-function progNextBlurb(p){
-  const s = progSession(p, p.next);
-  const m = s.items[0];
-  return `${s.name} · ${m.name} 3×${m.target} @ ${progFmtW(m.sets[0].w)}`;
-}
+// ---------- calendar card ----------
 function progCalendarCardHTML(){
-  const p = data.program;
-  if (!data.settings.programEnabled || !p?.main) return "";
+  if (!data.settings.programEnabled) return "";
+  const p = progData();
+  if (!p?.plan) return "";
   const live = p.live;
+  const nu = planNextUp(p, todayISO());
+  const W = progWorkout(p, live ? live.day : nu.id);
   const doneToday = (p.log || []).some(l => l.date === todayISO());
+  let title;
+  if (live) title = `${W.name} · ${progDoneCount(live)}/${progSetCount(live)} sets`;
+  else { const it = planSession(p.plan, p.state, W.id).items[0]; title = `${W.name}${it ? ` · ${it.name} ${progItemTarget(it).replace(/ · .*/, "")}` : ""}`; }
+  const lbl = live ? "Workout in progress" : doneToday ? "Lifted today ✓ · next up" : nu.today ? (p.plan.schedule === "weekdays" ? "Today's lift" : "Next lift") : `Next lift · ${nu.when}`;
   return `<div class="card" style="padding:12px 14px;border-left:4px solid var(--push)">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
       <div style="min-width:0">
-        <div class="lbl" style="margin:0">${live ? "Workout in progress" : doneToday ? "Lifted today ✓ · next up" : "Next lift"}</div>
-        <div style="font-size:14px;font-weight:700;margin-top:3px">${esc(live ? `${PROG_DAYS[live.day].name} · ${progDoneCount(live)}/${progSetCount(live)} sets` : progNextBlurb(p))}</div>
+        <div class="lbl" style="margin:0">${lbl}</div>
+        <div style="font-size:14px;font-weight:700;margin-top:3px">${esc(title)}</div>
       </div>
-      <button class="btn ink" style="width:auto;padding:9px 14px;flex:none" onclick="App.progOpen()">${live ? "Resume" : "Start"}</button>
+      <button class="btn ink" style="width:auto;padding:9px 14px;flex:none" onclick="App.progOpen()">${live ? "Resume" : nu.today || p.plan.schedule === "rotation" ? "Start" : "View"}</button>
     </div>
   </div>`;
 }
 const progSetCount = live => live.items.reduce((n, it) => n + it.sets.length, 0);
 const progDoneCount = live => live.items.reduce((n, it) => n + it.sets.filter(s => s.done).length, 0);
+// ---------- live checklist ----------
 function progLiveHTML(){
-  const live = data.program.live;
-  const D = PROG_DAYS[live.day];
+  const p = data.program, live = p.live;
+  const W = progWorkout(p, live.day);
   let h = `<div class="card" style="padding:12px 14px;border-top:3px solid var(--push)">
     <div style="display:flex;justify-content:space-between;align-items:baseline">
-      <div class="h2" style="margin:0">${D.name} <span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${D.sub}</span></div>
+      <div class="h2" style="margin:0">${esc(W.name)} ${W.note ? `<span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${esc(W.note)}</span>` : ""}</div>
       <div style="font-family:var(--mono);font-size:12px;color:var(--sub)" id="pgCount">${progDoneCount(live)}/${progSetCount(live)}</div>
     </div>
     <div style="font-size:12px;color:var(--sub);margin-top:4px">Tap the box when a set is done. Did different reps or weight? Change the number first.</div>
@@ -2297,18 +2328,19 @@ function progLiveHTML(){
   </div>`;
   live.items.forEach((it, ii) => {
     const allDone = it.sets.every(s => s.done);
+    const noW = it.bw && !(it.prog.type === "reps" && it.added);
     h += `<div class="card" style="padding:12px 14px;${allDone ? "opacity:.6;" : ""}">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
         <div style="font-size:15px;font-weight:800">${allDone ? "✓ " : ""}${esc(it.name)}</div>
-        ${it.kind === "main" ? `<span style="font-family:var(--mono);font-size:10px;color:var(--push);font-weight:700">MAIN LIFT</span>` : ""}
+        ${it.main ? `<span style="font-family:var(--mono);font-size:10px;color:var(--push);font-weight:700">MAIN LIFT</span>` : ""}
       </div>
-      <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin:3px 0 8px">${esc(progTargetText(it))}</div>
-      ${it.kind === "main" ? `<div style="font-size:12px;color:var(--sub);margin-bottom:8px">Warm-up: ${progWarmup(+it.sets[0].w || 45).map(x=>`${x.w}×${x.r}`).join(", ")}</div>` : ""}
+      <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin:3px 0 8px">${esc(progItemTarget(it))}</div>
+      ${it.main && !it.bw ? `<div style="font-size:12px;color:var(--sub);margin-bottom:8px">Warm-up: ${progWarmup(+it.sets[0].w || 45).map(x=>`${x.w}×${x.r}`).join(", ")}</div>` : ""}
       ${it.sets.map((s, si) => `<div class="pgset" style="display:grid;grid-template-columns:44px 34px 1fr 14px 1fr;gap:8px;align-items:center;margin-bottom:6px">
         <button class="pgchk" data-done="${s.done ? 1 : 0}" onclick="App.progCheck(${ii},${si})" aria-label="${esc(it.name)} set ${si + 1}"
           style="width:44px;height:40px;border-radius:9px;border:2px solid ${s.done ? "#2B8A3E" : "var(--line)"};background:${s.done ? "#2B8A3E" : "transparent"};color:#fff;font-size:20px;font-weight:800;cursor:pointer">${s.done ? "✓" : ""}</button>
         <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">S${si + 1}</span>
-        ${it.kind === "neg" || PROG_BW.has(it.name) || (it.kind === "pull" && !it.added) ? `<span style="font-family:var(--mono);font-size:12px;color:var(--sub)">body wt</span>` :
+        ${noW ? `<span style="font-family:var(--mono);font-size:12px;color:var(--sub)">body wt</span>` :
           `<input id="pgw-${ii}-${si}" type="number" inputmode="decimal" value="${s.w ?? ""}" placeholder="lb" oninput="App.progSet(${ii},${si},'w',this.value)" style="padding:8px;font-family:var(--mono)">`}
         <span style="text-align:center;color:var(--sub)">×</span>
         <input type="number" inputmode="numeric" value="${s.r}" oninput="App.progSet(${ii},${si},'r',this.value)" style="padding:8px;font-family:var(--mono)">
@@ -2320,47 +2352,354 @@ function progLiveHTML(){
     <div id="restBar" style="display:none;position:fixed;left:12px;right:12px;bottom:150px;z-index:30;background:var(--ink);color:#fff;border-radius:12px;padding:12px 14px;font-family:var(--mono);font-size:15px;font-weight:700;box-shadow:0 6px 20px rgba(0,0,0,.25);justify-content:space-between;align-items:center"></div>`;
   return h;
 }
+// ---------- overview ----------
+function progWeekStrip(p){
+  const today = todayISO();
+  const [y, m, d] = today.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  const mon = new Date(dt); mon.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+  const cells = [];
+  for (let i = 0; i < 7; i++){
+    const c = new Date(mon); c.setDate(mon.getDate() + i);
+    const iso = isoFromDate(c), dow = PLAN_DOWS[c.getDay()];
+    const w = p.plan.workouts.find(x => x.days.includes(dow));
+    const did = (p.log || []).some(l => l.date === iso);
+    const isT = iso === today;
+    cells.push(`<div style="text-align:center;border-radius:8px;padding:6px 2px;border:1px solid ${isT ? "var(--push)" : "var(--line)"};background:${did ? "rgba(43,138,62,.12)" : isT ? "rgba(232,89,12,.08)" : "transparent"}">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--sub)">${dow}</div>
+      <div style="font-size:11px;font-weight:700;line-height:1.2;min-height:26px;display:flex;align-items:center;justify-content:center">${did ? "✓" : w ? esc(w.name) : "–"}</div></div>`);
+  }
+  return `<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">${cells.join("")}</div>`;
+}
+function progStateRows(p){
+  const rows = [], seen = new Set();
+  for (const W of p.plan.workouts) for (const ex of W.exercises){
+    const k = planExKey(W.id, ex);
+    if (seen.has(k) || ex.progression.type === "none") continue;
+    seen.add(k);
+    const st = p.state[k] || {};
+    const reps = ex.repRange ? `${ex.repRange[0]}–${ex.repRange[1]}` : ex.reps;
+    let val;
+    if (ex.progression.type === "reps") val = `${(st.reps || []).join("·")}${st.added ? ` +${st.added} lb` : ""}`;
+    else if (ex.bodyweight) val = "body wt";
+    else val = st.w == null ? "set on first set" : `${st.w} lb${st.fails ? ` <span style="color:#E8590C">· retry</span>` : ""}`;
+    rows.push(`<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--grid);font-size:13px"><span>${esc(ex.name)} <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${ex.progression.type === "reps" ? "" : `${ex.sets}×${reps}`}</span></span><span style="font-family:var(--mono);white-space:nowrap">${val}</span></div>`);
+  }
+  return rows.join("");
+}
 function progOverviewHTML(){
-  const p = data.program;
-  const s = progSession(p, p.next);
+  const p = data.program, plan = p.plan;
+  const nu = planNextUp(p, todayISO());
+  const s = planSession(plan, p.state, nu.id);
   const last = (p.log || [])[p.log.length - 1];
   const wk = (p.log || []).filter(l => progDaysBetween(l.date, todayISO()) < 7).length;
+  const perWeek = plan.schedule === "weekdays" ? plan.workouts.reduce((n, w) => n + w.days.length, 0) : plan.workouts.length;
+  const others = plan.workouts.filter(w => w.id !== s.id);
+  const lastEntry = last ? data.lifts.find(l => l.id === last.liftId) : null;
   return `<div class="card" style="padding:14px;border-top:3px solid var(--push)">
-      <div class="lbl" style="margin:0">Next session</div>
-      <div class="h2" style="margin:4px 0 2px">${s.name} <span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${s.sub}</span></div>
-      <div style="font-size:13px;line-height:1.6;margin:6px 0 12px">${s.items.map(it => `<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(it.name)}</span><span style="font-family:var(--mono);font-size:12px;color:var(--sub);text-align:right">${esc(progTargetText(it).replace(/^3 slow negatives · .*/, "3 slow negatives"))}</span></div>`).join("")}</div>
-      <button class="btn ink" onclick="App.progStart()">Start ${s.name}</button>
-      <div style="display:flex;justify-content:space-between;margin-top:8px">
-        <button class="linkbtn" style="font-size:12px;padding:4px 0;color:var(--sub)" onclick="App.progSkip()">skip to ${PROG_DAYS[PROG_ORDER[(PROG_ORDER.indexOf(p.next) + 1) % 4]].name} ›</button>
-        <span style="font-family:var(--mono);font-size:11px;color:var(--sub);padding-top:6px">${wk}/4 this week</span>
+      <div class="lbl" style="margin:0">${plan.schedule === "weekdays" ? (nu.today ? "Today" : `Next · ${nu.when}`) : "Next session"} · ${esc(plan.name)}</div>
+      <div class="h2" style="margin:4px 0 2px">${esc(s.name)} ${s.note ? `<span style="font-size:13px;font-weight:500;color:var(--sub);text-transform:none;letter-spacing:0">${esc(s.note)}</span>` : ""}</div>
+      <div style="font-size:13px;line-height:1.6;margin:6px 0 12px">${s.items.map(it => `<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(it.name)}</span><span style="font-family:var(--mono);font-size:12px;color:var(--sub);text-align:right">${esc(progItemTarget(it).replace(/ · .*/, ""))}</span></div>`).join("")}</div>
+      <button class="btn ink" onclick="App.progStart('${s.id}')">Start ${esc(s.name)}</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px">
+        ${plan.schedule === "rotation" ? `<button class="linkbtn" style="font-size:12px;padding:4px 0;color:var(--sub)" onclick="App.progSkip()">skip to ${esc(progWorkout(p, planAfter(plan, s.id)).name)} ›</button>` : `<span></span>`}
+        <span style="font-family:var(--mono);font-size:11px;color:var(--sub)">${wk}/${perWeek} this week</span>
       </div>
+      ${others.length ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--grid)"><div class="lbl" style="margin-bottom:6px">Or start a different one</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">${others.map(w => `<button onclick="App.progStart('${w.id}')" style="background:transparent;border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:700;color:var(--ink);cursor:pointer">${esc(w.name)}</button>`).join("")}</div></div>` : ""}
     </div>
     <div class="card" style="padding:12px 14px">
-      <div class="lbl" style="margin-bottom:8px">Rotation · aim for Mon / Tue / Thu / Sat</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
-        ${PROG_ORDER.map(k => `<div style="border:1px solid ${k===p.next?"var(--push)":"var(--line)"};background:${k===p.next?"rgba(232,89,12,.08)":"transparent"};border-radius:8px;padding:7px 4px;text-align:center">
-          <div style="font-size:12px;font-weight:800">${PROG_DAYS[k].name}</div><div style="font-family:var(--mono);font-size:10px;color:var(--sub)">${PROG_DAYS[k].sub}</div></div>`).join("")}
+      <div class="lbl" style="margin-bottom:8px">${plan.schedule === "weekdays" ? "This week" : `Rotation${plan.workouts.some(w => w.days.length) ? ` · aim for ${PLAN_DOWS.filter(d => plan.workouts.some(w => w.days.includes(d))).join(" / ")}` : ""}`}</div>
+      ${plan.schedule === "weekdays" ? progWeekStrip(p) : `<div style="display:grid;grid-template-columns:repeat(${Math.min(4, plan.workouts.length)},1fr);gap:6px">
+        ${plan.workouts.map(w => `<div style="border:1px solid ${w.id===s.id?"var(--push)":"var(--line)"};background:${w.id===s.id?"rgba(232,89,12,.08)":"transparent"};border-radius:8px;padding:7px 4px;text-align:center">
+          <div style="font-size:12px;font-weight:800">${esc(w.name)}</div><div style="font-family:var(--mono);font-size:10px;color:var(--sub)">${esc(w.note || "")}</div></div>`).join("")}
       </div>
-      <div style="font-size:12px;color:var(--sub);margin-top:8px;line-height:1.45">Miss a day? Nothing breaks — you just do the next one in line.</div>
-    </div>
-    <div class="card" style="padding:12px 14px">
-      <div class="lbl" style="margin-bottom:6px">Where you're at</div>
-      ${[["Bench 3×5","benchH"],["Bench 3×8","benchV"],["Squat 3×5","squatH"],["Squat 3×8","squatV"]].map(([l,k]) => `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--grid);font-size:13px"><span>${l}</span><span style="font-family:var(--mono)">${p.main[k].w} lb${p.main[k].fails ? ` <span style="color:#E8590C">· retry</span>` : ""}</span></div>`).join("")}
-      <div style="display:flex;justify-content:space-between;padding:5px 0;font-size:13px"><span>Pull-ups</span><span style="font-family:var(--mono)">${p.pull.reps.join("·")} (${p.pull.reps.reduce((a,b)=>a+b,0)} reps)${p.pull.added ? ` +${p.pull.added} lb` : ""}</span></div>
-      <button class="linkbtn" style="font-size:12px;padding:6px 0 0" onclick="App.progEdit()">adjust weights ›</button>
+      <div style="font-size:12px;color:var(--sub);margin-top:8px;line-height:1.45">Miss a day? Nothing breaks — you just do the next one in line.</div>`}
     </div>
     ${last ? `<div class="card" style="padding:12px 14px">
-      <div class="lbl" style="margin-bottom:6px">Last session · ${PROG_DAYS[last.day].name} · ${shortDate(last.date)}</div>
-      ${last.changes.map(c => `<div style="font-size:13px;padding:3px 0">${esc(c)}</div>`).join("")}
+      <div class="lbl" style="margin-bottom:6px">Last session · ${esc(last.name || progWorkout(p, last.day).name)} · ${shortDate(last.date)}</div>
+      ${(last.changes || []).map(c => `<div style="font-size:13px;padding:3px 0">${esc(c)}</div>`).join("")}
+      ${lastEntry ? triviaLineHTML(lastEntry) : ""}
     </div>` : ""}
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:6px">Where you're at</div>
+      ${progStateRows(p)}
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:8px">Plan</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.pbOpen(false)">✎ Edit plan</button>
+        <button class="btn" style="background:transparent;border:1px solid var(--ink);color:var(--ink)" onclick="App.progView('import')">\u{1F4C4} Import</button>
+        <button class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pfExport()">Share plan file</button>
+        <button class="btn" style="background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pfCopyPrompt()">Copy Claude prompt</button>
+      </div>
+      <div style="text-align:center;margin-top:10px">${delBtn("pg-reset", "App.progReset()", "remove this plan")}</div>
+    </div>
     <div class="card" style="padding:12px 14px;font-size:12px;color:var(--sub);line-height:1.5">
-      <b style="color:var(--ink)">How it moves:</b> hit every rep on bench or squat and next time is +5 lb (squat +10 until your first miss). Miss and you repeat the weight; miss twice in a row and it drops 10% to rebuild. Pull-ups add one rep per session until 30 total, then you add weight. Accessories: hit the top of the rep range on every set and the weight goes up.
+      <b style="color:var(--ink)">How it moves:</b> <b>add weight</b> exercises go up by their step when you hit every rep; miss and you repeat, miss twice in a row and the weight drops 10% to rebuild. <b>Rep range</b> exercises go up when every set hits the top of the range. <b>Add a rep</b> exercises add one rep to your weakest set each time you hit them all.
     </div>`;
 }
+// ---------- import / export ----------
+const PLAN_PROMPT = `I use a workout tracker app that imports workout plans as JSON. When I ask you for a workout plan, reply with ONE JSON code block in exactly this format (plus any explanation you like outside the code block). I'll paste your whole reply into the app.
+
+{
+  "format": "training-log-plan",
+  "version": 1,
+  "name": "Short plan name",
+  "schedule": "weekdays",
+  "workouts": [
+    {
+      "name": "Push",
+      "note": "optional short description",
+      "split": "push",
+      "days": ["Mon", "Thu"],
+      "exercises": [
+        { "name": "Bench Press", "main": true, "sets": 3, "reps": 5, "weight": 135,
+          "progression": { "type": "linear", "increment": 5 } },
+        { "name": "Lateral Raise", "sets": 3, "repRange": [12, 20], "weight": 15,
+          "progression": { "type": "double", "increment": 5 } },
+        { "name": "Push-Up", "bodyweight": true, "sets": 2, "reps": 12,
+          "progression": { "type": "reps" } }
+      ]
+    }
+  ]
+}
+
+RULES
+- schedule: "weekdays" = each workout repeats on its "days" (use "Sun","Mon","Tue","Wed","Thu","Fri","Sat"). "rotation" = workouts are done in list order whenever I train; "days" are then just suggestions.
+- split (optional): one of "upper","lower","push","pull","legs","full" — colors the workout on the app's calendar.
+- Each exercise needs "name" and "sets" (1-12), plus EITHER "reps" (a number) OR "repRange" ([low, high]).
+- weight: starting weight in lb (number), or null if unknown — the app fills it from my history or asks on the first set. For bodyweight exercises set "bodyweight": true; for those, "weight" means ADDED weight (0 or omit).
+- main: true for the 1-3 big lifts of the day (shows warm-up sets and a longer rest timer).
+- rest (optional): rest between sets in seconds. Defaults: main 180, others 90.
+- note (optional): short cue shown under the exercise, e.g. "3 seconds down".
+- progression.type must be one of:
+  - "linear": fixed reps; when every set hits the reps, add "increment" lb next time. Optional: "firstIncrement" (bigger jumps until the first miss), "missesBeforeDeload" (default 2), "deloadPercent" (default 10).
+  - "double": needs repRange; when every set reaches the top of the range, add "increment" lb and restart at the bottom.
+  - "reps": bodyweight builder; adds one rep to the weakest set each session all sets are hit. Optional: "weightedAfterTotalReps" (e.g. 30) switches to "weightedSets" x "weightedReps" with "increment" lb added.
+  - "none": just a checklist item, no automatic changes.
+- Use common exercise names (e.g. "Squat", "Romanian Deadlift", "Lat Pulldown", "Dumbbell Curl"). Keep every exercise rep-based (no timed holds).
+- Only use the fields shown above. Output valid JSON: double quotes, no comments, no trailing commas.
+
+Before writing the plan, ask me anything you need: goals, how many days a week I can train, equipment, injuries, and what weights I currently use.`;
+function progImportHTML(){
+  const r = ui.pfResult;
+  return `<button class="linkbtn" style="font-size:13px;padding:0 0 8px" onclick="App.progView(null)">‹ back</button>
+  <div class="card" style="padding:12px 14px">
+    <div class="lbl" style="margin-bottom:6px">Step 1 · ask Claude</div>
+    <div style="font-size:13px;line-height:1.5;color:var(--sub);margin-bottom:10px">Copy this prompt into a chat with Claude, then describe the plan you want. Claude will reply with a plan in a format this app reads.</div>
+    <button class="btn ink" onclick="App.pfCopyPrompt()">Copy prompt for Claude</button>
+  </div>
+  <div class="card" style="padding:12px 14px">
+    <div class="lbl" style="margin-bottom:6px">Step 2 · bring the plan here</div>
+    <textarea id="pfText" rows="6" placeholder="Paste Claude's whole reply here" style="font-family:var(--mono);font-size:12px;margin-bottom:8px" oninput="App.pfDraft(this.value)">${esc(ui.pfText || "")}</textarea>
+    <label class="btn" style="display:block;text-align:center;background:transparent;border:1px solid var(--line);color:var(--ink);margin-bottom:8px;cursor:pointer">Open a plan file<input type="file" accept=".json,.txt,application/json,text/plain" style="display:none" onchange="App.pfFile(this)"></label>
+    <button class="btn ink" onclick="App.pfCheck()">Check plan</button>
+  </div>
+  ${r ? (r.plan ? `<div class="card" style="padding:12px 14px;border-left:4px solid #2B8A3E">
+      <div class="h2" style="margin:0 0 4px">${esc(r.plan.name)}</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--sub);margin-bottom:8px">${r.plan.schedule === "weekdays" ? "repeats on set days" : "rotates in order"} · ${r.plan.workouts.length} workout${r.plan.workouts.length > 1 ? "s" : ""}</div>
+      ${r.plan.workouts.map(w => `<div style="padding:6px 0;border-top:1px solid var(--grid)"><div style="font-weight:700;font-size:14px">${esc(w.name)} <span style="font-family:var(--mono);font-size:11px;color:var(--sub);font-weight:400">${w.days.join(" ") || ""}</span></div>
+        <div style="font-size:12px;color:var(--sub);line-height:1.5">${w.exercises.map(e => `${esc(e.name)} ${e.sets}×${e.repRange ? e.repRange.join("–") : e.reps}${e.weight != null && !e.bodyweight ? ` @${e.weight}` : ""}`).join(" · ")}</div></div>`).join("")}
+      ${r.warnings.length ? `<div style="font-size:12px;color:#B26B00;margin-top:8px;line-height:1.45">${r.warnings.map(esc).join("<br>")}</div>` : ""}
+      <button class="btn" style="background:#2B8A3E;color:#fff;margin-top:10px" onclick="App.pfApply()">Use this plan</button>
+      ${progData()?.plan ? `<div style="font-size:11px;color:var(--sub);margin-top:6px;text-align:center">Replaces your current plan. Your logged workouts stay.</div>` : ""}
+    </div>` : `<div class="card" style="padding:12px 14px;border-left:4px solid #E03131">
+      <div style="font-weight:800;margin-bottom:6px">That plan can't be imported yet</div>
+      <div style="font-size:13px;line-height:1.5">${r.errors.map(esc).join("<br>")}</div>
+      <div style="font-size:12px;color:var(--sub);margin-top:8px">Tip: paste these errors back to Claude and ask it to fix the plan.</div>
+    </div>`) : ""}`;
+}
+// ---------- builder ----------
+const PB_SPLITS = [["", "No tag"], ["upper", "Upper"], ["lower", "Lower"], ["push", "Push"], ["pull", "Pull"], ["legs", "Legs"], ["full", "Full"]];
+function pbExSummary(ex){
+  const reps = ex.repRange ? `${ex.repRange[0]}–${ex.repRange[1]}` : ex.reps;
+  const w = ex.bodyweight ? (ex.weight ? ` +${ex.weight}` : " BW") : ex.weight != null && ex.weight !== "" ? ` @ ${ex.weight}` : "";
+  const pr = { linear: `+${ex.progression.increment ?? 5} lb`, double: "rep range", reps: "+1 rep", none: "no auto" }[ex.progression.type];
+  return `${ex.sets}×${reps}${w} · ${pr}`;
+}
+function pbEditorHTML(ex, i){
+  const t = ex.progression.type, pr = ex.progression;
+  const n = (field, val, ph, step) => `<input type="number" inputmode="decimal" ${step ? `step="${step}"` : ""} value="${val ?? ""}" placeholder="${ph || ""}" oninput="App.pbEx(${i},'${field}',this.value)" style="padding:8px;font-family:var(--mono)">`;
+  const lab = (t2, inner) => `<label style="display:block"><span class="lbl">${t2}</span>${inner}</label>`;
+  return `<div class="pbedit" style="padding:10px 0 4px;border-top:1px dashed var(--line);margin-top:8px">
+    ${lab("Exercise", `<input list="pbExList" value="${esc(ex.name)}" oninput="App.pbEx(${i},'name',this.value)" style="padding:8px">`)}
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px">
+      ${lab("Sets", n("sets", ex.sets, "3"))}
+      ${ex.repRange ? lab("Reps low", n("lo", ex.repRange[0], "8")) + lab("Reps high", n("hi", ex.repRange[1], "12")) : lab("Reps", n("reps", ex.reps, "5")) + `<div></div>`}
+    </div>
+    <div class="seg" style="margin:8px 0 0">
+      <button class="${ex.repRange ? "" : "on"}" onclick="App.pbEx(${i},'range',false)">Fixed reps</button>
+      <button class="${ex.repRange ? "on" : ""}" onclick="App.pbEx(${i},'range',true)">Rep range</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;align-items:end">
+      ${lab(ex.bodyweight ? "Added weight (lb)" : "Weight (lb)", n("weight", ex.weight, ex.bodyweight ? "0" : "blank = set later"))}
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;padding-bottom:10px"><input type="checkbox" ${ex.bodyweight ? "checked" : ""} onchange="App.pbEx(${i},'bodyweight',this.checked)"> Bodyweight</label>
+    </div>
+    ${lab("How it progresses", `<select onchange="App.pbEx(${i},'type',this.value)" style="padding:8px">
+      ${PLAN_PROG_TYPES.map(x => `<option value="${x}" ${t === x ? "selected" : ""}>${progProgLabel(x)}</option>`).join("")}</select>`)}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+      ${t === "linear" || t === "double" || t === "reps" ? lab(t === "reps" ? "Weight step once weighted" : "Weight step (lb)", n("increment", pr.increment, "5")) : ""}
+      ${t === "linear" ? lab("Bigger first steps (opt.)", n("firstIncrement", pr.firstIncrement, "e.g. 10")) + lab("Misses before reset", n("missesBeforeDeload", pr.missesBeforeDeload, "2")) + lab("Reset by %", n("deloadPercent", pr.deloadPercent, "10")) : ""}
+      ${t === "reps" ? lab("Go weighted at total reps", n("weightedAfterTotalReps", pr.weightedAfterTotalReps, "0 = never")) : ""}
+      ${lab("Rest (sec)", n("rest", ex.rest, ex.main ? "180" : "90"))}
+    </div>
+    ${lab("Note (optional)", `<input value="${esc(ex.note || "")}" placeholder="e.g. 3 seconds down" oninput="App.pbEx(${i},'note',this.value)" style="padding:8px;margin-top:2px">`)}
+    <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:8px"><input type="checkbox" ${ex.main ? "checked" : ""} onchange="App.pbEx(${i},'main',this.checked)"> Main lift (warm-up sets, longer rest)</label>
+  </div>`;
+}
+function progBuilderHTML(){
+  const d = ui.planDraft, wi = Math.min(ui.pbW || 0, d.workouts.length - 1), W = d.workouts[wi];
+  return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0 10px">
+      <button onclick="App.pbCancel()" style="background:none;border:none;font-size:22px;cursor:pointer;padding:0 6px 0 0;color:var(--ink)" aria-label="Back">‹</button>
+      <div class="h2" style="margin:0">Plan builder</div>
+    </div>
+    <datalist id="pbExList">${allExercises().map(n => `<option value="${esc(n)}">`).join("")}</datalist>
+    <div class="card" style="padding:12px 14px">
+      <label><span class="lbl">Plan name</span><input id="pbName" value="${esc(d.name)}" oninput="App.pbPlan('name',this.value)"></label>
+      <div class="seg" style="margin:10px 0 0">
+        <button class="${d.schedule === "weekdays" ? "on" : ""}" onclick="App.pbPlan('schedule','weekdays')">Repeat on set days</button>
+        <button class="${d.schedule === "rotation" ? "on" : ""}" onclick="App.pbPlan('schedule','rotation')">Rotate in order</button>
+      </div>
+    </div>
+    <div class="seg" style="flex-wrap:wrap;margin-bottom:12px">
+      ${d.workouts.map((w, i) => `<button class="${i === wi ? "on" : ""}" onclick="App.pbPickW(${i})">${esc(w.name || "Workout")}</button>`).join("")}
+      <button onclick="App.pbAddW()" aria-label="Add workout">+ Workout</button>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <label><span class="lbl">Workout name</span><input id="pbWName" value="${esc(W.name)}" oninput="App.pbW('name',this.value)"></label>
+        <label><span class="lbl">Note</span><input value="${esc(W.note || "")}" placeholder="optional" oninput="App.pbW('note',this.value)"></label>
+      </div>
+      <div class="lbl" style="margin:10px 0 6px">${d.schedule === "weekdays" ? "Repeats on" : "Suggested days (optional)"}</div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">
+        ${PLAN_DOWS.map(dw => `<button class="pbday" onclick="App.pbDay('${dw}')" aria-pressed="${W.days.includes(dw)}" style="padding:8px 0;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${W.days.includes(dw) ? "var(--push)" : "var(--line)"};background:${W.days.includes(dw) ? "var(--push)" : "transparent"};color:${W.days.includes(dw) ? "#fff" : "var(--ink)"}">${dw}</button>`).join("")}
+      </div>
+      <div class="lbl" style="margin:10px 0 6px">Calendar tag</div>
+      <select onchange="App.pbW('split',this.value)" style="padding:8px">${PB_SPLITS.map(([v, l]) => `<option value="${v}" ${W.split === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </div>
+    <div class="card" style="padding:12px 14px">
+      <div class="lbl" style="margin-bottom:8px">Exercises · drag ⠇ to reorder</div>
+      <div id="pbList">
+        ${W.exercises.map((ex, i) => `<div class="pbrow" data-i="${i}" style="background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:6px;position:relative">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="pbhandle" data-i="${i}" aria-label="drag ${esc(ex.name)}" style="touch-action:none;cursor:grab;font-size:20px;color:var(--sub);padding:4px 6px;user-select:none;-webkit-user-select:none">⠇</span>
+            <div style="flex:1;min-width:0" onclick="App.pbToggle(${i})">
+              <div style="font-weight:700;font-size:14px">${esc(ex.name || "New exercise")}${ex.main ? ` <span style="font-family:var(--mono);font-size:9px;color:var(--push)">MAIN</span>` : ""}</div>
+              <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">${esc(pbExSummary(ex))}</div>
+            </div>
+            <button onclick="App.pbToggle(${i})" aria-label="edit ${esc(ex.name)}" style="background:none;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;cursor:pointer;color:var(--ink)">${ui.pbOpenEx === i ? "done" : "✎"}</button>
+            ${delBtn(`pbx-${i}`, `App.pbDelEx(${i})`, "✕")}
+          </div>
+          ${ui.pbOpenEx === i ? pbEditorHTML(ex, i) : ""}
+        </div>`).join("")}
+      </div>
+      ${W.exercises.length ? "" : `<div style="font-size:13px;color:var(--sub);padding:4px 0 8px">No exercises yet.</div>`}
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <input id="pbNewEx" list="pbExList" placeholder="Add an exercise…" style="flex:1">
+        <button class="btn ink" style="width:auto;padding:0 16px" onclick="App.pbAddEx()">Add</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="btn" style="flex:1;background:transparent;border:1px solid var(--line);color:var(--ink)" onclick="App.pbDupW()">Duplicate workout</button>
+      ${d.workouts.length > 1 ? `<span style="flex:1;display:flex;align-items:center;justify-content:center">${delBtn("pbw-del", "App.pbDelW()", "delete workout")}</span>` : ""}
+    </div>
+    <button class="btn" style="background:var(--push);color:#fff" onclick="App.pbSave()">Save plan</button>
+    <button class="btn" style="margin-top:8px;background:transparent;border:1px solid var(--line);color:var(--sub)" onclick="App.pbCancel()">Cancel</button>`;
+}
+// drag-to-reorder for builder rows (pointer events work for touch + mouse)
+function pbInitDrag(){
+  document.querySelectorAll("#pbList .pbhandle").forEach(h => {
+    h.onpointerdown = ev => {
+      ev.preventDefault();
+      const row = h.closest(".pbrow"), list = $("#pbList");
+      const rows = [...list.querySelectorAll(".pbrow")];
+      const from = rows.indexOf(row);
+      const mids = rows.map(r => { const b = r.getBoundingClientRect(); return b.top + b.height / 2; });
+      const startY = ev.clientY, rowH = row.getBoundingClientRect().height + 6;
+      let to = from;
+      try { h.setPointerCapture(ev.pointerId); } catch(e){}
+      row.style.zIndex = 5; row.style.boxShadow = "0 8px 20px rgba(0,0,0,.18)"; row.style.transition = "none";
+      const move = e => {
+        const dy = e.clientY - startY;
+        row.style.transform = `translateY(${dy}px)`;
+        const c = mids[from] + dy;
+        to = mids.filter((m, i) => i !== from && m < c).length;
+        rows.forEach((r, i) => {
+          if (i === from) return;
+          let shift = 0;
+          if (from < to && i > from && i <= to) shift = -rowH;
+          if (from > to && i >= to && i < from) shift = rowH;
+          r.style.transition = "transform .12s"; r.style.transform = shift ? `translateY(${shift}px)` : "";
+        });
+      };
+      const up = () => {
+        h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("pointercancel", up);
+        App.pbMove(from, to);
+      };
+      h.addEventListener("pointermove", move); h.addEventListener("pointerup", up); h.addEventListener("pointercancel", up);
+    };
+  });
+}
+// ---------- trivia UI ----------
+const TRIVIA_THEME = {
+  christmas: { bg: "linear-gradient(135deg,#E9F7EE 0%,#FDEBEC 100%)", accent: "#B3202A", deco: ["❄️", "\u{1F384}", "⭐", "❄️", "\u{1F381}"] },
+  winter: { bg: "linear-gradient(135deg,#E8F3FF 0%,#F4F0FF 100%)", accent: "#1F5FA8", deco: ["❄️", "⛄", "❄️", "\u{1F9E3}", "❄️"] },
+  spring: { bg: "linear-gradient(135deg,#FDEFF6 0%,#ECF8E8 100%)", accent: "#B0306A", deco: ["\u{1F338}", "\u{1F337}", "\u{1F98B}", "\u{1F33C}", "\u{1F338}"] },
+  summer: { bg: "linear-gradient(135deg,#FFF6D6 0%,#DDF6F4 100%)", accent: "#B26B00", deco: ["☀️", "\u{1F30A}", "\u{1F334}", "\u{1F31E}", "\u{1F3D6}️"] },
+  fall: { bg: "linear-gradient(135deg,#FFF1E3 0%,#FCE9D9 100%)", accent: "#B4520E", deco: ["\u{1F342}", "\u{1F341}", "\u{1F383}", "\u{1F341}", "\u{1F342}"] },
+};
+function triviaFactsHTML(facts, theme, big){
+  return facts.map((f, i) => `<div class="tvfact" style="display:flex;gap:10px;align-items:center;padding:${big && i === 0 ? "10px" : "7px"} 0;${i ? "border-top:1px dashed rgba(0,0,0,.12);" : ""}">
+    <span class="tvbounce" style="font-size:${big && i === 0 ? 40 : 28}px;flex:none;animation-delay:${i * 0.15}s">${f.emoji}</span>
+    <div style="min-width:0">
+      <div style="font-size:${big && i === 0 ? 17 : 14}px;font-weight:800;color:#1B2638;line-height:1.25">${f.countText} ${esc(f.name)}</div>
+      <div style="font-size:11px;letter-spacing:1px;line-height:1.4;margin-top:2px;color:${theme.accent};overflow:hidden;white-space:nowrap">${f.emoji.repeat(Math.max(1, Math.min(12, Math.round(f.count))))}${f.count > 12 ? ` <span style="font-family:var(--mono);font-size:10px;letter-spacing:0">×${f.countText}</span>` : ""}</div>
+    </div></div>`).join("");
+}
+function triviaCardHTML({ lbs, iso, seed, title, sub, n = 3, big = false }){
+  const facts = triviaPick(lbs, iso, seed, n);
+  if (!facts.length) return "";
+  const { name } = triviaSeason(iso), th = TRIVIA_THEME[name];
+  return `<div class="tvcard" style="position:relative;overflow:hidden;background:${th.bg};border-radius:16px;padding:14px 14px 10px;margin-bottom:12px;border:1px solid rgba(0,0,0,.06)">
+    <div aria-hidden="true" style="position:absolute;top:6px;right:8px;font-size:15px;opacity:.75;letter-spacing:4px">${th.deco.map((e, i) => `<span class="tvfloat" style="display:inline-block;animation-delay:${i * 0.4}s">${e}</span>`).join("")}</div>
+    <div style="font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${th.accent}">${esc(title)}</div>
+    <div style="font-family:var(--disp);font-size:24px;font-weight:800;color:#1B2638;margin:2px 0 4px">${Math.round(lbs).toLocaleString("en-US")} lb</div>
+    ${sub ? `<div style="font-size:12px;color:#4A5568;margin-bottom:4px">${sub}</div>` : ""}
+    <div style="font-size:12px;color:#4A5568">That's about…</div>
+    ${triviaFactsHTML(facts, th, big)}
+  </div>`;
+}
+function triviaLineHTML(entry){
+  const lbs = liftVolume(entry, bwOn(data.weights, entry.date));
+  const f = triviaPick(lbs, entry.date, entry.id, 1)[0];
+  if (!f) return "";
+  return `<div style="display:flex;gap:8px;align-items:center;margin-top:10px;padding:8px 10px;border-radius:10px;background:${TRIVIA_THEME[triviaSeason(entry.date).name].bg}">
+    <span class="tvbounce" style="font-size:24px">${f.emoji}</span>
+    <span style="font-size:12px;color:#1B2638;line-height:1.35"><b>${Math.round(lbs).toLocaleString("en-US")} lb</b> moved — about ${f.countText} ${esc(f.name)}</span></div>`;
+}
+function celebrateHTML(){
+  const c = ui.celebrate;
+  if (!c) return "";
+  const entry = data.lifts.find(l => l.id === c.id);
+  if (!entry) return "";
+  const bw = bwOn(data.weights, entry.date);
+  const lbs = liftVolume(entry, bw);
+  const hasBW = entry.exercises.some(ex => triviaBWFactor(ex.name) != null);
+  return `<div id="celebrate" onclick="if(event.target.id==='celebrate')App.celebrateClose()" style="position:fixed;inset:0;z-index:60;background:rgba(10,15,25,.55);display:flex;align-items:center;justify-content:center;padding:16px">
+    <div style="width:100%;max-width:400px;animation:tvpop .35s ease-out">
+      ${triviaCardHTML({ lbs, iso: entry.date, seed: entry.id, title: "Workout done \u{1F4AA} you moved", n: 3, big: true,
+        sub: hasBW ? (bw ? `bodyweight moves count ${bw} lb (your latest weigh-in)` : "log a weigh-in so bodyweight moves count too") : "" })
+        || `<div class="card" style="text-align:center;font-weight:800">Workout saved \u{1F4AA}</div>`}
+      <button class="btn ink" onclick="App.celebrateClose()">Nice — close</button>
+    </div></div>`;
+}
 function renderProgram(){
-  const p = data.program;
-  if (ui.progEditing && p?.main) return progSetupHTML(true);
-  if (!p?.main) return progSetupHTML(false);
+  const p = progData();
+  if (ui.progView === "builder" && ui.planDraft) return progBuilderHTML();
+  if (ui.progView === "import") return progImportHTML();
+  if (ui.progView === "setup") return progSetupHTML();
+  if (!p?.plan) return progChooseHTML();
   if (p.live) return progLiveHTML();
   return progOverviewHTML();
 }
@@ -2739,19 +3078,6 @@ const PROG_MATCH = {
   squat: /^(barbell |back |high[- ]bar |low[- ]bar )?squats?$/i,
   pullup: /^(strict |weighted )?(pull[- ]?ups?|chin[- ]?ups?)$/i,
 };
-const PROG_ACC = {
-  "Barbell Row": [3, 8, 12], "Tricep Pushdown": [3, 10, 15],
-  "Bulgarian Split Squat": [3, 8, 12], "Leg Curl": [3, 10, 15], "Calf Raise": [3, 10, 15],
-  "Dumbbell Shoulder Press": [3, 8, 12], "Lat Pulldown": [3, 8, 12], "Dumbbell Curl": [3, 10, 15],
-  "Leg Press": [3, 10, 15], "Leg Extension": [3, 10, 15], "Ab Wheel": [3, 8, 12], "Cable Crunch": [3, 10, 15],
-};
-const PROG_DAYS = {
-  UA: { name: "Upper A", sub: "heavy bench", split: "upper", main: "benchH", reps: 5, pull: true, acc: ["Barbell Row", "Tricep Pushdown"] },
-  LA: { name: "Lower A", sub: "heavy squat", split: "lower", main: "squatH", reps: 5, pull: false, acc: ["Bulgarian Split Squat", "Leg Curl", "Calf Raise", "Cable Crunch"] },
-  UB: { name: "Upper B", sub: "volume bench", split: "upper", main: "benchV", reps: 8, pull: true, acc: ["Dumbbell Shoulder Press", "Lat Pulldown", "Dumbbell Curl"] },
-  LB: { name: "Lower B", sub: "volume squat", split: "lower", main: "squatV", reps: 8, pull: false, acc: ["Leg Press", "Leg Extension", "Ab Wheel"] },
-};
-const PROG_ORDER = ["UA", "LA", "UB", "LB"];
 function progDaysBetween(a, b){
   const [y1, m1, d1] = a.split("-").map(Number), [y2, m2, d2] = b.split("-").map(Number);
   return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
@@ -2769,7 +3095,7 @@ function progAnalyze(lifts, today){
         const weight = +s.weight || 0, reps = +s.reps || 0;
         if (reps <= 0) continue;
         for (const k of Object.keys(PROG_MATCH)) if (PROG_MATCH[k].test(name)) sets[k].push({ weight, reps, date: w.date });
-        if (PROG_ACC[name] && weight > 0) acc[name] = Math.max(acc[name] || 0, weight);
+        if (weight > 0) acc[name] = Math.max(acc[name] || 0, weight);
       }
     }
   }
@@ -2802,14 +3128,14 @@ function progNextMain(st, done, target){
   if ((st.fails || 0) + 1 >= 2) return { ...st, w: progRound5(st.w * 0.9), fails: 0, inc: 5 };
   return { ...st, fails: (st.fails || 0) + 1, inc: 5 };
 }
-function progNextPull(st, done){
+function progNextPull(st, done, graduateAt = 30, inc = 5, wSets = 3, wReps = 5){
   const ok = st.reps.every((t, i) => (done[i] || 0) >= t);
   if (!ok) return { ...st, reps: [...st.reps] };
-  if (st.added > 0) return { reps: [...st.reps], added: st.added + 5 };
+  if (st.added > 0) return { reps: [...st.reps], added: st.added + inc };
   const reps = [...st.reps];
   const lo = Math.min(...reps);
   reps[reps.indexOf(lo)] += 1;
-  if (reps.reduce((a, b) => a + b, 0) >= 30) return { reps: [5, 5, 5], added: 5 };
+  if (graduateAt > 0 && reps.reduce((a, b) => a + b, 0) >= graduateAt) return { reps: Array(wSets).fill(wReps), added: inc };
   return { reps, added: 0 };
 }
 function progNextAcc(st, done, lo, hi, inc){
@@ -2824,23 +3150,326 @@ function progWarmup(w){
   }
   return out;
 }
-function progSession(prog, day){
-  const D = PROG_DAYS[day];
-  const lift = D.main.startsWith("bench") ? "Bench Press" : "Squat";
-  const m = prog.main[D.main];
-  const items = [{ key: D.main, kind: "main", name: lift, target: D.reps, sets: [0, 1, 2].map(() => ({ w: m.w, r: D.reps, done: false })) }];
-  if (D.pull){
-    items.push({ key: "pull", kind: "pull", name: "Pull-Up", added: prog.pull.added,
-      sets: prog.pull.reps.map(r => ({ w: prog.pull.added, r, done: false })) });
-    if (!prog.pull.added) items.push({ key: "neg", kind: "neg", name: "Pull-up negatives", note: "5 seconds down, step back up", sets: [0, 1, 2].map(() => ({ w: 0, r: 1, done: false })) });
-  }
-  for (const name of D.acc){
-    const [n, lo, hi] = PROG_ACC[name];
-    const w = prog.acc?.[name]?.w ?? null;
-    items.push({ key: name, kind: "acc", name, lo, hi, sets: Array.from({ length: n }, () => ({ w, r: lo, done: false })) });
-  }
-  return { day, name: D.name, sub: D.sub, split: D.split, items };
+// ---- workout plans: one format for the built-in plan, the builder, and files Claude writes ----
+const PLAN_DOWS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PLAN_PROG_TYPES = ["linear", "double", "reps", "none"];
+function planDefaultRest(ex){ return ex.main ? 180 : ex.progression?.type === "reps" ? 120 : ex.progression?.type === "none" ? 60 : 90; }
+function planExKey(workoutId, ex){ return ex.key || `${workoutId}:${ex.name}`; }
+function planDowOf(iso){ const [y, m, d] = iso.split("-").map(Number); return PLAN_DOWS[new Date(y, m - 1, d).getDay()]; }
+// the original bench / squat / pull-up program, expressed as a plan (keys match the old saved state)
+function planBuiltin(){
+  const lin = (inc, first) => ({ type: "linear", increment: inc, ...(first ? { firstIncrement: first } : {}), missesBeforeDeload: 2, deloadPercent: 10 });
+  const dbl = inc => ({ type: "double", increment: inc });
+  const acc = (name, lo, hi, extra = {}) => ({ name, key: name, sets: 3, repRange: [lo, hi], weight: null, progression: dbl(5), ...extra });
+  const pull = { name: "Pull-Up", key: "pull", sets: 5, reps: 2, bodyweight: true, progression: { type: "reps", weightedAfterTotalReps: 30, weightedSets: 3, weightedReps: 5, increment: 5 } };
+  const neg = { name: "Pull-Up Negative", key: "neg", sets: 3, reps: 1, bodyweight: true, note: "5 seconds down, step back up", progression: { type: "none" } };
+  return {
+    format: "training-log-plan", version: 1, name: "Bench · Squat · Pull-ups", schedule: "rotation",
+    workouts: [
+      { id: "UA", name: "Upper A", note: "heavy bench", split: "upper", days: ["Mon"], exercises: [
+        { name: "Bench Press", key: "benchH", main: true, sets: 3, reps: 5, weight: 95, progression: lin(5) }, pull, neg,
+        acc("Barbell Row", 8, 12), acc("Tricep Pushdown", 10, 15)] },
+      { id: "LA", name: "Lower A", note: "heavy squat", split: "lower", days: ["Tue"], exercises: [
+        { name: "Squat", key: "squatH", main: true, sets: 3, reps: 5, weight: 115, progression: lin(5, 10) },
+        acc("Bulgarian Split Squat", 8, 12), acc("Leg Curl", 10, 15), acc("Calf Raise", 10, 15), acc("Cable Crunch", 10, 15)] },
+      { id: "UB", name: "Upper B", note: "volume bench", split: "upper", days: ["Thu"], exercises: [
+        { name: "Bench Press", key: "benchV", main: true, sets: 3, reps: 8, weight: 85, progression: lin(5) }, pull, neg,
+        acc("Dumbbell Shoulder Press", 8, 12), acc("Lat Pulldown", 8, 12), acc("Dumbbell Curl", 10, 15)] },
+      { id: "LB", name: "Lower B", note: "volume squat", split: "lower", days: ["Sat"], exercises: [
+        { name: "Squat", key: "squatV", main: true, sets: 3, reps: 8, weight: 95, progression: lin(5) },
+        acc("Leg Press", 10, 15), acc("Leg Extension", 10, 15), acc("Ab Wheel", 8, 12, { bodyweight: true, progression: { type: "double", increment: 0 } })] },
+    ],
+  };
 }
+// pull a JSON object out of whatever was pasted (code fences, chatter around it)
+function planExtractJSON(text){
+  if (text && typeof text === "object") return text;
+  const s = String(text ?? "");
+  const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(s);
+  const body = fence ? fence[1] : s;
+  const a = body.indexOf("{"), b = body.lastIndexOf("}");
+  if (a < 0 || b <= a) throw new Error("Couldn't find a plan in that text — it should be JSON starting with {");
+  try { return JSON.parse(body.slice(a, b + 1)); }
+  catch (e){ throw new Error("The plan text isn't valid JSON (" + e.message.replace(/^JSON\.parse: /, "") + ")"); }
+}
+function planDayName(x){
+  const k = String(x ?? "").trim().toLowerCase().slice(0, 3);
+  const i = PLAN_DOWS.findIndex(d => d.toLowerCase() === k);
+  return i >= 0 ? PLAN_DOWS[i] : null;
+}
+// validate + fill defaults. Returns { plan, errors, warnings } — errors mean "don't import".
+function planNormalize(raw){
+  const errors = [], warnings = [];
+  let src;
+  try { src = planExtractJSON(raw); } catch (e){ return { plan: null, errors: [e.message], warnings }; }
+  if (src.plan && !src.workouts) src = src.plan;
+  const num = (v, d) => { const n = +v; return Number.isFinite(n) ? n : d; };
+  const plan = { format: "training-log-plan", version: 1, name: String(src.name || "My plan").slice(0, 60), workouts: [] };
+  const wks = Array.isArray(src.workouts) ? src.workouts : [];
+  if (!wks.length) errors.push("The plan needs a \"workouts\" list with at least one workout.");
+  const ids = new Set();
+  wks.forEach((w, wi) => {
+    const label = `Workout ${wi + 1}${w?.name ? ` (${w.name})` : ""}`;
+    let id = String(w?.id || w?.name || `W${wi + 1}`).replace(/[^\w-]/g, "").slice(0, 24) || `W${wi + 1}`;
+    while (ids.has(id)) id += "_";
+    ids.add(id);
+    const days = [];
+    for (const d of (Array.isArray(w?.days) ? w.days : [])){ const n = planDayName(d); if (n && !days.includes(n)) days.push(n); else if (!n) warnings.push(`${label}: ignored unknown day "${d}"`); }
+    const split = ["upper", "lower", "push", "pull", "legs", "full"].includes(String(w?.split || "").toLowerCase()) ? String(w.split).toLowerCase() : "";
+    const out = { id, name: String(w?.name || `Workout ${wi + 1}`).slice(0, 40), note: String(w?.note || "").slice(0, 80), split, days: PLAN_DOWS.filter(d => days.includes(d)), exercises: [] };
+    const exs = Array.isArray(w?.exercises) ? w.exercises : [];
+    if (!exs.length) errors.push(`${label} has no exercises.`);
+    exs.forEach((e, ei) => {
+      const el = `${label}, exercise ${ei + 1}`;
+      const name = String(e?.name || "").trim().slice(0, 50);
+      if (!name){ errors.push(`${el} is missing a name.`); return; }
+      const sets = Math.round(num(e.sets, 3));
+      if (sets < 1 || sets > 12){ errors.push(`${name}: sets must be 1–12.`); return; }
+      let reps = null, repRange = null;
+      const rr = Array.isArray(e.repRange) ? e.repRange : typeof e.reps === "string" && /^\s*\d+\s*[-–]\s*\d+\s*$/.test(e.reps) ? e.reps.split(/[-–]/) : null;
+      if (rr){ const lo = Math.round(num(rr[0], 0)), hi = Math.round(num(rr[1], 0)); if (lo >= 1 && hi >= lo) repRange = [lo, hi]; else { errors.push(`${name}: rep range should look like [8, 12].`); return; } }
+      else { reps = Math.round(num(e.reps, 0)); if (reps < 1 || reps > 100){ errors.push(`${name}: reps must be a number from 1–100 (or a repRange).`); return; } }
+      const bodyweight = !!e.bodyweight;
+      const weight = e.weight === null || e.weight === undefined || e.weight === "" ? null : num(e.weight, null);
+      if (weight !== null && (weight < 0 || weight > 2000)){ errors.push(`${name}: weight looks wrong (${e.weight}).`); return; }
+      const p = e.progression && typeof e.progression === "object" ? e.progression : { type: e.progression };
+      let type = String(p.type || (repRange ? "double" : bodyweight ? "reps" : "linear")).toLowerCase();
+      if (!PLAN_PROG_TYPES.includes(type)){ warnings.push(`${name}: unknown progression "${p.type}" — using ${repRange ? "double" : "linear"}.`); type = repRange ? "double" : "linear"; }
+      if (type === "double" && !repRange){ repRange = [reps, reps + 4]; warnings.push(`${name}: double progression needs a rep range — using ${repRange[0]}–${repRange[1]}.`); reps = null; }
+      if (type === "linear" && repRange){ reps = repRange[0]; repRange = null; warnings.push(`${name}: linear progression uses fixed reps — using ${reps}.`); }
+      const prog = { type };
+      if (type === "linear" || type === "double") prog.increment = Math.max(0, num(p.increment, bodyweight ? 0 : 5));
+      if (type === "linear"){
+        if (p.firstIncrement != null) prog.firstIncrement = Math.max(0, num(p.firstIncrement, prog.increment));
+        prog.missesBeforeDeload = Math.max(1, Math.round(num(p.missesBeforeDeload, 2)));
+        prog.deloadPercent = Math.min(50, Math.max(0, num(p.deloadPercent, 10)));
+      }
+      if (type === "reps"){
+        prog.weightedAfterTotalReps = Math.max(0, Math.round(num(p.weightedAfterTotalReps, 0)));
+        prog.weightedSets = Math.max(1, Math.round(num(p.weightedSets, 3)));
+        prog.weightedReps = Math.max(1, Math.round(num(p.weightedReps, 5)));
+        prog.increment = Math.max(0, num(p.increment, 5));
+      }
+      const ex = { name, sets, ...(repRange ? { repRange } : { reps }), weight, bodyweight, progression: prog };
+      if (e.main) ex.main = true;
+      if (e.note) ex.note = String(e.note).slice(0, 80);
+      if (e.rest != null && num(e.rest, 0) > 0) ex.rest = Math.min(600, Math.round(num(e.rest, 90)));
+      if (e.key) ex.key = String(e.key).slice(0, 40);
+      out.exercises.push(ex);
+    });
+    plan.workouts.push(out);
+  });
+  const anyDays = plan.workouts.some(w => w.days.length);
+  plan.schedule = src.schedule === "rotation" || src.schedule === "weekdays" ? src.schedule : anyDays ? "weekdays" : "rotation";
+  if (plan.schedule === "weekdays" && !anyDays){ plan.schedule = "rotation"; warnings.push("No workout has days set — the plan will rotate in order instead."); }
+  return { plan: errors.length ? null : plan, errors, warnings };
+}
+// fresh progression state for an exercise (start weight, else last logged weight)
+function planInitState(ex, lastW){
+  const t = ex.progression?.type;
+  const w = ex.bodyweight && t !== "reps" ? 0 : ex.weight ?? lastW ?? null;
+  if (t === "linear") return { w, fails: 0, inc: ex.progression.firstIncrement ?? ex.progression.increment };
+  if (t === "reps") return { reps: Array(ex.sets).fill(ex.reps || 1), added: ex.bodyweight ? (ex.weight || 0) : 0 };
+  if (t === "double") return { w };
+  return {};
+}
+function planEnsureState(plan, state, lastWeights){
+  const st = { ...(state || {}) };
+  for (const w of plan.workouts) for (const ex of w.exercises){
+    const k = planExKey(w.id, ex);
+    const cur = st[k];
+    const t = ex.progression?.type;
+    const fits = cur && (t === "linear" ? "fails" in cur : t === "reps" ? Array.isArray(cur.reps) : t === "double" ? "w" in cur : true);
+    if (!fits) st[k] = planInitState(ex, lastWeights?.[ex.name]);
+  }
+  return st;
+}
+// today's / next workout
+function planNextUp(prog, today){
+  const plan = prog.plan;
+  if (!plan?.workouts?.length) return null;
+  if (plan.schedule === "weekdays"){
+    const doneToday = (prog.log || []).some(l => l.date === today);
+    for (let i = 0; i < 8; i++){
+      if (i === 0 && doneToday) continue;
+      const d = PLAN_DOWS[(PLAN_DOWS.indexOf(planDowOf(today)) + i) % 7];
+      const w = plan.workouts.find(x => x.days.includes(d));
+      if (w) return { id: w.id, when: i === 0 ? "today" : i === 1 ? "tomorrow" : d, today: i === 0 };
+    }
+    return { id: plan.workouts[0].id, when: "anytime", today: false };
+  }
+  const id = plan.workouts.some(w => w.id === prog.next) ? prog.next : plan.workouts[0].id;
+  return { id, when: "next", today: true };
+}
+function planAfter(plan, id){
+  const i = plan.workouts.findIndex(w => w.id === id);
+  return plan.workouts[(i + 1) % plan.workouts.length].id;
+}
+// the checklist for one workout
+function planSession(plan, state, workoutId){
+  const W = plan.workouts.find(w => w.id === workoutId) || plan.workouts[0];
+  const items = W.exercises.map(ex => {
+    const key = planExKey(W.id, ex), st = state?.[key] || {}, t = ex.progression.type;
+    const target = ex.repRange ? ex.repRange : ex.reps;
+    let sets;
+    if (t === "reps") sets = st.reps.map(r => ({ w: st.added || 0, r, done: false }));
+    else {
+      const w = ex.bodyweight ? 0 : (t === "none" ? ex.weight : st.w) ?? null;
+      sets = Array.from({ length: ex.sets }, () => ({ w, r: ex.repRange ? ex.repRange[0] : ex.reps, done: false }));
+    }
+    return { key, name: ex.name, main: !!ex.main, bw: !!ex.bodyweight, note: ex.note || "", prog: ex.progression, target, rest: ex.rest || planDefaultRest(ex), added: t === "reps" ? (st.added || 0) : 0, sets };
+  });
+  return { id: W.id, name: W.name, note: W.note, split: W.split, items };
+}
+// apply one finished exercise to its state → { next, change }
+function planApply(item, st){
+  const t = item.prog.type;
+  const done = item.sets.filter(s => s.done);
+  const reps = item.sets.map(s => s.done ? (+s.r || 0) : 0);
+  if (t === "linear"){
+    const cur = { ...st };
+    if (done.length) cur.w = Math.min(...done.map(s => +s.w || cur.w || 0));
+    if (cur.inc == null) cur.inc = item.prog.firstIncrement ?? item.prog.increment;
+    const ok = done.length === item.sets.length && reps.every(r => r >= item.target);
+    let nx;
+    if (ok) nx = { ...cur, w: cur.w + cur.inc, fails: 0 };
+    else if ((cur.fails || 0) + 1 >= (item.prog.missesBeforeDeload || 2)){
+      const dl = cur.w * (1 - (item.prog.deloadPercent ?? 10) / 100);
+      nx = { ...cur, w: Math.max(0, Math.round(dl / 5) * 5), fails: 0, inc: item.prog.increment };
+    } else nx = { ...cur, fails: (cur.fails || 0) + 1, inc: item.prog.increment };
+    const change = nx.w > cur.w ? `✓ ${item.name} ${cur.w} → ${nx.w} lb next time`
+      : nx.w < cur.w ? `${item.name}: ${item.prog.missesBeforeDeload || 2} misses in a row — reset to ${nx.w} lb to rebuild`
+      : `${item.name}: missed reps at ${cur.w} — same weight next time`;
+    return { next: nx, change };
+  }
+  if (t === "reps"){
+    const nx = progNextPull({ reps: st.reps, added: st.added || 0 }, reps, item.prog.weightedAfterTotalReps, item.prog.increment, item.prog.weightedSets, item.prog.weightedReps);
+    const hit = JSON.stringify(nx) !== JSON.stringify({ reps: st.reps, added: st.added || 0 });
+    return { next: nx, change: hit ? `✓ ${item.name} → next: ${nx.reps.join("·")}${nx.added ? ` with +${nx.added} lb` : ""}` : `${item.name}: repeat ${nx.reps.join("·")} next time` };
+  }
+  if (t === "double"){
+    if (!done.length) return { next: { ...st }, change: null };
+    const used = item.bw ? 0 : Math.max(...done.map(s => +s.w || 0)) || null;
+    const nx = progNextAcc({ w: used }, reps.filter((r, i) => item.sets[i].done).length === item.sets.length ? reps : [0], item.target[0], item.target[1], item.prog.increment);
+    return { next: nx, change: !item.bw && nx.w != null && used != null && nx.w > used ? `✓ ${item.name} → ${nx.w} lb next time` : null };
+  }
+  return { next: { ...st }, change: null };
+}
+// old saved program (v90/v91) → plan format, keeping every working weight
+function progMigrate(p){
+  if (!p || p.plan || !p.main) return p;
+  const state = { ...p.main, pull: p.pull, neg: {} };
+  for (const [k, v] of Object.entries(p.acc || {})) state[k] = v;
+  const out = { startedAt: p.startedAt, plan: planBuiltin(), state, next: p.next || "UA", log: p.log || [], live: null };
+  if (p.live){
+    const sess = planSession(out.plan, planEnsureState(out.plan, state), p.live.day);
+    for (const it of sess.items){
+      const old = p.live.items.find(o => o.key === it.key || (o.kind === "neg" && it.key === "neg"));
+      if (old) it.sets = old.sets;
+    }
+    out.live = { day: p.live.day, date: p.live.date, items: sess.items };
+  }
+  out.state = planEnsureState(out.plan, out.state);
+  return out;
+}
+// ---- "you lifted X pumpkins": volume trivia ----
+// [emoji, one, many, lb each, tags]
+const TRIVIA_ITEMS = [
+  ["\u{1F384}", "Christmas tree", "Christmas trees", 60, "christmas"], ["\u{1F98C}", "reindeer", "reindeer", 300, "christmas"],
+  ["\u{1F385}", "Santa Claus", "Santa Clauses", 260, "christmas"], ["\u{1F381}", "wrapped present", "wrapped presents", 3, "christmas"],
+  ["\u{1F36C}", "candy cane", "candy canes", 0.03, "christmas"], ["\u{1F36A}", "gingerbread man", "gingerbread men", 0.1, "christmas"],
+  ["\u{1F6F7}", "sleigh full of presents", "sleighs full of presents", 1000, "christmas"], ["☕", "mug of hot cocoa", "mugs of hot cocoa", 1, "christmas winter"],
+  ["⛄", "snowman", "snowmen", 250, "christmas winter"], ["\u{1F9E6}", "stuffed stocking", "stuffed stockings", 2, "christmas"],
+  ["\u{1F427}", "emperor penguin", "emperor penguins", 66, "winter"], ["\u{1F43B}‍❄️", "polar bear", "polar bears", 1000, "winter"],
+  ["\u{1F3D2}", "hockey puck", "hockey pucks", 0.375, "winter"], ["\u{1F9C2}", "bag of ice melt", "bags of ice melt", 50, "winter"],
+  ["\u{1F36B}", "box of chocolates", "boxes of chocolates", 1, "valentine"], ["\u{1F9F8}", "teddy bear", "teddy bears", 1, "valentine"],
+  ["\u{1F95A}", "Easter egg", "Easter eggs", 0.13, "easter spring"], ["\u{1F430}", "bunny", "bunnies", 4, "easter spring"],
+  ["\u{1F425}", "duckling", "ducklings", 0.1, "spring"], ["\u{1F337}", "tulip", "tulips", 0.05, "spring"], ["\u{1FAB4}", "potted plant", "potted plants", 10, "spring"],
+  ["\u{1F349}", "watermelon", "watermelons", 20, "summer"], ["\u{1F9CA}", "cooler full of ice", "coolers full of ice", 45, "summer"],
+  ["\u{1F32D}", "hot dog", "hot dogs", 0.1, "summer july4"], ["\u{1F6A4}", "jet ski", "jet skis", 800, "summer"], ["\u{1F3F0}", "sandcastle", "sandcastles", 50, "summer"],
+  ["\u{1F386}", "box of fireworks", "boxes of fireworks", 10, "july4"], ["\u{1F967}", "apple pie", "apple pies", 2.5, "july4 fall"],
+  ["\u{1F383}", "pumpkin", "pumpkins", 12, "fall halloween"], ["\u{1F383}", "record-breaking giant pumpkin", "record-breaking giant pumpkins", 2749, "fall halloween"],
+  ["\u{1F33E}", "hay bale", "hay bales", 50, "fall"], ["\u{1F3C8}", "football", "footballs", 0.9, "fall"], ["\u{1F342}", "bag of leaves", "bags of leaves", 20, "fall"],
+  ["\u{1F34E}", "apple", "apples", 0.4, "fall"], ["\u{1F9D9}", "witch's cauldron", "witches' cauldrons", 30, "halloween"],
+  ["\u{1F480}", "full skeleton", "full skeletons", 25, "halloween"], ["\u{1F36C}", "bag of trick-or-treat candy", "bags of trick-or-treat candy", 3, "halloween"],
+  ["\u{1F983}", "Thanksgiving turkey", "Thanksgiving turkeys", 15, "thanksgiving"], ["\u{1F967}", "pumpkin pie", "pumpkin pies", 2.5, "thanksgiving"],
+  ["\u{1F37D}️", "piled-high Thanksgiving plate", "piled-high Thanksgiving plates", 2, "thanksgiving"],
+  ["\u{1F415}", "golden retriever", "golden retrievers", 65, ""], ["\u{1F415}‍\u{1F9BA}", "German shepherd", "German shepherds", 75, ""],
+  ["\u{1F408}", "house cat", "house cats", 10, ""], ["\u{1F3B9}", "grand piano", "grand pianos", 700, ""], ["\u{1F697}", "Honda Civic", "Honda Civics", 2900, ""],
+  ["\u{1F418}", "African elephant", "African elephants", 13000, ""], ["\u{1F996}", "T. rex", "T. rexes", 18000, ""], ["\u{1F40B}", "blue whale", "blue whales", 300000, ""],
+  ["\u{1F68C}", "school bus", "school buses", 25000, ""], ["\u{1F99B}", "hippo", "hippos", 3300, ""], ["\u{1F43C}", "giant panda", "giant pandas", 250, ""],
+  ["\u{1F95B}", "gallon of milk", "gallons of milk", 8.6, ""], ["\u{1F3B3}", "bowling ball", "bowling balls", 14, ""], ["\u{1F9A5}", "sloth", "sloths", 10, ""],
+  ["\u{1F43B}", "grizzly bear", "grizzly bears", 600, ""], ["\u{1F404}", "dairy cow", "dairy cows", 1400, ""], ["\u{1F5FD}", "Statue of Liberty", "Statues of Liberty", 450000, ""],
+  ["\u{1F355}", "large pizza", "large pizzas", 2, ""], ["\u{1F98D}", "gorilla", "gorillas", 350, ""], ["\u{1F9A9}", "flamingo", "flamingos", 6, ""],
+];
+function triviaSeason(iso){
+  const [, m, d] = iso.split("-").map(Number);
+  const md = m * 100 + d;
+  const t = {};
+  if (md >= 1125 || m === 12){ t.christmas = 8; t.winter = 2; }
+  else if (m <= 2){ t.winter = 5; if (m === 2 && d <= 14) t.valentine = 6; }
+  else if (m <= 5){ t.spring = 4; if (md >= 320 && md <= 425) t.easter = 6; }
+  else if (m <= 8){ t.summer = 4; if (md >= 625 && md <= 707) t.july4 = 7; }
+  else { t.fall = 4; if (m === 10) t.halloween = 6; if (m === 11) t.thanksgiving = 6; }
+  const name = t.christmas ? "christmas" : t.winter ? "winter" : t.spring ? "spring" : t.summer ? "summer" : "fall";
+  return { tags: t, name };
+}
+function triviaRng(seed){
+  let h = 2166136261;
+  for (const c of String(seed)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); h ^= h >>> 16; return (h >>> 0) / 4294967296; };
+}
+function triviaCount(n){ return n >= 100 ? Math.round(n).toLocaleString("en-US") : n >= 10 ? String(Math.round(n)) : String(Math.round(n * 10) / 10); }
+// pick n comparisons with sensible counts, favoring this season's
+function triviaPick(lbs, iso, seed, n = 3){
+  if (!(lbs > 0)) return [];
+  const { tags } = triviaSeason(iso);
+  const rnd = triviaRng(seed);
+  const pool = TRIVIA_ITEMS.map(([emoji, one, many, lb, tg]) => {
+    const count = lbs / lb;
+    if (count < 1 || count > 20000) return null;
+    const tw = tg ? Math.max(0, ...tg.split(" ").map(x => tags[x] || 0)) : 1;
+    if (tg && !tw) return null;
+    const nice = count >= 2 && count <= 3000 ? 1 : 0.35;
+    return { emoji, one, many, lb, count, w: tw * nice, seasonal: !!tg };
+  }).filter(Boolean);
+  const out = [];
+  while (out.length < n && pool.length){
+    const total = pool.reduce((a, x) => a + x.w, 0);
+    let r = rnd() * total, i = 0;
+    while (i < pool.length - 1 && (r -= pool[i].w) > 0) i++;
+    const x = pool.splice(i, 1)[0];
+    if (out.some(o => o.one === x.one)) continue;
+    out.push({ emoji: x.emoji, count: x.count, countText: triviaCount(x.count), name: Math.abs(x.count - 1) < 0.05 ? x.one : x.many, lb: x.lb, seasonal: x.seasonal });
+  }
+  return out;
+}
+// bodyweight share each movement moves (assisted variants subtract the assist)
+const BW_FACTORS = [[/assisted/i, 1], [/pull[- ]?ups?|chin[- ]?ups?|muscle[- ]?ups?|\bdips?\b/i, 1], [/push[- ]?ups?/i, 0.64],
+  [/inverted row/i, 0.5], [/split squat|lunge|step[- ]?up|pistol/i, 0.75], [/air squat|bodyweight squat/i, 0.7],
+  [/ab wheel|rollout/i, 0.5], [/leg raise|knee raise|toes to bar/i, 0.35], [/crunch|sit[- ]?up|v[- ]?up/i, 0.3],
+  [/back extension|hyperextension/i, 0.5], [/burpee/i, 0.7], [/plank/i, 0]];
+function triviaBWFactor(name){ for (const [re, f] of BW_FACTORS) if (re.test(name)) return f; return null; }
+function exVolume(ex, bw){
+  const f = triviaBWFactor(ex.name || "");
+  const assisted = /assisted/i.test(ex.name || "");
+  let v = 0;
+  for (const s of ex.sets || []){
+    const w = +s.weight || 0, r = +s.reps || 0;
+    if (f != null && bw > 0) v += Math.max(0, assisted ? bw * f - w : bw * f + w) * r;
+    else v += w * r;
+  }
+  return v;
+}
+function liftVolume(entry, bw){ return (entry?.exercises || []).reduce((a, ex) => a + exVolume(ex, bw), 0); }
+function bwOn(weights, iso){
+  const ws = (weights || []).filter(w => +w.lbs > 0).sort((a, b) => a.date < b.date ? -1 : 1);
+  if (!ws.length) return null;
+  let pick = null;
+  for (const w of ws) if (w.date <= iso) pick = w;
+  return +(pick || ws[ws.length - 1]).lbs;
+}
+function lifetimeVolume(lifts, weights){ return (lifts || []).reduce((a, l) => a + liftVolume(l, bwOn(weights, l.date)), 0); }
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
 const NUTRI_SOURCE = { health: "from Cronometer · Apple Health sync", cronometer: "from a Cronometer CSV import", log: "logged in this app", manual: "entered manually" };
@@ -4464,6 +5093,11 @@ function renderProgress(){
       </div>
     </div>
     ${next?`<div style="height:8px;border-radius:4px;background:var(--grid);margin-top:10px;overflow:hidden"><div style="height:100%;width:${prog}%;background:#B08D2F"></div></div>`:""}
+    ${(()=>{ const life = lifetimeVolume(data.lifts, data.weights); if (!(life > 0)) return "";
+      const t = todayISO(), mo = t.slice(0, 7);
+      const month = data.lifts.filter(l => (l.date||"").startsWith(mo)).reduce((a, l) => a + liftVolume(l, bwOn(data.weights, l.date)), 0);
+      return `<div style="margin-top:12px">${triviaCardHTML({ lbs: life, iso: t, seed: "life" + t, title: "Lifetime weight moved", n: 3,
+        sub: month > 0 ? `${Math.round(month).toLocaleString("en-US")} lb so far this month` : "" })}</div>`; })()}
     <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
   </div>`;
   html += `<div class="h2" style="margin-top:2px">Trends</div>`;
@@ -4597,6 +5231,7 @@ function afterRender(){
   initMaps();
   initSwipe();
   progWakeSync();
+  pbInitDrag();
 }
 
 // ================= actions =================
@@ -4651,7 +5286,9 @@ window.App = {
       sets: ex.sets.filter(s=>s.w!==""&&s.r!=="").map(s=>({weight:+s.w, reps:+s.r, rpe:s.rpe===""?null:+s.rpe, drop:!!s.drop}))
     })).filter(ex=>ex.sets.length);
     if (!cleaned.length){ toast("Add at least one set with weight and reps", true); return; }
-    data.lifts.push({id:uid(), date:d.date, split:d.split||null, exercises:cleaned, notes:d.notes.trim()});
+    const newId = uid();
+    data.lifts.push({id:newId, date:d.date, split:d.split||null, exercises:cleaned, notes:d.notes.trim()});
+    ui.celebrate = { id: newId };
     save();
     ui.draft = {date:todayISO(), split:"", exercises:[], notes:""};
     clearDraft();
@@ -4915,42 +5552,33 @@ window.App = {
   delSchedule(id){ if(!confirmDel("sc-"+id))return; data.school.schedule = data.school.schedule.filter(x=>x.id!==id); save(); render(); },
   schoolGradeClass(id){ ui.schoolGradeClass = id; ui.gradingId = null; render(); },
   schoolShowDone(v){ ui.schoolShowDone = v; render(); },
-  // strength program
+  // workout plans
   toggleProgramFeature(){ data.settings.programEnabled = !data.settings.programEnabled; save(); render(); },
   liftMode(m){ ui.liftMode = m; render(); },
-  progOpen(){ ui.tab = "lift"; ui.liftMode = "program"; ui.progEditing = false; render(); window.scrollTo(0, 0); },
-  progEdit(){ ui.progEditing = true; render(); window.scrollTo(0, 0); },
-  progEditDone(){ ui.progEditing = false; render(); },
-  progSaveSetup(editing){
+  progOpen(){ ui.tab = "lift"; ui.liftMode = "program"; ui.progView = null; render(); window.scrollTo(0, 0); },
+  progView(v){ ui.progView = v; ui.pfResult = null; render(); window.scrollTo(0, 0); },
+  progSaveSetup(){
     const num = id => { const v = $("#" + id)?.value; return v === "" || v == null ? null : +v; };
     const W = { benchH: num("pgBenchH"), benchV: num("pgBenchV"), squatH: num("pgSquatH"), squatV: num("pgSquatV") };
     if (Object.values(W).some(v => !(v > 0))){ toast("Fill in all four bench/squat weights", true); return; }
     const pullMax = Math.max(1, num("pgPull") || 1);
-    const accNames = Object.keys(PROG_ACC).filter(n => !PROG_BW.has(n));
-    const acc = {};
-    accNames.forEach((n, i) => { const v = num("pgAcc" + i); acc[n] = { w: v > 0 ? v : null }; });
-    for (const n of PROG_BW) acc[n] = { w: 0 };
-    const old = data.program || {};
-    const main = {};
-    for (const k of Object.keys(W)){
-      const prev = old.main?.[k];
-      const inc = prev ? prev.inc : (k === "squatH" ? 10 : 5);
-      main[k] = { w: W[k], fails: prev && prev.w === W[k] ? prev.fails : 0, inc };
+    const accW = {};
+    progBuiltinAccNames().forEach((n, i) => { const v = num("pgAcc" + i); if (v > 0) accW[n] = v; });
+    const plan = planBuiltin();
+    for (const w of plan.workouts) for (const ex of w.exercises){
+      if (W[ex.key]) ex.weight = W[ex.key];
+      if (ex.key === "pull") ex.reps = Math.max(1, Math.round(pullMax * 0.6));
+      if (accW[ex.name]) ex.weight = accW[ex.name];
     }
-    const perSet = Math.max(1, Math.round(pullMax * 0.6));
-    const oldMax = old.pull ? Math.max(...old.pull.reps) : null;
-    const pull = editing && old.pull && oldMax === pullMax ? old.pull : { reps: [perSet, perSet, perSet, perSet, perSet], added: 0 };
-    if (editing){
-      Object.assign(data.program, { main, pull, acc });
-      ui.progEditing = false; save(); toast("Weights updated ✓"); render(); return;
-    }
-    data.program = { startedAt: todayISO(), next: "UA", main, pull, acc, log: [], live: null };
+    data.program = { startedAt: todayISO(), plan, state: planEnsureState(plan, {}, {}), next: plan.workouts[0].id, log: [...(data.program?.log || [])], live: null };
     data.settings.splitStyle = "ul";
+    ui.progView = null;
     save(); toast("Program ready — Upper A is first"); render(); window.scrollTo(0, 0);
   },
-  progStart(){
-    const p = data.program;
-    p.live = { day: p.next, date: todayISO(), items: progSession(p, p.next).items };
+  progStart(id){
+    const p = progData();
+    const wid = id || planNextUp(p, todayISO()).id;
+    p.live = { day: wid, date: todayISO(), items: planSession(p.plan, p.state, wid).items };
     ui.restEnd = null; save(); render(); window.scrollTo(0, 0);
   },
   progCheck(ii, si){
@@ -4958,7 +5586,7 @@ window.App = {
     const it = live.items[ii], s = it.sets[si];
     s.done = !s.done;
     progAudioUnlock();
-    if (s.done && progDoneCount(live) < progSetCount(live)) ui.restEnd = Date.now() + PROG_REST[it.kind] * 1000;
+    if (s.done && progDoneCount(live) < progSetCount(live)) ui.restEnd = Date.now() + (it.rest || 90) * 1000;
     else if (!s.done) ui.restEnd = null;
     save(); render();
   },
@@ -4978,46 +5606,196 @@ window.App = {
     if (!confirmDel("pg-abandon")) return;
     data.program.live = null; ui.restEnd = null; save(); toast("Session discarded"); render();
   },
-  progSkip(){
-    const p = data.program;
-    p.next = PROG_ORDER[(PROG_ORDER.indexOf(p.next) + 1) % 4];
-    save(); render();
+  progSkip(){ const p = progData(); p.next = planAfter(p.plan, planNextUp(p, todayISO()).id); save(); render(); },
+  progReset(){
+    if (!confirmDel("pg-reset")) return;
+    const p = progData();
+    data.program = { log: p?.log || [] };
+    save(); toast("Plan removed — your workouts are still logged"); render();
   },
   progFinish(){
-    const p = data.program, live = p?.live; if (!live) return;
+    const p = progData(), live = p?.live; if (!live) return;
     if (!progDoneCount(live)){ toast("Check off at least one set first", true); return; }
+    const W = progWorkout(p, live.day);
     const changes = [], exercises = [];
     for (const it of live.items){
       const done = it.sets.filter(s => s.done);
-      const reps = it.sets.map(s => s.done ? (+s.r || 0) : 0);
-      if (done.length) exercises.push({ name: it.kind === "neg" ? "Pull-Up Negative" : it.name, ss: false,
-        sets: done.map(s => ({ weight: +s.w || 0, reps: +s.r || 0, rpe: null, drop: false })) });
-      if (it.kind === "main"){
-        const st = { ...p.main[it.key] };
-        if (done.length) st.w = Math.min(...done.map(s => +s.w || st.w));
-        const nx = progNextMain(st, reps, it.target);
-        p.main[it.key] = nx;
-        changes.push(nx.w > st.w ? `✓ ${it.name} ${st.w} → ${nx.w} lb next time`
-          : nx.w < st.w ? `${it.name}: two misses in a row — reset to ${nx.w} lb to rebuild`
-          : `${it.name}: missed reps at ${st.w} — same weight next time`);
-      } else if (it.kind === "pull"){
-        const nx = progNextPull(p.pull, reps);
-        const hit = JSON.stringify(nx) !== JSON.stringify(p.pull);
-        p.pull = nx;
-        changes.push(hit ? `✓ Pull-ups → next: ${nx.reps.join("·")}${nx.added ? ` with +${nx.added} lb` : ""}` : `Pull-ups: repeat ${nx.reps.join("·")} next time`);
-      } else if (it.kind === "acc" && done.length){
-        const bw = PROG_BW.has(it.name);
-        const used = bw ? 0 : Math.max(...done.map(s => +s.w || 0)) || null;
-        const nx = progNextAcc({ w: used }, reps, it.lo, it.hi, bw ? 0 : 5);
-        p.acc[it.name] = nx;
-        if (!bw && nx.w != null && nx.w > used) changes.push(`✓ ${it.name} → ${nx.w} lb next time`);
-      }
+      if (done.length) exercises.push({ name: it.name, ss: false, sets: done.map(s => ({ weight: +s.w || 0, reps: +s.r || 0, rpe: null, drop: false })) });
+      if (!p.state[it.key]) continue;
+      const r = planApply(it, p.state[it.key]);
+      p.state[it.key] = r.next;
+      if (r.change) changes.push(r.change);
     }
-    data.lifts.push({ id: uid(), date: live.date, split: PROG_DAYS[live.day].split, exercises, notes: `Program · ${PROG_DAYS[live.day].name}`, program: live.day });
-    p.log = [...(p.log || []), { date: live.date, day: live.day, changes }].slice(-60);
-    p.next = PROG_ORDER[(PROG_ORDER.indexOf(live.day) + 1) % 4];
+    const id = uid();
+    data.lifts.push({ id, date: live.date, split: W.split || null, exercises, notes: `Program · ${W.name}`, program: W.id });
+    p.log = [...(p.log || []), { date: live.date, day: W.id, name: W.name, changes, liftId: id }].slice(-60);
+    if (p.plan.schedule === "rotation") p.next = planAfter(p.plan, live.day);
     p.live = null; ui.restEnd = null;
-    save(); toast("Workout saved ✓"); render(); window.scrollTo(0, 0);
+    ui.celebrate = { id };
+    save(); render(); window.scrollTo(0, 0);
+  },
+  celebrateClose(){ ui.celebrate = null; render(); },
+  // import / export
+  pfDraft(v){ ui.pfText = v; },
+  pfFile(input){
+    const f = input.files?.[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => { ui.pfText = String(rd.result || ""); App.pfCheck(); };
+    rd.readAsText(f);
+  },
+  pfCheck(){
+    const txt = ui.pfText ?? $("#pfText")?.value ?? "";
+    if (!txt.trim()){ toast("Paste the plan first", true); return; }
+    ui.pfResult = planNormalize(txt); render();
+    setTimeout(() => { const c = document.querySelectorAll("#view .card"); c[c.length - 1]?.scrollIntoView({ block: "start", behavior: "smooth" }); }, 0);
+  },
+  pfApply(){
+    const r = ui.pfResult; if (!r?.plan) return;
+    const p = progData();
+    if (p?.live){ toast("Finish or discard your current workout first", true); return; }
+    const lastW = progLastWeights(data.lifts);
+    const old = p?.state || {};
+    const st = {};
+    for (const w of r.plan.workouts) for (const ex of w.exercises){
+      const k = planExKey(w.id, ex);
+      if (ex.weight == null && old[k]) st[k] = old[k];
+    }
+    data.program = { startedAt: todayISO(), plan: r.plan, state: planEnsureState(r.plan, st, lastW), next: r.plan.workouts[0].id, log: p?.log || [], live: null };
+    ui.pfResult = null; ui.pfText = ""; ui.progView = null;
+    save(); toast(`“${r.plan.name}” is ready ✓`); render(); window.scrollTo(0, 0);
+  },
+  pfPlanWithCurrentWeights(){
+    const p = progData();
+    const plan = JSON.parse(JSON.stringify(p.plan));
+    for (const w of plan.workouts) for (const ex of w.exercises){
+      const st = p.state[planExKey(w.id, ex)];
+      if (!st) continue;
+      if (ex.progression.type === "reps"){ ex.reps = Math.max(...st.reps); ex.sets = st.reps.length; if (st.added) ex.weight = st.added; }
+      else if (!ex.bodyweight && st.w != null) ex.weight = st.w;
+    }
+    return plan;
+  },
+  async pfExport(){
+    const plan = App.pfPlanWithCurrentWeights();
+    const txt = JSON.stringify(plan, null, 2);
+    const fname = (plan.name || "plan").replace(/[^\w-]+/g, "-").toLowerCase() + ".json";
+    try {
+      const file = new File([txt], fname, { type: "application/json" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })){ await navigator.share({ files: [file], title: plan.name }); return; }
+    } catch(e){ if (e?.name === "AbortError") return; }
+    try { await navigator.clipboard.writeText(txt); toast("Plan copied — paste it anywhere"); }
+    catch(e){ toast("Couldn't share or copy on this device", true); }
+  },
+  async pfCopyPrompt(){
+    try { await navigator.clipboard.writeText(PLAN_PROMPT); toast("Prompt copied — paste it into Claude"); }
+    catch(e){ ui.pfText = PLAN_PROMPT; ui.progView = "import"; render(); toast("Copy the prompt from the box", true); }
+  },
+  // builder
+  pbOpen(fresh){
+    const p = progData();
+    if (p?.live){ toast("Finish or discard your current workout first", true); return; }
+    ui.planDraft = fresh || !p?.plan
+      ? { format: "training-log-plan", version: 1, name: "My plan", schedule: "weekdays", workouts: [{ id: "W1", name: "Workout A", note: "", split: "", days: [], exercises: [] }] }
+      : App.pfPlanWithCurrentWeights();
+    ui.pbW = 0; ui.pbOpenEx = null; ui.progView = "builder"; ui.confirmKey = null;
+    render(); window.scrollTo(0, 0);
+  },
+  pbCancel(){ ui.planDraft = null; ui.progView = null; render(); window.scrollTo(0, 0); },
+  pbPlan(f, v){ ui.planDraft[f] = v; if (f === "schedule") render(); },
+  pbPickW(i){ ui.pbW = i; ui.pbOpenEx = null; ui.confirmKey = null; render(); },
+  pbCur(){ return ui.planDraft.workouts[Math.min(ui.pbW || 0, ui.planDraft.workouts.length - 1)]; },
+  pbW(f, v){ App.pbCur()[f] = v; },
+  pbDay(d){ const W = App.pbCur(); W.days = W.days.includes(d) ? W.days.filter(x => x !== d) : PLAN_DOWS.filter(x => x === d || W.days.includes(x)); render(); },
+  pbAddW(){
+    const d = ui.planDraft, n = d.workouts.length;
+    let id = "W" + (n + 1); while (d.workouts.some(w => w.id === id)) id += "x";
+    d.workouts.push({ id, name: `Workout ${String.fromCharCode(65 + n)}`, note: "", split: "", days: [], exercises: [] });
+    ui.pbW = n; ui.pbOpenEx = null; render();
+  },
+  pbDupW(){
+    const d = ui.planDraft, W = App.pbCur();
+    const c = JSON.parse(JSON.stringify(W));
+    c.id = W.id + "b"; while (d.workouts.some(w => w.id === c.id)) c.id += "b";
+    c.name = W.name + " (copy)"; c.days = [];
+    c.exercises.forEach(e => { delete e.key; });
+    d.workouts.splice(ui.pbW + 1, 0, c); ui.pbW++; ui.pbOpenEx = null; render();
+  },
+  pbDelW(){
+    if (!confirmDel("pbw-del")) return;
+    ui.planDraft.workouts.splice(ui.pbW, 1); ui.pbW = Math.max(0, ui.pbW - 1); render();
+  },
+  pbAddEx(){
+    const name = ($("#pbNewEx")?.value || "").trim();
+    if (!name){ toast("Type or pick an exercise", true); return; }
+    const bw = triviaBWFactor(name) != null && !/assisted/i.test(name) && !/crunch|extension/i.test(name);
+    const W = App.pbCur();
+    W.exercises.push(bw ? { name, sets: 3, reps: 8, weight: null, bodyweight: true, progression: { type: "reps", weightedAfterTotalReps: 0, increment: 5 } }
+      : { name, sets: 3, repRange: [8, 12], weight: null, bodyweight: false, progression: { type: "double", increment: 5 } });
+    ui.pbOpenEx = W.exercises.length - 1; render();
+    setTimeout(() => $("#pbNewEx")?.blur(), 0);
+  },
+  pbToggle(i){ ui.pbOpenEx = ui.pbOpenEx === i ? null : i; render(); },
+  pbDelEx(i){
+    if (!confirmDel(`pbx-${i}`)) return;
+    App.pbCur().exercises.splice(i, 1); ui.pbOpenEx = null; render();
+  },
+  pbMove(from, to){
+    const ex = App.pbCur().exercises;
+    if (to !== from && to >= 0 && to < ex.length){ const [x] = ex.splice(from, 1); ex.splice(to, 0, x); if (ui.pbOpenEx === from) ui.pbOpenEx = to; else ui.pbOpenEx = null; }
+    render();
+  },
+  pbEx(i, f, v){
+    const ex = App.pbCur().exercises[i], pr = ex.progression;
+    const n = v === "" || v == null ? null : +v;
+    let rerender = false;
+    if (f === "name") ex.name = v;
+    else if (f === "sets") ex.sets = n;
+    else if (f === "reps") ex.reps = n;
+    else if (f === "lo") ex.repRange = [n, ex.repRange[1]];
+    else if (f === "hi") ex.repRange = [ex.repRange[0], n];
+    else if (f === "weight") ex.weight = n;
+    else if (f === "note") ex.note = v;
+    else if (f === "rest") ex.rest = n;
+    else if (f === "main"){ ex.main = !!v; rerender = true; }
+    else if (f === "bodyweight"){ ex.bodyweight = !!v; rerender = true; }
+    else if (f === "range"){
+      if (v && !ex.repRange){ const r = ex.reps || 8; ex.repRange = [r, r + 4]; delete ex.reps; if (pr.type === "linear") pr.type = "double"; }
+      if (!v && ex.repRange){ ex.reps = ex.repRange[0]; delete ex.repRange; if (pr.type === "double") pr.type = "linear"; }
+      rerender = true;
+    }
+    else if (f === "type"){
+      pr.type = v;
+      if (v === "double" && !ex.repRange){ const r = ex.reps || 8; ex.repRange = [r, r + 4]; delete ex.reps; }
+      if (v === "linear" && ex.repRange){ ex.reps = ex.repRange[0]; delete ex.repRange; }
+      if (v === "reps" && ex.repRange){ ex.reps = ex.repRange[0]; delete ex.repRange; }
+      if (pr.increment == null && v !== "none") pr.increment = ex.bodyweight && v !== "reps" ? 0 : 5;
+      rerender = true;
+    }
+    else pr[f] = n;
+    if (rerender) render();
+    else { const sum = document.querySelectorAll("#pbList .pbrow")[i]?.querySelector("div[style*='font-family:var(--mono)']"); if (sum) sum.textContent = pbExSummary(ex); }
+  },
+  pbSave(){
+    const d = ui.planDraft;
+    const r = planNormalize(d);
+    if (!r.plan){ toast(r.errors[0], true); return; }
+    const p = progData() || {};
+    const old = p.state || {};
+    const lastW = progLastWeights(data.lifts);
+    // weights typed in the builder become the current working weights
+    const st = {};
+    for (const w of r.plan.workouts) for (const ex of w.exercises){
+      const k = planExKey(w.id, ex), cur = old[k], t = ex.progression.type;
+      if (!cur) continue;
+      if (t === "linear" && "fails" in cur) st[k] = ex.weight != null && ex.weight !== cur.w ? { ...cur, w: ex.weight, fails: 0 } : cur;
+      else if (t === "double" && "w" in cur) st[k] = ex.weight != null ? { w: ex.weight } : cur;
+      else if (t === "reps" && Array.isArray(cur.reps)) st[k] = cur.reps.length === ex.sets && Math.max(...cur.reps) === ex.reps ? cur : planInitState(ex);
+      else if (t === "none") st[k] = {};
+    }
+    data.program = { startedAt: p.startedAt || todayISO(), plan: r.plan, state: planEnsureState(r.plan, st, lastW),
+      next: r.plan.workouts.some(w => w.id === p.next) ? p.next : r.plan.workouts[0].id, log: p.log || [], live: null };
+    ui.planDraft = null; ui.progView = null;
+    save(); toast("Plan saved ✓"); render(); window.scrollTo(0, 0);
   },
   toggleScheduleFeature(){
     data.settings.scheduleEnabled = !data.settings.scheduleEnabled;
