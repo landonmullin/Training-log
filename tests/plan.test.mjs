@@ -135,3 +135,27 @@ test("triviaSeason and triviaPick favor the holiday", () => {
   for (const x of a) assert.ok(x.count >= 1);
   assert.deepEqual(C.triviaPick(0, "2026-12-15", "z"), []);
 });
+
+test("planApplyFixes swaps ab wheel for cable crunch and keeps progress", () => {
+  const old = { startedAt: "2026-11-12", next: "LA", live: null,
+    log: [{ date: "2026-11-12", day: "UA", changes: ["✓ Bench Press 155 → 160 lb next time"] }],
+    main: { benchH: { w: 160, fails: 0, inc: 5 }, benchV: { w: 135, fails: 0, inc: 5 }, squatH: { w: 135, fails: 0, inc: 10 }, squatV: { w: 115, fails: 0, inc: 5 } },
+    pull: { reps: [3, 2, 2, 2, 2], added: 0 }, acc: { "Cable Crunch": { w: 70 }, "Ab Wheel": { w: 0 } } };
+  const m = C.progMigrate(old);
+  // simulate a v92 plan that still has the ab wheel
+  m.plan.workouts[3].exercises[3] = { name: "Ab Wheel", key: "Ab Wheel", sets: 3, repRange: [8, 12], weight: null, bodyweight: true, progression: { type: "double", increment: 0 } };
+  delete m.fixes;
+  const f = C.planApplyFixes(m);
+  const lb = C.planSession(f.plan, f.state, "LB");
+  assert.equal(lb.items[lb.items.length - 1].name, "Cable Crunch");
+  assert.equal(lb.items[lb.items.length - 1].sets[0].w, 70);           // shares Lower A's weight
+  assert.ok(!lb.items.some(i => i.name === "Ab Wheel"));
+  assert.equal(f.log.length, 1); assert.equal(f.log[0].day, "UA");      // first workout still counted
+  assert.equal(f.next, "LA");
+  assert.equal(f.state.benchH.w, 160);
+  // runs once: an ab wheel added later by the user stays
+  f.plan.workouts[3].exercises.push({ name: "Ab Wheel", key: "x", sets: 3, reps: 10, bodyweight: true, weight: null, progression: { type: "reps" } });
+  assert.ok(C.planApplyFixes(f).plan.workouts[3].exercises.some(e => e.name === "Ab Wheel"));
+  // the built-in plan itself no longer has the ab wheel
+  assert.ok(!JSON.stringify(C.planBuiltin()).includes("Ab Wheel"));
+});

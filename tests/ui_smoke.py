@@ -1115,6 +1115,23 @@ def trivia_counts_bodyweight_and_shows_on_level(pw, url):
         pg.evaluate("App.tab('progress')")
         assert "lifetime weight moved" in pg.inner_text("#view").lower()
 
+
+@test
+def plan_fix_swaps_ab_wheel_keeps_week(pw, url):
+    seed = _prog_seed(programEnabled=True)
+    seed["program"] = {"startedAt": _ago(1), "next": "LA", "live": None,
+        "log": [{"date": _ago(1), "day": "UA", "changes": []}],
+        "main": {"benchH": {"w": 160, "fails": 0, "inc": 5}, "benchV": {"w": 135, "fails": 0, "inc": 5}, "squatH": {"w": 135, "fails": 0, "inc": 10}, "squatV": {"w": 115, "fails": 0, "inc": 5}},
+        "pull": {"reps": [3, 2, 2, 2, 2], "added": 0}, "acc": {"Ab Wheel": {"w": 0}}}
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('lift')")
+        txt = pg.inner_text("#view")
+        assert "Lower A" in txt and "1/4 this week" in txt and "Upper A" in txt, txt[:600]
+        assert "Ab Wheel" not in txt
+        st = stored(pg)["program"]
+        lb = [w for w in st["plan"]["workouts"] if w["id"] == "LB"][0]
+        assert lb["exercises"][-1]["name"] == "Cable Crunch" and "cableCrunch" in st["fixes"]
+
 # --- tests above this line ---
 
 def main():

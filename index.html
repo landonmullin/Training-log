@@ -195,7 +195,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 92;
+const APP_VERSION = 93;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2222,6 +2222,7 @@ function lastPerfHTML(name){
 // ================= workout plans (UI) =================
 function progData(){
   if (data.program && !data.program.plan && data.program.main) data.program = progMigrate(data.program);
+  if (data.program?.plan && !(data.program.fixes || []).includes("cableCrunch")){ planApplyFixes(data.program); save(); }
   return data.program;
 }
 function progFmtW(w){ return w == null || w === "" ? "?" : String(+w); }
@@ -3177,7 +3178,7 @@ function planBuiltin(){
         acc("Dumbbell Shoulder Press", 8, 12), acc("Lat Pulldown", 8, 12), acc("Dumbbell Curl", 10, 15)] },
       { id: "LB", name: "Lower B", note: "volume squat", split: "lower", days: ["Sat"], exercises: [
         { name: "Squat", key: "squatV", main: true, sets: 3, reps: 8, weight: 95, progression: lin(5) },
-        acc("Leg Press", 10, 15), acc("Leg Extension", 10, 15), acc("Ab Wheel", 8, 12, { bodyweight: true, progression: { type: "double", increment: 0 } })] },
+        acc("Leg Press", 10, 15), acc("Leg Extension", 10, 15), acc("Cable Crunch", 10, 15)] },
     ],
   };
 }
@@ -3354,6 +3355,22 @@ function planApply(item, st){
     return { next: nx, change: !item.bw && nx.w != null && used != null && nx.w > used ? `✓ ${item.name} → ${nx.w} lb next time` : null };
   }
   return { next: { ...st }, change: null };
+}
+// one-time fixes to saved built-in plans (log, rotation and weights are never touched)
+function planApplyFixes(p){
+  if (!p?.plan) return p;
+  const fixes = p.fixes || [];
+  if (!fixes.includes("cableCrunch")){
+    // ab wheel → cable crunch on Lower B, sharing Lower A's cable crunch weight
+    const lb = p.plan.workouts.find(w => w.id === "LB");
+    const i = lb ? lb.exercises.findIndex(e => e.name === "Ab Wheel") : -1;
+    if (i >= 0 && p.plan.workouts.some(w => w.id === "LA")){
+      lb.exercises[i] = { name: "Cable Crunch", key: "Cable Crunch", sets: 3, repRange: [10, 15], weight: null, bodyweight: false, progression: { type: "double", increment: 5 } };
+      p.state = planEnsureState(p.plan, p.state || {}, {});
+    }
+    p.fixes = [...fixes, "cableCrunch"];
+  }
+  return p;
 }
 // old saved program (v90/v91) → plan format, keeping every working weight
 function progMigrate(p){
