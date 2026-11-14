@@ -1172,8 +1172,7 @@ def steps_manual_entry_and_walk_not_double_counted(pw, url):
         pg.fill("#stDate", d); pg.fill("#stSteps", "9000"); pg.click("text=Save")
         assert stored(pg)["steps"][0]["source"] == "manual"
         assert pg.evaluate("activityXP()") - xp0 == 25 + 25        # (9000 - 4000)/200 = 25, + goal bonus
-        pg.evaluate("App.tab('settings')")
-        pg.fill("#stepsGoal", "10000"); pg.dispatch_event("#stepsGoal", "change")
+        pg.fill("#stepsGoal", "10000"); pg.dispatch_event("#stepsGoal", "change")      # goal lives on the Steps page
         assert stored(pg)["settings"]["stepsGoal"] == 10000
         assert pg.evaluate("activityXP()") - xp0 == 25
 
@@ -1201,28 +1200,36 @@ def lifetime_card_keeps_month_separate(pw, url):
 
 @test
 def home_layout_reorder_hide_and_reset(pw, url):
-    seed = base(); seed["steps"] = [{"id": "s1", "date": "__TODAY__", "steps": 6000, "source": "health"}]
+    seed = base(); seed["steps"] = [{"id": "s1", "date": "x", "steps": 6000, "source": "health"}]
     with app(pw, url, seed) as pg:
         pg.evaluate("data.steps[0].date = todayISO(); save(); App.tab('calendar')")
         assert pg.locator(".stepsw").count() == 1 and "6,000" in pg.inner_text(".stepsw")
         pg.click("#calCustomize")
         rows = lambda: pg.eval_on_selector_all("#calLayoutList .drow", "els => els.map(e => e.dataset.k)")
-        assert rows()[:3] == ["schedule", "program", "steps"]
+        assert rows() == ["steps", "rank", "events", "calendar"], rows()      # features that are off aren't listed
+        txt = pg.inner_text("#view")
+        assert "Ring" not in txt and "Track" not in txt and pg.locator("#calStepsGoal, #stepsGoal").count() == 0
         # drag "events" to the top
-        h = pg.locator("#calLayoutList .dhandle").nth(5).bounding_box(); t = pg.locator("#calLayoutList .dhandle").nth(0).bounding_box()
+        h = pg.locator("#calLayoutList .dhandle").nth(2).bounding_box(); t = pg.locator("#calLayoutList .dhandle").nth(0).bounding_box()
         pg.mouse.move(h["x"] + 5, h["y"] + 5); pg.mouse.down()
         pg.mouse.move(t["x"] + 5, t["y"] + 2, steps=10); pg.mouse.move(t["x"] + 5, t["y"] - 12, steps=4); pg.mouse.up()
         assert rows()[0] == "events", rows()
         pg.click("button[aria-label='show Level']")
-        pg.click("text=Track")
         pg.click("text=Done")
         L = stored(pg)["settings"]["calLayout"]
-        assert L["order"][0] == "events" and "rank" in L["hidden"] and L["stepsStyle"] == "track"
-        view = pg.inner_text("#view")
-        assert view.lower().index("recent events") < view.lower().index("steps today")
-        assert pg.locator("#view .stepsw").count() == 1 and pg.locator(".stepsrun, .stepsw svg").count() >= 1
+        assert "rank" in L["hidden"] and L["order"].index("events") < L["order"].index("steps"), L
+        view = pg.inner_text("#view").lower()
+        assert view.index("recent events") < view.index("steps today") and "rookie" not in view
         pg.click("#calCustomize"); pg.click("text=reset to default layout"); pg.click("text=Done")
         assert "calLayout" not in stored(pg)["settings"]
+
+@test
+def step_ring_hidden_without_steps(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("App.tab('calendar')")
+        assert pg.locator(".stepsw").count() == 0
+        pg.click("#calCustomize")
+        assert "Step goal" not in pg.inner_text("#calLayoutList")
 
 @test
 def step_ring_fills_and_celebrates(pw, url):
@@ -1244,12 +1251,12 @@ def settings_groups_start_collapsed(pw, url):
     with app(pw, url, seed) as pg:
         pg.evaluate("ui.setOpenAll = false; App.tab('settings')")
         assert pg.locator(".setgroup").count() >= 6
-        assert pg.locator("#stepsGoal").count() == 0
+        assert pg.locator("#stepsSettings").count() == 0
         pg.click("#sg-steps")
-        assert pg.locator("#stepsGoal").count() == 1
+        assert pg.locator("#stepsSettings").count() == 1 and pg.locator("#stepsGoal").count() == 0
         assert pg.get_attribute("#sg-steps", "aria-expanded") == "true"
         pg.click("#sg-steps")
-        assert pg.locator("#stepsGoal").count() == 0
+        assert pg.locator("#stepsSettings").count() == 0
 
 @test
 def crew_group_open_when_not_set_up(pw, url):

@@ -170,12 +170,8 @@
   .tvfloat{animation:tvfloat 3s ease-in-out infinite}
   @keyframes ringfill{from{stroke-dashoffset:var(--full)}}
   .ringfill{animation:ringfill 1.4s cubic-bezier(.22,1,.36,1)}
-  @keyframes stepsfill{from{width:0}}
-  .stepsfill{animation:stepsfill 1.4s cubic-bezier(.22,1,.36,1)}
-  @keyframes stepsrun{from{left:-18px}}
-  .stepsrun{animation:stepsrun 1.4s cubic-bezier(.22,1,.36,1)}
   .stepsw{cursor:pointer}
-  @media (prefers-reduced-motion: reduce){ .tvbounce,.tvfloat,.ringfill,.stepsfill,.stepsrun{animation:none} }
+  @media (prefers-reduced-motion: reduce){ .tvbounce,.tvfloat,.ringfill{animation:none} }
 </style>
 </head>
 <body>
@@ -202,7 +198,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 96;
+const APP_VERSION = 97;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2045,9 +2041,9 @@ function calLayout(){
   const L = data.settings.calLayout || {};
   const order = (L.order || []).filter(k => CAL_SECTIONS[k]);
   CAL_DEFAULT.forEach((k, i) => { if (!order.includes(k)) order.splice(Math.min(i, order.length), 0, k); });
-  return { order, hidden: new Set((L.hidden || []).filter(k => CAL_SECTIONS[k])), stepsStyle: L.stepsStyle === "track" ? "track" : "ring" };
+  return { order, hidden: new Set((L.hidden || []).filter(k => CAL_SECTIONS[k])) };
 }
-function calSetLayout(f){ const L = calLayout(); const out = { order: L.order, hidden: [...L.hidden], stepsStyle: L.stepsStyle }; f(out); data.settings.calLayout = out; save(); }
+function calSetLayout(f){ const L = calLayout(); const out = { order: L.order, hidden: [...L.hidden] }; f(out); data.settings.calLayout = out; save(); }
 // generic drag-to-reorder (pointer events: touch + mouse)
 function initDragList(listSel, rowSel, handleSel, onMove){
   document.querySelectorAll(`${listSel} ${handleSel}`).forEach(h => {
@@ -2082,6 +2078,16 @@ function initDragList(listSel, rowSel, handleSel, onMove){
     };
   });
 }
+// a section only shows up (and only appears in the editor) when its feature is in use
+function calSectionApplies(k){
+  const s = data.settings;
+  if (k === "schedule") return !!s.scheduleEnabled;
+  if (k === "program") return !!s.programEnabled;
+  if (k === "classes") return !!s.schoolEnabled;
+  if (k === "steps") return stepsInUse();
+  return true;
+}
+const stepsInUse = () => (data.steps || []).length > 0 || !!data.settings.stepsLast;
 function calEditorHTML(){
   const L = calLayout();
   return `<div class="card" style="border-top:3px solid var(--ink)">
@@ -2091,26 +2097,18 @@ function calEditorHTML(){
     </div>
     <div style="font-size:12px;color:var(--sub);margin-bottom:10px">Drag ⠇ to reorder. Switch a section off to hide it.</div>
     <div id="calLayoutList">
-      ${L.order.map(k => { const on = !L.hidden.has(k); return `<div class="drow" data-k="${k}" style="display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:6px;${on ? "" : "opacity:.55;"}">
+      ${L.order.filter(calSectionApplies).map(k => { const on = !L.hidden.has(k); return `<div class="drow" data-k="${k}" style="display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:6px;${on ? "" : "opacity:.55;"}">
         <span class="dhandle" aria-label="drag ${CAL_SECTIONS[k].name}" style="touch-action:none;cursor:grab;font-size:20px;color:var(--sub);padding:2px 6px;user-select:none;-webkit-user-select:none">⠇</span>
         <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:14px">${CAL_SECTIONS[k].name}</div><div style="font-size:11px;color:var(--sub)">${CAL_SECTIONS[k].note}</div></div>
         <button class="switch ${on ? "on" : ""}" onclick="App.calToggle('${k}')" aria-label="show ${CAL_SECTIONS[k].name}"></button>
       </div>`; }).join("")}
     </div>
-    <div class="lbl" style="margin:12px 0 6px">Step goal style</div>
-    <div class="seg" style="margin-bottom:6px">
-      <button class="${L.stepsStyle === "ring" ? "on" : ""}" onclick="App.calStepsStyle('ring')">Ring</button>
-      <button class="${L.stepsStyle === "track" ? "on" : ""}" onclick="App.calStepsStyle('track')">Track</button>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-      <span style="font-size:13px">Daily step goal</span>
-      <input id="calStepsGoal" type="number" inputmode="numeric" value="${stepsGoal()}" style="width:110px;font-family:var(--mono);text-align:right" onchange="App.stepsGoalSet(this.value)">
-    </div>
     <button class="linkbtn" style="font-size:12px;padding:12px 0 0;color:var(--sub)" onclick="App.calReset()">reset to default layout</button>
   </div>`;
 }
 // ---------- step goal widget ----------
-function stepsWidgetHTML(style){
+function stepsWidgetHTML(){
+  const style = "ring";
   const goal = stepsGoal(), today = todayISO();
   const r = (data.steps || []).find(x => x.date === today);
   const n = r ? r.steps : 0;
@@ -2123,27 +2121,6 @@ function stepsWidgetHTML(style){
   const msg = done ? (n >= goal * 1.5 ? "Absolutely crushed it" : "Goal crushed!") : pct >= 0.75 ? "Almost there" : pct >= 0.5 ? "Over halfway" : pct >= 0.25 ? "Nice start" : n ? "Let's get moving" : "No steps synced yet";
   const sparkles = done ? [[8, 14, 0], [88, 10, .5], [94, 70, 1], [4, 76, 1.4], [50, 2, .8]].map(([x, y, d]) => `<span class="tvfloat" style="position:absolute;left:${x}%;top:${y}%;animation-delay:${d}s">${taIcon("d_star", 14)}</span>`).join("") : "";
   const sub = `<div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">${synced ? `synced ${esc(synced)} · ` : ""}<button class="linkbtn" style="font-size:10px;padding:0" onclick="${data.settings.healthToken ? "App.healthSyncNow()" : "App.tab('settings')"}">${data.settings.healthToken ? "refresh" : "set up sync"}</button></div>`;
-  if (style === "track"){
-    const p = Math.round(pct * 100);
-    return `<div class="card stepsw" style="padding:14px;position:relative;overflow:hidden" onclick="if(!event.target.closest('button'))App.openSteps()">
-      ${sparkles}
-      <div style="display:flex;justify-content:space-between;align-items:baseline">
-        <div class="lbl" style="margin:0">Steps today</div>
-        <div style="font-family:var(--mono);font-size:12px;font-weight:700;color:${done ? "#2B8A3E" : "var(--ink)"}">${msg}</div>
-      </div>
-      <div style="display:flex;align-items:baseline;gap:6px;margin:4px 0 12px"><span style="font-family:var(--disp);font-size:30px;font-weight:800">${n.toLocaleString("en-US")}</span><span style="font-family:var(--mono);font-size:12px;color:var(--sub)">/ ${goal.toLocaleString("en-US")}</span></div>
-      <div style="position:relative;height:22px;margin:0 22px 0 4px">
-        <div style="position:absolute;inset:4px 0;border-radius:8px;background:var(--grid)"></div>
-        ${[25, 50, 75].map(t => `<div style="position:absolute;left:${t}%;top:4px;bottom:4px;width:2px;background:${p >= t ? "rgba(255,255,255,.7)" : "var(--line)"}"></div>`).join("")}
-        <div class="${animate ? "stepsfill" : ""}" style="position:absolute;left:0;top:4px;bottom:4px;width:${p}%;border-radius:8px;background:linear-gradient(90deg,#7EE0A6,#2BB673 60%,${done ? "#F5B82E" : "#1E9E6A"})"></div>
-        <div class="${animate ? "stepsrun" : ""}" style="position:absolute;left:calc(${p}% - 18px);top:-14px;--to:calc(${p}% - 18px)">${taIcon("sneaker", 36)}</div>
-        <div style="position:absolute;right:-24px;top:-22px">${taIcon("flag", 30)}</div>
-      </div>
-      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:10px">
-        <span>${done ? `${(n - goal).toLocaleString("en-US")} over` : `${left.toLocaleString("en-US")} to go`}</span><span>≈ ${miles} mi</span>
-      </div>${sub}
-    </div>`;
-  }
   const R = 52, C = 2 * Math.PI * R, off = C * (1 - pct);
   return `<div class="card stepsw" style="padding:14px;position:relative;overflow:hidden" onclick="if(!event.target.closest('button'))App.openSteps()">
     ${sparkles}
@@ -2336,7 +2313,7 @@ function renderCalendar(){
   const L = calLayout();
   const parts = {
     schedule: () => planCard, program: () => progCalendarCardHTML(), rank: () => rankStrip, classes: () => todaySched, events: () => eventsCard,
-    steps: () => (data.steps || []).length || data.settings.stepsLast ? stepsWidgetHTML(L.stepsStyle) : "",
+    steps: () => stepsInUse() ? stepsWidgetHTML() : "",
     calendar: () => calendarHTML,
   };
   const calendarHTML = `<div class="card">
@@ -4164,10 +4141,6 @@ function stepsSettingsHTML(){
     </details></div>`;
   return `<div class="card" id="stepsSettings">
     <div class="lbl" style="margin-bottom:8px">Steps</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
-      <span style="font-size:14px;font-weight:600">Daily goal</span>
-      <input id="stepsGoal" type="number" inputmode="numeric" value="${stepsGoal()}" style="width:110px;font-family:var(--mono);text-align:right" onchange="App.stepsGoalSet(this.value)">
-    </div>
     <div style="font-size:14px;font-weight:600;margin-bottom:4px">Apple Health sync</div>
     ${sync}
   </div>`;
@@ -5242,7 +5215,7 @@ function renderSettings(){
   </div>` : ""}
 `);
   html += setGroup("nutri", "Nutrition", s.healthToken ? "Cronometer sync on" : "Cronometer sync & CSV import", nutritionSettingsHTML());
-  html += setGroup("steps", "Steps", `goal ${stepsGoal().toLocaleString("en-US")}${s.stepsLast ? " \u00B7 syncing" : ""}`, stepsSettingsHTML());
+  html += setGroup("steps", "Steps", s.stepsLast ? "Apple Health sync on" : "Apple Health sync", stepsSettingsHTML());
   html += setGroup("conn", "Connections", "Wahoo \u00B7 Strava", `  ${wahooSettingsHTML()}
   <div class="card">
     <div class="lbl" style="margin-bottom:8px">Strava auto-sync — optional, needs a Strava subscription</div>
@@ -5433,7 +5406,11 @@ function renderStepsView(back){
     <div style="font-family:var(--disp);font-size:34px;font-weight:800;margin:2px 0">${t ? t.steps.toLocaleString("en-US") : "—"}</div>
     <div style="height:10px;border-radius:5px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${t ? Math.min(100, Math.round(t.steps / goal * 100)) : 0}%;background:#2B8A3E"></div></div>
     <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:6px">
-      <span>goal ${goal.toLocaleString("en-US")}${t && t.steps < goal ? ` · ${(goal - t.steps).toLocaleString("en-US")} to go` : t ? " · hit ✓" : ""}</span><span>+${tXP} XP</span></div>
+      <span>${t && t.steps < goal ? `${(goal - t.steps).toLocaleString("en-US")} to go` : t ? "goal hit \u2713" : ""}</span><span>+${tXP} XP</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--grid)">
+      <span style="font-size:13px;font-weight:600">Daily goal</span>
+      <input id="stepsGoal" type="number" inputmode="numeric" value="${goal}" style="width:110px;font-family:var(--mono);text-align:right" onchange="App.stepsGoalSet(this.value)">
+    </div>
     ${data.settings.stepsLast ? `<div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">synced ${esc(new Date(data.settings.stepsLast).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }))} · <button class="linkbtn" style="font-size:10px;padding:0" onclick="App.healthSyncNow()">refresh</button></div>` : ""}
   </div>`;
   const days = [];
@@ -6139,8 +6116,12 @@ window.App = {
   setGroup(id){ ui.setOpen = { ...(ui.setOpen || {}), [id]: !(ui.setOpen || {})[id] }; render(); },
   calEdit(on){ ui.calEdit = !!on; ui.confirmKey = null; render(); window.scrollTo(0, 0); },
   calToggle(k){ calSetLayout(L => { L.hidden = L.hidden.includes(k) ? L.hidden.filter(x => x !== k) : [...L.hidden, k]; }); render(); },
-  calMove(from, to){ calSetLayout(L => { if (to !== from && to >= 0 && to < L.order.length){ const [x] = L.order.splice(from, 1); L.order.splice(to, 0, x); } }); render(); },
-  calStepsStyle(v){ calSetLayout(L => { L.stepsStyle = v; }); render(); },
+  calMove(from, to){ calSetLayout(L => {
+    const vis = L.order.filter(calSectionApplies);
+    if (to === from || to < 0 || to >= vis.length) return;
+    const [x] = vis.splice(from, 1); vis.splice(to, 0, x);
+    let i = 0; L.order = L.order.map(k => calSectionApplies(k) ? vis[i++] : k);
+  }); render(); },
   calReset(){ delete data.settings.calLayout; save(); toast("Back to the default layout"); render(); },
   openSteps(){ ui.tab = "progress"; ui.trendView = "steps"; render(); window.scrollTo(0, 0); },
   stepsGoalSet(v){ const n = Math.round(+v); if (!(n >= 500 && n <= 100000)){ toast("Pick a goal between 500 and 100,000", true); render(); return; } data.settings.stepsGoal = n; save(); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Step goal saved \u2713"); },
