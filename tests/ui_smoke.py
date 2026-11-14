@@ -63,7 +63,7 @@ def app(pw, url, seed=None, offline=False, gemini=None, wahoo=None, path=""):
     pg = ctx.new_page(); errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
     pg.route("**/*", router(offline, gemini, wahoo))
-    pg.goto(url + path); pg.evaluate("App.tab('food')")
+    pg.goto(url + path); pg.evaluate("ui.setOpenAll = true; App.tab('food')")
     try:
         yield pg
         assert not errors, f"page errors: {errors}"
@@ -839,6 +839,9 @@ def schedule_day_edit_creates_override_and_resets(pw, url):
     with app(pw, url, seed) as pg:
         pg.evaluate("App.tab('calendar')")
         pg.evaluate("App.selDay('2026-11-04')")  # a Wednesday, not today
+        assert pg.locator("#planCard").last.get_attribute("aria-expanded") == "false"
+        assert "1 item" in pg.locator("#planCard").last.inner_text()
+        pg.locator("#planCard").last.click()
         card = pg.locator("#planCard").last
         assert "Wake up" in card.inner_text()
         card.locator("#planEditBtn").click()
@@ -854,7 +857,7 @@ def schedule_therapy_checkbox_swaps_monday(pw, url):
     seed = base(settings={"kcalTarget": 2400, "proteinTarget": 180, "scheduleEnabled": True})
     seed["crew"] = {"name": "Landon"}
     with app(pw, url, seed) as pg:
-        pg.evaluate("App.planLoadSample(); App.tab('calendar'); App.selDay('2026-11-09')")
+        pg.evaluate("App.planLoadSample(); App.tab('calendar'); App.selDay('2026-11-09'); App.planOpenDay('2026-11-09')")
         card = pg.locator("#planCard").last
         assert "Therapy" not in card.locator(".plrow").all_inner_texts()[3]
         card.locator("#planTherapy").check()
@@ -1194,6 +1197,91 @@ def lifetime_card_keeps_month_separate(pw, url):
         card = pg.inner_text(".tvcard").lower()
         assert "all-time, that's about" in card and "this month: 1,000 lb" in card, card
         assert card.index("all-time") < card.index("this month")
+
+
+@test
+def home_layout_reorder_hide_and_reset(pw, url):
+    seed = base(); seed["steps"] = [{"id": "s1", "date": "__TODAY__", "steps": 6000, "source": "health"}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("data.steps[0].date = todayISO(); save(); App.tab('calendar')")
+        assert pg.locator(".stepsw").count() == 1 and "6,000" in pg.inner_text(".stepsw")
+        pg.click("#calCustomize")
+        rows = lambda: pg.eval_on_selector_all("#calLayoutList .drow", "els => els.map(e => e.dataset.k)")
+        assert rows()[:3] == ["schedule", "program", "steps"]
+        # drag "events" to the top
+        h = pg.locator("#calLayoutList .dhandle").nth(5).bounding_box(); t = pg.locator("#calLayoutList .dhandle").nth(0).bounding_box()
+        pg.mouse.move(h["x"] + 5, h["y"] + 5); pg.mouse.down()
+        pg.mouse.move(t["x"] + 5, t["y"] + 2, steps=10); pg.mouse.move(t["x"] + 5, t["y"] - 12, steps=4); pg.mouse.up()
+        assert rows()[0] == "events", rows()
+        pg.click("button[aria-label='show Level']")
+        pg.click("text=Track")
+        pg.click("text=Done")
+        L = stored(pg)["settings"]["calLayout"]
+        assert L["order"][0] == "events" and "rank" in L["hidden"] and L["stepsStyle"] == "track"
+        view = pg.inner_text("#view")
+        assert view.lower().index("recent events") < view.lower().index("steps today")
+        assert pg.locator("#view .stepsw").count() == 1 and pg.locator(".stepsrun, .stepsw svg").count() >= 1
+        pg.click("#calCustomize"); pg.click("text=reset to default layout"); pg.click("text=Done")
+        assert "calLayout" not in stored(pg)["settings"]
+
+@test
+def step_ring_fills_and_celebrates(pw, url):
+    seed = base(); seed["settings"]["stepsGoal"] = 8000
+    seed["steps"] = [{"id": "s1", "date": "x", "steps": 9200, "source": "health"}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("data.steps[0].date = todayISO(); save(); App.tab('calendar')")
+        w = pg.inner_text(".stepsw")
+        assert "9,200" in w and "Goal crushed" in w and "1,200 over goal" in w, w
+        assert pg.locator(".stepsw circle.ringfill").count() == 1
+        pg.evaluate("render()")                                    # no replay of the fill animation on re-render
+        assert pg.locator(".stepsw circle.ringfill").count() == 0
+        pg.click(".stepsw")
+        assert pg.evaluate("ui.trendView") == "steps"
+
+@test
+def settings_groups_start_collapsed(pw, url):
+    seed = sync_seed()
+    with app(pw, url, seed) as pg:
+        pg.evaluate("ui.setOpenAll = false; App.tab('settings')")
+        assert pg.locator(".setgroup").count() >= 6
+        assert pg.locator("#stepsGoal").count() == 0
+        pg.click("#sg-steps")
+        assert pg.locator("#stepsGoal").count() == 1
+        assert pg.get_attribute("#sg-steps", "aria-expanded") == "true"
+        pg.click("#sg-steps")
+        assert pg.locator("#stepsGoal").count() == 0
+
+@test
+def crew_group_open_when_not_set_up(pw, url):
+    with app(pw, url, base()) as pg:
+        pg.evaluate("ui.setOpenAll = false; App.tab('settings')")
+        assert pg.locator("#fbConfig").count() == 1          # restore instructions still find the Crew sync box
+
+@test
+def feed_rewords_time_only_walks(pw, url):
+    seed = base(); seed["events"] = [{"eid": "e1", "icon": "x", "text": "Landon played 36m of walk!", "date": "2026-11-13", "createdAt": 9e12}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('calendar')")
+        txt = pg.inner_text("#view")
+        assert "Landon walked for 36 minutes!" in txt and "played 36m" not in txt
+
+@test
+def justin_streak_restored_from_first_day(pw, url):
+    seed = base(); seed["crew"] = {"name": "Justin", "code": "ABC123", "config": {"apiKey": "x", "projectId": "p"}}
+    seed["lifts"] = [{"id": "l1", "date": _ago(100), "split": "push", "exercises": [], "notes": ""}]
+    seed["settings"]["streak"] = {"count": 2, "lastDay": _ago(1), "best": 2}
+    with app(pw, url, seed) as pg:
+        st = stored(pg)["settings"]["streak"]
+        assert st["count"] == 101 and st["best"] == 101, st
+        assert "lostAccess2026" in stored(pg)["settings"]["streakFixes"]
+
+@test
+def other_users_streak_untouched(pw, url):
+    seed = base(); seed["crew"] = {"name": "Landon", "code": "ABC123", "config": {"apiKey": "x", "projectId": "p"}}
+    seed["lifts"] = [{"id": "l1", "date": _ago(100), "split": "push", "exercises": [], "notes": ""}]
+    seed["settings"]["streak"] = {"count": 5, "lastDay": _ago(1), "best": 9}
+    with app(pw, url, seed) as pg:
+        assert stored(pg)["settings"]["streak"]["count"] == 6
 
 # --- tests above this line ---
 
