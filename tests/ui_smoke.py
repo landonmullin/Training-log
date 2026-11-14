@@ -805,6 +805,7 @@ def schedule_seeds_for_landon_and_sits_first_on_calendar(pw, url):
         pg.evaluate("App.tab('calendar')")
         first = pg.evaluate("document.querySelector('#view').firstElementChild.id")
         assert first == "planCard", first
+        pg.evaluate("ui.planShowPast = true; render()")    # late at night most of the day is folded away
         assert pg.locator("#planCard .plrow").count() > 5
 
 @test
@@ -1131,6 +1132,68 @@ def plan_fix_swaps_ab_wheel_keeps_week(pw, url):
         st = stored(pg)["program"]
         lb = [w for w in st["plan"]["workouts"] if w["id"] == "LB"][0]
         assert lb["exercises"][-1]["name"] == "Cable Crunch" and "cableCrunch" in st["fixes"]
+
+
+@test
+def steps_sync_from_health_inbox_adds_xp(pw, url):
+    y, t = iso_shift(-1), iso_shift(0)
+    seed = sync_seed(nutrition=[])
+    seed["settings"]["xpStart"] = iso_shift(-30)
+    with app(pw, url, seed) as pg:
+        pg.evaluate(FAKE_FS)
+        xp0 = pg.evaluate("activityXP()")
+        pg.evaluate(f"""() => {{ __fs['healthInbox/{TOKEN}-steps'] = {{ {dkey(y)}: {{ steps: "10,000" }}, {dkey(t)}: {{ steps: "4210" }}, {dkey(iso_shift(-2))}: {{ steps: "0" }} }};
+                                 __fs['healthInbox/{TOKEN}'] = {{ {dkey(y)}: {{ kcal: "2100" }} }}; }}""")
+        pg.evaluate("healthSync(true)")
+        st = {r["date"]: r["steps"] for r in stored(pg)["steps"]}
+        assert st == {y: 10000, t: 4210}, st
+        assert any(n["date"] == y for n in stored(pg)["nutrition"])          # nutrition untouched by steps
+        assert pg.evaluate("activityXP()") - xp0 == 75 + 21
+        pg.evaluate("App.tab('progress')")
+        assert "4,210 today" in pg.inner_text("#view")
+        pg.evaluate("App.trendView('steps')")
+        txt = pg.inner_text("#view")
+        assert "4,210" in txt and "3,790 to go" in txt and "+21 XP" in txt, txt[:400]
+        assert "1\ngoal streak" in txt, txt          # yesterday hit, today not yet → streak 1
+        pg.evaluate(f"App.selDay('{y}'); App.tab('calendar')")
+        assert "10,000" in pg.inner_text("#view")
+
+@test
+def steps_manual_entry_and_walk_not_double_counted(pw, url):
+    seed = base(); seed["settings"]["xpStart"] = iso_shift(-30)
+    d = iso_shift(-1)
+    seed["cardio"] = [{"id": "c1", "date": d, "type": "walk", "distanceMi": 2, "durationSec": 1800}]
+    with app(pw, url, seed) as pg:
+        xp0 = pg.evaluate("activityXP()")
+        pg.evaluate("App.tab('progress'); App.trendView('steps')")
+        pg.fill("#stDate", d); pg.fill("#stSteps", "9000"); pg.click("text=Save")
+        assert stored(pg)["steps"][0]["source"] == "manual"
+        assert pg.evaluate("activityXP()") - xp0 == 25 + 25        # (9000 - 4000)/200 = 25, + goal bonus
+        pg.evaluate("App.tab('settings')")
+        pg.fill("#stepsGoal", "10000"); pg.dispatch_event("#stepsGoal", "change")
+        assert stored(pg)["settings"]["stepsGoal"] == 10000
+        assert pg.evaluate("activityXP()") - xp0 == 25
+
+@test
+def steps_settings_show_shortcut_setup(pw, url):
+    with app(pw, url, sync_seed()) as pg:
+        pg.evaluate("App.tab('settings')")
+        pg.click("#stepsSetup summary")
+        txt = pg.inner_text("#stepsSetup")
+        for part in [TOKEN + "-steps", "updateMask.fieldPaths=d", "Group By", '"steps"', "Send steps"]:
+            assert part in txt, part
+
+@test
+def lifetime_card_keeps_month_separate(pw, url):
+    seed = _prog_seed(); seed["weights"] = [{"id": "w1", "date": _ago(3), "lbs": 180}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("App.tab('lift')"); pg.evaluate("App.addExercise('Bench Press')")
+        pg.fill(".setgrid input >> nth=0", "200"); pg.fill(".setgrid input >> nth=1", "5"); pg.click("text=Save workout")
+        _close_celebrate(pg)
+        pg.evaluate("App.tab('progress')")
+        card = pg.inner_text(".tvcard").lower()
+        assert "all-time, that's about" in card and "this month: 1,000 lb" in card, card
+        assert card.index("all-time") < card.index("this month")
 
 # --- tests above this line ---
 

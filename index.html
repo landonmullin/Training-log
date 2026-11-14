@@ -195,10 +195,10 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 94;
+const APP_VERSION = 95;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
-const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
+const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
   school:{ classes:[], tasks:[], dates:[], sessions:[], assignments:[], schedule:[] } };
 const TYPE_META = {
   run:{label:"Run",emoji:"🏃"},
@@ -1135,8 +1135,10 @@ function activityXP(){
     xp += v * mult(c.date);
   });
   data.lifts.forEach(w=>{ if (w.date >= since) xp += 250 * mult(w.date); });
+  xp += stepsXP(data.steps, data.cardio, stepsGoal(), since, mult);
   return Math.round(xp);
 }
+const stepsGoal = () => +data.settings.stepsGoal > 0 ? +data.settings.stepsGoal : 8000;
 const isMyBirthdayToday = () => { const b = myBirthdayMD(); return !!b && b === todayISO().slice(5); };
 function rankFor(xp){
   let r = RANKS[0], next = null;
@@ -2064,7 +2066,9 @@ function renderCalendar(){
   }
   const sel = map[ui.selected];
   let detail = "";
-  if (!sel) detail = `<div class="card muted">Rest day — nothing logged. Use the Lift or Cardio tab to add a workout.</div>`;
+  const selSteps = (data.steps || []).find(r => r.date === ui.selected);
+  if (!sel && !selSteps) detail = `<div class="card muted">Rest day — nothing logged. Use the Lift or Cardio tab to add a workout.</div>`;
+  else if (!sel) detail = "";
   else {
     detail += calFoodCardHTML(ui.selected, sel.nutrition || []);
     (sel.lifts||[]).forEach(w=>{
@@ -2117,6 +2121,7 @@ function renderCalendar(){
         ${delBtn(`W${w.id}`, `App.delWeight('${w.id}')`)}</div>`;
     });
   }
+  if (selSteps) detail += stepsDayCardHTML(selSteps);
   const xp = activityXP();
   const {rank, next} = rankFor(xp);
   const prog = next ? Math.min(100, Math.round((xp-rank.min)/(next.min-rank.min)*100)) : 100;
@@ -2964,7 +2969,7 @@ function triviaFactsHTML(facts, theme, big){
       <div style="display:flex;align-items:center;gap:1px;margin-top:4px;overflow:hidden">${taIcon(f.art, 15).repeat(reps)}${f.count > 10 ? `<span style="font-family:var(--mono);font-size:10px;font-weight:700;color:${theme.accent};margin-left:4px">×${f.countText}</span>` : ""}</div>
     </div></div>`; }).join("");
 }
-function triviaCardHTML({ lbs, iso, seed, title, sub, n = 3, big = false }){
+function triviaCardHTML({ lbs, iso, seed, title, sub, n = 3, big = false, intro = "That's about\u2026", footer = "" }){
   const facts = triviaPick(lbs, iso, seed, n);
   if (!facts.length) return "";
   const { name } = triviaSeason(iso), th = TRIVIA_THEME[name];
@@ -2973,8 +2978,8 @@ function triviaCardHTML({ lbs, iso, seed, title, sub, n = 3, big = false }){
     <div style="font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:${th.accent}">${esc(title)}</div>
     <div style="font-family:var(--disp);font-size:24px;font-weight:800;color:#1B2638;margin:2px 0 4px">${Math.round(lbs).toLocaleString("en-US")} lb</div>
     ${sub ? `<div style="font-size:12px;color:#4A5568;margin-bottom:4px">${sub}</div>` : ""}
-    <div style="font-size:12px;color:#4A5568">That's about…</div>
-    ${triviaFactsHTML(facts, th, big)}
+    <div style="font-size:12px;color:#4A5568">${intro}</div>
+    ${triviaFactsHTML(facts, th, big)}${footer}
   </div>`;
 }
 function triviaLineHTML(entry){
@@ -3785,6 +3790,47 @@ function bwOn(weights, iso){
   return +(pick || ws[ws.length - 1]).lbs;
 }
 function lifetimeVolume(lifts, weights){ return (lifts || []).reduce((a, l) => a + liftVolume(l, bwOn(weights, l.date)), 0); }
+// ---- steps: Apple Health → Shortcut → Firestore inbox (its own doc, so it never touches nutrition) ----
+const STEPS_PER_MILE = 2000;        // steps a logged walk/run mile already earned XP for
+const STEPS_XP_CAP = 20000;         // steps counted per day
+const STEPS_PER_XP = 200;           // 10k steps = 50 XP
+const STEPS_GOAL_BONUS = 25;
+function parseStepsInbox(doc, today){
+  const out = [];
+  for (const [k, v] of Object.entries(doc || {})){
+    const m = /^d(\d{4})(\d{2})(\d{2})$/.exec(k);
+    if (!m || !v || typeof v !== "object") continue;
+    const date = `${m[1]}-${m[2]}-${m[3]}`;
+    if (date > today) continue;
+    const n = Math.round(parseFloat(String(v.steps ?? "").replace(/[^0-9.\-]/g, "")));
+    if (!(n > 0) || n > 200000) continue;     // a locked phone can report nothing; never overwrite a day with zero
+    out.push({ date, steps: n });
+  }
+  return out.sort((a, b) => a.date < b.date ? -1 : 1);
+}
+function mergeSteps(rows, days, makeId){
+  let out = rows || []; const changed = [];
+  for (const d of days){
+    const prev = out.find(r => r.date === d.date);
+    if (prev && prev.steps === d.steps) continue;
+    if (prev && prev.source === "manual" && d.steps < prev.steps) continue;   // keep a bigger number you typed in
+    out = out.filter(r => r.date !== d.date).concat([{ id: prev ? prev.id : makeId(), date: d.date, steps: d.steps, source: "health" }]);
+    changed.push(d.date);
+  }
+  return { steps: out, changed };
+}
+function stepsDayXP(steps, coveredMiles, goal){
+  const counted = Math.min(STEPS_XP_CAP, Math.max(0, steps - (coveredMiles || 0) * STEPS_PER_MILE));
+  return Math.floor(counted / STEPS_PER_XP) + (goal > 0 && steps >= goal ? STEPS_GOAL_BONUS : 0);
+}
+function stepsCoveredMiles(cardio, date){
+  return (cardio || []).filter(c => c.date === date && (c.type === "run" || c.type === "walk" || c.type === "treadmill")).reduce((a, c) => a + (+c.distanceMi || 0), 0);
+}
+function stepsXP(rows, cardio, goal, since, mult){
+  let xp = 0;
+  for (const r of rows || []) if (r.date >= since) xp += stepsDayXP(r.steps, stepsCoveredMiles(cardio, r.date), goal) * (mult ? mult(r.date) : 1);
+  return xp;
+}
 // @food-core-end
 // ----- food: view-only day card, calendar card, Cronometer sync -----
 const NUTRI_SOURCE = { health: "from Cronometer · Apple Health sync", cronometer: "from a Cronometer CSV import", log: "logged in this app", manual: "entered manually" };
@@ -3889,6 +3935,46 @@ function nutritionSettingsHTML(){
     <button class="btn" style="background:transparent;border:1px solid var(--pull);color:var(--pull)" onclick="document.getElementById('csvFile').click()">Upload Cronometer CSV</button>
   </div>`;
 }
+function stepsInboxURL(){
+  const c = data.crew?.config || {};
+  return `https://firestore.googleapis.com/v1/projects/${c.projectId}/databases/(default)/documents/healthInbox/${data.settings.healthToken}-steps?key=${c.apiKey}&updateMask.fieldPaths=d`;
+}
+const STEPS_BODY = '{"fields":{"dDATE":{"mapValue":{"fields":{"steps":{"stringValue":"STEPS"}}}}}}';
+function stepsSettingsHTML(){
+  const s = data.settings, cfg = data.crew?.config;
+  let sync;
+  if (!cfg) sync = `<div style="font-size:13px;color:var(--sub);line-height:1.45">Steps sync uses the same Firebase project as crew sync — set up crew sync below first.</div>`;
+  else if (!s.healthToken) sync = `<div style="font-size:13px;color:var(--sub);line-height:1.45;margin-bottom:10px">Brings your step count in from Apple Health with an iPhone Shortcut, several times a day.</div>
+    <button class="btn" id="stepsSetupBtn" style="background:#2B8A3E;color:#fff" onclick="App.healthSetup()">Set up steps sync</button>`;
+  else sync = `<div id="stepsSetup" style="font-size:13px;line-height:1.5">
+    <div style="color:var(--sub);margin-bottom:6px">${s.stepsLast ? `Last synced ${esc(new Date(s.stepsLast).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}.` : "Nothing received yet."}
+      <button class="linkbtn" style="font-size:13px;padding:0 4px" onclick="App.healthSyncNow()">check now</button></div>
+    <details style="margin-top:6px"><summary style="font-weight:600;cursor:pointer">Setup steps</summary>
+      <div style="margin-top:8px"><b>1. Firestore rules</b> — skip if Cronometer sync already works. Otherwise: Firebase console → Firestore → Rules. Paste inside <span class="mono">match /databases/{database}/documents {</span>, then Publish:</div>
+      ${copyBox("ssRules", HEALTH_RULES)}
+      <div><b>2. Shortcut</b> — new shortcut named "Send steps", with these actions in order:</div>
+      <ol style="margin:4px 0 0 18px;padding:0">
+        <li><b>Format Date</b>: Current Date, Custom, format <span class="mono">yyyyMMdd</span></li>
+        <li><b>Find Health Samples</b> where Type is Steps and Start Date is today. Tap <b>Group By</b> → <b>Day</b> (this stops iPhone + Apple Watch steps counting twice)</li>
+        <li><b>Calculate Statistics</b>: Sum of the Health Samples</li>
+        <li><b>Text</b>: paste the body below, then replace DATE with the Formatted Date and STEPS with the Statistics result</li>
+        <li><b>Get Contents of URL</b>: paste the URL below and add the Formatted Date at the very end. Method PATCH, header <span class="mono">Content-Type: application/json</span>, Request Body: File → the Text</li>
+      </ol>
+      <div style="margin-top:8px">URL (keep private):</div>${copyBox("ssURL", stepsInboxURL())}
+      <div>Body:</div>${copyBox("ssBody", STEPS_BODY)}
+      <div><b>3. Automations</b> — Shortcuts → Automation → New → <b>Time of Day</b>, Daily, Run Immediately → Send steps. Make one each for 9 AM, 12 PM, 3 PM, 6 PM, 9 PM and 11:55 PM. Optional: add a <b>Run Shortcut → Send steps</b> action to the end of "Send nutrition" so closing Cronometer updates steps too.</div>
+      <div style="margin-top:8px"><b>Check:</b> run it once and compare with the Health app's step count for today. If the app shows more, Group By Day is missing.</div>
+    </details></div>`;
+  return `<div class="card" id="stepsSettings">
+    <div class="lbl" style="margin-bottom:8px">Steps</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
+      <span style="font-size:14px;font-weight:600">Daily goal</span>
+      <input id="stepsGoal" type="number" inputmode="numeric" value="${stepsGoal()}" style="width:110px;font-family:var(--mono);text-align:right" onchange="App.stepsGoalSet(this.value)">
+    </div>
+    <div style="font-size:14px;font-weight:600;margin-bottom:4px">Apple Health sync</div>
+    ${sync}
+  </div>`;
+}
 let healthSyncAt = 0, healthSyncing = false;
 async function healthSync(manual){
   const token = data.settings.healthToken;
@@ -3897,23 +3983,42 @@ async function healthSync(manual){
   healthSyncing = true;
   try {
     const { db } = await fbInit();
-    const ref = db.collection("healthInbox").doc(token);
-    const snap = await ref.get();
     healthSyncAt = Date.now();
-    if (!snap.exists){ if (manual) toast("Nothing received yet — run the Shortcut once", true); return; }
-    const doc = snap.data() || {};
-    const { nutrition, changed } = mergeHealthDays(data.nutrition, parseHealthInbox(doc, todayISO()), uid);
-    data.settings.healthLast = Date.now();
-    if (changed.length) data.nutrition = nutrition;
-    save();
-    // keep the inbox small: once it holds 60+ days, rewrite it with the last 30
-    const keys = Object.keys(doc).filter(k => /^d\d{8}$/.test(k)).sort();
-    if (keys.length >= 60){
-      const keep = {}; keys.slice(-30).forEach(k => { keep[k] = doc[k]; });
-      try { await ref.set(keep); } catch (_) {}
+    const trim = async (ref, doc) => {   // keep each inbox small: once it holds 60+ days, rewrite it with the last 30
+      const keys = Object.keys(doc).filter(k => /^d\d{8}$/.test(k)).sort();
+      if (keys.length >= 60){ const keep = {}; keys.slice(-30).forEach(k => { keep[k] = doc[k]; }); try { await ref.set(keep); } catch (_) {} }
+    };
+    const ref = db.collection("healthInbox").doc(token), sref = db.collection("healthInbox").doc(token + "-steps");
+    const [snap, ssnap] = await Promise.all([ref.get(), sref.get()]);
+    let changed = [], schanged = [];
+    if (snap.exists){
+      const doc = snap.data() || {};
+      const r = mergeHealthDays(data.nutrition, parseHealthInbox(doc, todayISO()), uid);
+      changed = r.changed;
+      data.settings.healthLast = Date.now();
+      if (changed.length) data.nutrition = r.nutrition;
+      await trim(ref, doc);
     }
-    if (manual) toast(changed.length ? `Synced ${changed.length} day${changed.length > 1 ? "s" : ""} from Cronometer ✓` : "Up to date ✓");
-    if (changed.length || manual) render();
+    if (ssnap.exists){
+      const doc = ssnap.data() || {};
+      const r = mergeSteps(data.steps, parseStepsInbox(doc, todayISO()), uid);
+      schanged = r.changed;
+      data.settings.stepsLast = Date.now();
+      if (schanged.length) data.steps = r.steps;
+      await trim(sref, doc);
+    }
+    save();
+    if (schanged.length && data.crew?.code) crewPushStats().catch(() => {});
+    if (manual){
+      if (!snap.exists && !ssnap.exists) toast("Nothing received yet — run the Shortcut once", true);
+      else {
+        const bits = [];
+        if (changed.length) bits.push(`${changed.length} nutrition day${changed.length > 1 ? "s" : ""}`);
+        if (schanged.length) bits.push(`${schanged.length} step day${schanged.length > 1 ? "s" : ""}`);
+        toast(bits.length ? `Synced ${bits.join(" + ")} ✓` : "Up to date ✓");
+      }
+    }
+    if (changed.length || schanged.length || manual) render();
   } catch (e) { if (manual) toast("Couldn't reach Firebase — check connection", true); }
   finally { healthSyncing = false; }
 }
@@ -4951,6 +5056,7 @@ function renderSettings(){
     <div style="font-size:12px;color:var(--sub);margin-top:8px">Turning one off hides it from the logging menus — activities you already logged stay visible everywhere.</div>
   </div>`;
   html += nutritionSettingsHTML();
+  html += stepsSettingsHTML();
   return html;
 }
 
@@ -5094,12 +5200,77 @@ function ding(){
   } catch(e){}
 }
 
+// ----- steps -----
+function stepsDayCardHTML(r){
+  const goal = stepsGoal(), pct = Math.min(100, Math.round(r.steps / goal * 100));
+  const xp = stepsDayXP(r.steps, stepsCoveredMiles(data.cardio, r.date), goal);
+  return `<div class="card" style="border-left:4px solid #2B8A3E">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <div class="h2" style="margin:0">STEPS</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--sub)">+${xp} XP${r.source === "manual" ? " · entered" : ""}</div>
+    </div>
+    <div style="font-family:var(--mono);font-size:20px;font-weight:700;margin-top:2px">${r.steps.toLocaleString("en-US")} <span style="font-size:12px;color:var(--sub);font-weight:400">/ ${goal.toLocaleString("en-US")}</span></div>
+    <div style="height:8px;border-radius:4px;background:var(--grid);margin-top:8px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${r.steps >= goal ? "#2B8A3E" : "#69B578"}"></div></div>
+  </div>`;
+}
+function renderStepsView(back){
+  const goal = stepsGoal(), today = todayISO();
+  const rows = [...(data.steps || [])].sort((a, b) => a.date < b.date ? -1 : 1);
+  const get = d => rows.find(r => r.date === d);
+  let html = back("Steps");
+  const t = get(today);
+  const tXP = t ? stepsDayXP(t.steps, stepsCoveredMiles(data.cardio, today), goal) : 0;
+  html += `<div class="card" style="border-top:3px solid #2B8A3E">
+    <div class="lbl" style="margin:0">Today</div>
+    <div style="font-family:var(--disp);font-size:34px;font-weight:800;margin:2px 0">${t ? t.steps.toLocaleString("en-US") : "—"}</div>
+    <div style="height:10px;border-radius:5px;background:var(--grid);overflow:hidden"><div style="height:100%;width:${t ? Math.min(100, Math.round(t.steps / goal * 100)) : 0}%;background:#2B8A3E"></div></div>
+    <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--sub);margin-top:6px">
+      <span>goal ${goal.toLocaleString("en-US")}${t && t.steps < goal ? ` · ${(goal - t.steps).toLocaleString("en-US")} to go` : t ? " · hit ✓" : ""}</span><span>+${tXP} XP</span></div>
+    ${data.settings.stepsLast ? `<div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:6px">synced ${esc(new Date(data.settings.stepsLast).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }))} · <button class="linkbtn" style="font-size:10px;padding:0" onclick="App.healthSyncNow()">refresh</button></div>` : ""}
+  </div>`;
+  const days = [];
+  for (let i = 13; i >= 0; i--) days.push(shiftISO(today, -i));
+  const max = Math.max(goal, ...days.map(d => get(d)?.steps || 0));
+  const last7 = days.slice(-7).map(d => get(d)?.steps || 0).filter(x => x > 0);
+  const avg7 = last7.length ? Math.round(last7.reduce((a, b) => a + b, 0) / last7.length) : 0;
+  let streak = 0;
+  for (let i = 0; i < 400; i++){ const r = get(shiftISO(today, -i)); if (r && r.steps >= goal) streak++; else if (i === 0) continue; else break; }   // today still counts once it's hit
+  html += `<div class="card">
+    <div class="lbl" style="margin-bottom:10px">Last 14 days</div>
+    <div style="position:relative;display:flex;align-items:flex-end;gap:4px;height:120px">
+      <div style="position:absolute;left:0;right:0;bottom:${Math.round(goal / max * 100)}%;border-top:1.5px dashed #2B8A3E;opacity:.6"></div>
+      ${days.map(d => { const v = get(d)?.steps || 0; return `<div title="${d}: ${v}" style="flex:1;height:${Math.max(2, Math.round(v / max * 100))}%;background:${v >= goal ? "#2B8A3E" : v ? "#9BD3A6" : "var(--grid)"};border-radius:4px 4px 0 0"></div>`; }).join("")}
+    </div>
+    <div style="display:flex;gap:4px;margin-top:4px">${days.map(d => `<div style="flex:1;text-align:center;font-family:var(--mono);font-size:9px;color:var(--sub)">${"SMTWTFS"[new Date(d + "T12:00").getDay()]}</div>`).join("")}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px;text-align:center">
+      <div><div style="font-family:var(--mono);font-size:16px;font-weight:700">${avg7 ? avg7.toLocaleString("en-US") : "—"}</div><div style="font-size:11px;color:var(--sub)">7-day avg</div></div>
+      <div><div style="font-family:var(--mono);font-size:16px;font-weight:700">${rows.length ? Math.max(...rows.map(r => r.steps)).toLocaleString("en-US") : "—"}</div><div style="font-size:11px;color:var(--sub)">best day</div></div>
+      <div><div style="font-family:var(--mono);font-size:16px;font-weight:700">${streak}</div><div style="font-size:11px;color:var(--sub)">goal streak</div></div>
+    </div>
+  </div>`;
+  html += `<div class="card">
+    <div class="lbl" style="margin-bottom:8px">Enter a day by hand</div>
+    <div style="display:flex;gap:8px">
+      <input id="stDate" type="date" value="${today}" style="flex:1;min-width:0">
+      <input id="stSteps" type="number" inputmode="numeric" placeholder="steps" style="flex:1;min-width:0;font-family:var(--mono)">
+      <button class="btn ink" style="width:auto;padding:0 14px" onclick="App.stepsSet()">Save</button>
+    </div>
+    ${!data.settings.healthToken || !data.settings.stepsLast ? `<div style="font-size:12px;color:var(--sub);margin-top:8px">Or sync automatically from Apple Health: Settings → Steps.</div>` : ""}
+  </div>`;
+  html += `<div class="card" style="font-size:12px;color:var(--sub);line-height:1.5"><b style="color:var(--ink)">Step XP:</b> 1 XP per ${STEPS_PER_XP} steps (up to ${STEPS_XP_CAP.toLocaleString("en-US")} a day) + ${STEPS_GOAL_BONUS} bonus on days you hit your goal. A 10,000-step day is worth 75 XP — about a third of a lifting session. Walks and runs you log already earn 100 XP a mile, so those miles (≈${STEPS_PER_MILE.toLocaleString("en-US")} steps each) aren't counted twice.</div>`;
+  const recent = rows.slice(-10).reverse();
+  if (recent.length) html += `<div class="card"><div class="lbl" style="margin-bottom:6px">Recent days</div>${recent.map(r => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--grid);font-size:13px">
+      <span>${shortDate(r.date)}${r.source === "manual" ? ` <span style="font-family:var(--mono);font-size:10px;color:var(--sub)">entered</span>` : ""}</span>
+      <span style="display:flex;align-items:center;gap:10px"><span style="font-family:var(--mono)">${r.steps.toLocaleString("en-US")}</span>${delBtn(`ST${r.id}`, `App.delSteps('${r.id}')`)}</span></div>`).join("")}</div>`;
+  return html;
+}
 // ----- progress -----
 function renderProgress(){
   const back = (title) => `<div style="display:flex;align-items:center;gap:10px;margin:2px 0 10px">
     <button onclick="App.trendView(null)" style="background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:14px;font-weight:700;cursor:pointer;color:var(--ink)">‹ Trends</button>
     <div class="h2" style="margin:0">${title}</div></div>`;
 
+  if (ui.trendView==="steps") return renderStepsView(back);
   // ---------- bodyweight ----------
   if (ui.trendView==="weight"){
     let html = back("Bodyweight");
@@ -5411,14 +5582,17 @@ function renderProgress(){
     ${(()=>{ const life = lifetimeVolume(data.lifts, data.weights); if (!(life > 0)) return "";
       const t = todayISO(), mo = t.slice(0, 7);
       const month = data.lifts.filter(l => (l.date||"").startsWith(mo)).reduce((a, l) => a + liftVolume(l, bwOn(data.weights, l.date)), 0);
-      return `<div style="margin-top:12px">${triviaCardHTML({ lbs: life, iso: t, seed: "life" + t, title: "Lifetime weight moved", n: 3,
-        sub: month > 0 ? `${Math.round(month).toLocaleString("en-US")} lb so far this month` : "" })}</div>`; })()}
-    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
+      const mf = month > 0 ? triviaPick(month, t, "mo" + mo, 1)[0] : null;
+      const foot = month > 0 ? `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;padding-top:9px;border-top:1px solid rgba(0,0,0,.12)">
+          ${mf ? taIcon(mf.art, 30) : ""}<div style="font-size:12px;color:#1B2638;line-height:1.35"><b>This month: ${Math.round(month).toLocaleString("en-US")} lb</b>${mf ? ` \u2014 about ${mf.countText} ${esc(mf.name)}` : ""}</div></div>` : "";
+      return `<div style="margin-top:12px">${triviaCardHTML({ lbs: life, iso: t, seed: "life" + t, title: "Lifetime weight moved", n: 3, intro: "All-time, that's about\u2026", footer: foot })}</div>`; })()}
+    <div style="font-family:var(--mono);font-size:10px;color:var(--sub);margin-top:8px">XP: 100/mi run & walk · 5/min other cardio · 250/lifting workout · 1/200 steps (+25 at goal)${isMyBirthdayToday()?" · \u{1F382} 2\u00D7 TODAY":" · 2\u00D7 on your birthday"}</div>
   </div>`;
   html += `<div class="h2" style="margin-top:2px">Trends</div>`;
   html += hubBtn("weight","Bodyweight","var(--ink)", latestW?`latest ${latestW.lbs} lb`:"no weigh-ins yet");
   html += hubBtn("food","Nutrition","var(--pull)", avg7?`7-day avg <span style="color:${kcalColor(avg7)}">${avg7} kcal</span>`:"no days logged yet");
   html += hubBtn("runs","Runs","var(--cardio)", `${wkMi} mi this week`);
+  { const st = (data.steps||[]).find(r => r.date === todayISO()); html += hubBtn("steps","Steps","#2B8A3E", st ? `${st.steps.toLocaleString("en-US")} today \u00B7 goal ${stepsGoal().toLocaleString("en-US")}` : "none synced today"); }
   html += hubBtn("lifts","Lifts","var(--push)", liftCount?`${liftCount} session${liftCount>1?"s":""} logged`:"no sessions yet");
   if (data.crew?.code) html += hubBtn("crew","Crew","#B08D2F", `leaderboard · code ${data.crew.code}`);
 
@@ -5752,6 +5926,16 @@ window.App = {
 
   // progress
   trendView(v){ ui.trendView=v; render(); },
+  stepsGoalSet(v){ const n = Math.round(+v); if (!(n >= 500 && n <= 100000)){ toast("Pick a goal between 500 and 100,000", true); render(); return; } data.settings.stepsGoal = n; save(); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Step goal saved \u2713"); },
+  stepsSet(){
+    const date = $("#stDate")?.value, n = Math.round(+($("#stSteps")?.value || 0));
+    if (!date || date > todayISO()){ toast("Pick today or an earlier day", true); return; }
+    if (!(n > 0 && n <= 200000)){ toast("Enter a step count", true); return; }
+    const prev = data.steps.find(r => r.date === date);
+    data.steps = data.steps.filter(r => r.date !== date).concat([{ id: prev ? prev.id : uid(), date, steps: n, source: "manual" }]);
+    save(); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Steps saved \u2713"); render();
+  },
+  delSteps(id){ if (!confirmDel("ST" + id)) return; data.steps = data.steps.filter(r => r.id !== id); save(); if (data.crew?.code) crewPushStats().catch(()=>{}); toast("Day removed"); render(); },
   wtTable(m){ ui.wtTable = m; render(); },
   openLeaderboard(){ ui.tab="progress"; ui.trendView="crew"; ui.confirmKey=null; render(); },
   progMode(m){ ui.progMode=m; render(); },
