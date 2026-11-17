@@ -198,7 +198,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 98;
+const APP_VERSION = 99;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -2500,7 +2500,7 @@ function progLiveHTML(){
   });
   h += `<button class="btn" style="background:var(--push);color:#fff" onclick="App.progFinish()">Finish workout</button>
     <div style="text-align:center;margin-top:8px">${delBtn("pg-abandon", "App.progAbandon()", "discard this session")}</div>
-    <div id="restBar" style="display:none;position:fixed;left:12px;right:12px;bottom:150px;z-index:30;background:var(--ink);color:#fff;border-radius:12px;padding:12px 14px;font-family:var(--mono);font-size:15px;font-weight:700;box-shadow:0 6px 20px rgba(0,0,0,.25);justify-content:space-between;align-items:center"></div>`;
+    <div id="restBar" style="display:none;position:fixed;left:12px;right:12px;bottom:150px;z-index:30;background:#101826;color:#fff;border:2px solid #FF8A3D;border-radius:14px;padding:12px 14px;font-family:var(--mono);font-size:15px;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.45);justify-content:space-between;align-items:center"></div>`;
   return h;
 }
 // ---------- overview ----------
@@ -3183,7 +3183,7 @@ setInterval(() => {
     return;
   }
   bar.style.display = "flex";
-  bar.innerHTML = `<span>Rest ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}</span><button onclick="App.progRestSkip()" style="background:none;border:1px solid rgba(255,255,255,.4);color:#fff;border-radius:8px;padding:4px 10px;font-family:var(--mono);cursor:pointer">skip</button>`;
+  bar.innerHTML = `<span style="display:flex;align-items:baseline;gap:10px"><span style="font-size:12px;letter-spacing:1px;color:#C9D3E3">REST</span><span style="font-size:26px;font-weight:800;color:#FFD24A;font-variant-numeric:tabular-nums">${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}</span></span><button onclick="App.progRestSkip()" style="background:#FF8A3D;border:none;color:#101826;border-radius:9px;padding:7px 14px;font-family:var(--mono);font-size:13px;font-weight:800;cursor:pointer">skip</button>`;
 }, 1000);
 
 function liftModeSeg(){
