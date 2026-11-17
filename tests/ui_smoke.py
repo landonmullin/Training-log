@@ -1290,6 +1290,19 @@ def other_users_streak_untouched(pw, url):
     with app(pw, url, seed) as pg:
         assert stored(pg)["settings"]["streak"]["count"] == 6
 
+
+@test
+def step_count_not_reduced_by_cardio(pw, url):
+    seed = base(); seed["settings"]["stepsGoal"] = 8000; seed["settings"]["xpStart"] = iso_shift(-30)
+    seed["steps"] = [{"id": "s1", "date": "x", "steps": 12000, "source": "health"}]
+    seed["cardio"] = [{"id": "c1", "date": "x", "type": "basketball", "durationSec": 3600}]
+    with app(pw, url, seed) as pg:
+        pg.evaluate("data.steps[0].date = todayISO(); data.cardio[0].date = todayISO(); save(); App.tab('calendar')")
+        assert "12,000" in pg.inner_text(".stepsw") and "crushed" in pg.inner_text(".stepsw")
+        pg.evaluate("App.openSteps()")
+        txt = pg.inner_text("#view")
+        assert "12,000" in txt and "+55 XP" in txt, txt[:300]      # (12,000 - 6,000 basketball) / 200 + 25
+
 # --- tests above this line ---
 
 def main():

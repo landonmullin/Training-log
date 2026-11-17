@@ -198,7 +198,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 97;
+const APP_VERSION = 98;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -3944,16 +3944,24 @@ function mergeSteps(rows, days, makeId){
   }
   return { steps: out, changed };
 }
-function stepsDayXP(steps, coveredMiles, goal){
-  const counted = Math.min(STEPS_XP_CAP, Math.max(0, steps - (coveredMiles || 0) * STEPS_PER_MILE));
-  return Math.floor(counted / STEPS_PER_XP) + (goal > 0 && steps >= goal ? STEPS_GOAL_BONUS : 0);
+// steps already paid for by cardio XP that day; only step XP is reduced — the step count itself never is
+const STEPS_PER_MIN = { stairmaster: 80, basketball: 100, pickleball: 80, volleyball: 60, pingpong: 40 };
+function stepsCovered(cardio, date){
+  let n = 0;
+  for (const c of cardio || []){
+    if (c.date !== date) continue;
+    if (c.type === "run" || c.type === "walk" || c.type === "treadmill") n += (+c.distanceMi || 0) * STEPS_PER_MILE;   // 100 XP/mi
+    else if (STEPS_PER_MIN[c.type] && c.durationSec) n += (c.durationSec / 60) * STEPS_PER_MIN[c.type];                // 5 XP/min
+  }
+  return Math.round(n);
 }
-function stepsCoveredMiles(cardio, date){
-  return (cardio || []).filter(c => c.date === date && (c.type === "run" || c.type === "walk" || c.type === "treadmill")).reduce((a, c) => a + (+c.distanceMi || 0), 0);
+function stepsDayXP(steps, coveredSteps, goal){
+  const counted = Math.min(STEPS_XP_CAP, Math.max(0, steps - (coveredSteps || 0)));
+  return Math.floor(counted / STEPS_PER_XP) + (goal > 0 && steps >= goal ? STEPS_GOAL_BONUS : 0);
 }
 function stepsXP(rows, cardio, goal, since, mult){
   let xp = 0;
-  for (const r of rows || []) if (r.date >= since) xp += stepsDayXP(r.steps, stepsCoveredMiles(cardio, r.date), goal) * (mult ? mult(r.date) : 1);
+  for (const r of rows || []) if (r.date >= since) xp += stepsDayXP(r.steps, stepsCovered(cardio, r.date), goal) * (mult ? mult(r.date) : 1);
   return xp;
 }
 // ---- crew feed wording + streak repair (pure) ----
@@ -5400,7 +5408,7 @@ function renderStepsView(back){
   const get = d => rows.find(r => r.date === d);
   let html = back("Steps");
   const t = get(today);
-  const tXP = t ? stepsDayXP(t.steps, stepsCoveredMiles(data.cardio, today), goal) : 0;
+  const tXP = t ? stepsDayXP(t.steps, stepsCovered(data.cardio, today), goal) : 0;
   html += `<div class="card" style="border-top:3px solid #2B8A3E">
     <div class="lbl" style="margin:0">Today</div>
     <div style="font-family:var(--disp);font-size:34px;font-weight:800;margin:2px 0">${t ? t.steps.toLocaleString("en-US") : "—"}</div>
@@ -5442,7 +5450,7 @@ function renderStepsView(back){
     </div>
     ${!data.settings.healthToken || !data.settings.stepsLast ? `<div style="font-size:12px;color:var(--sub);margin-top:8px">Or sync automatically from Apple Health: Settings → Steps.</div>` : ""}
   </div>`;
-  html += `<div class="card" style="font-size:12px;color:var(--sub);line-height:1.5"><b style="color:var(--ink)">Step XP:</b> 1 XP per ${STEPS_PER_XP} steps (up to ${STEPS_XP_CAP.toLocaleString("en-US")} a day) + ${STEPS_GOAL_BONUS} bonus on days you hit your goal. A 10,000-step day is worth 75 XP — about a third of a lifting session. Walks and runs you log already earn 100 XP a mile, so those miles (≈${STEPS_PER_MILE.toLocaleString("en-US")} steps each) aren't counted twice.</div>`;
+  html += `<div class="card" style="font-size:12px;color:var(--sub);line-height:1.5"><b style="color:var(--ink)">Step XP:</b> 1 XP per ${STEPS_PER_XP} steps (up to ${STEPS_XP_CAP.toLocaleString("en-US")} a day) + ${STEPS_GOAL_BONUS} bonus on days you hit your goal. A 10,000-step day is worth 75 XP — about a third of a lifting session. Cardio you log already earns its own XP, so the steps from it aren't paid twice: walks and runs with a distance take out about ${STEPS_PER_MILE.toLocaleString("en-US")} steps per mile, and timed sports and stairmaster take out an estimate per minute. Your step count itself is never changed.</div>`;
   const recent = rows.slice(-10).reverse();
   if (recent.length) html += `<div class="card"><div class="lbl" style="margin-bottom:6px">Recent days</div>${recent.map(r => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--grid);font-size:13px">
       <span>${shortDate(r.date)}${r.source === "manual" ? ` <span style="font-family:var(--mono);font-size:10px;color:var(--sub)">entered</span>` : ""}</span>

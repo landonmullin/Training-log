@@ -21,11 +21,23 @@ test("step XP: 1 per 200 steps, capped at 20k, +25 at goal, minus logged walk/ru
   assert.equal(C.stepsDayXP(10000, 0, 8000), 75);          // 50 + 25 bonus
   assert.equal(C.stepsDayXP(7999, 0, 8000), 39);
   assert.equal(C.stepsDayXP(40000, 0, 8000), 125);         // capped: 100 + 25
-  assert.equal(C.stepsDayXP(10000, 3, 8000), 45);          // 3 logged miles = 6k steps already counted → 4k left = 20, + goal 25
-  assert.equal(C.stepsDayXP(5000, 4, 8000), 0);
+  assert.equal(C.stepsDayXP(10000, 6000, 8000), 45);       // 6k steps already paid for by cardio → 4k left = 20, + goal 25
+  assert.equal(C.stepsDayXP(5000, 8000, 8000), 0);
   const cardio = [{ date: "2026-11-13", type: "walk", distanceMi: 2 }, { date: "2026-11-13", type: "bike", distanceMi: 10 }];
-  assert.equal(C.stepsCoveredMiles(cardio, "2026-11-13"), 2);
+  assert.equal(C.stepsCovered(cardio, "2026-11-13"), 4000);   // 2-mile walk; cycling makes no steps
   const rows = [{ date: "2026-11-10", steps: 10000 }, { date: "2026-11-13", steps: 10000 }];
   assert.equal(C.stepsXP(rows, cardio, 8000, "2026-11-11"), 55);               // only on/after xpStart; 2-mile walk subtracted
   assert.equal(C.stepsXP(rows, cardio, 8000, "2026-11-01", d => d === "2026-11-10" ? 2 : 1), 150 + 55);   // birthday 2x
+});
+
+test("timed step-heavy cardio isn't paid twice, step count untouched", () => {
+  const cardio = [
+    { date: "2026-11-16", type: "basketball", durationSec: 3600 },   // ~6,000 steps, already 300 XP
+    { date: "2026-11-16", type: "walk", durationSec: 2160 },         // time-only walk earns no cardio XP → its steps still count
+    { date: "2026-11-16", type: "cycling", durationSec: 1800 },
+  ];
+  assert.equal(C.stepsCovered(cardio, "2026-11-16"), 6000);
+  assert.equal(C.stepsDayXP(12000, C.stepsCovered(cardio, "2026-11-16"), 8000), 30 + 25);   // goal bonus still uses the full 12,000
+  const rows = [{ date: "2026-11-16", steps: 12000 }];
+  assert.equal(rows[0].steps, 12000);
 });
