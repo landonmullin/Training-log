@@ -198,7 +198,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 99;
+const APP_VERSION = 100;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1760,6 +1760,15 @@ const ui = {
   liftMode: null, progView: null, restEnd: null, planDraft: null, pbW: 0, pbOpenEx: null, pfText: "", pfResult: null, celebrate: null,
   planEdit: null, planEditDay: null, planShowPast: false, planDow: null,
 };
+
+// rest timer end time survives closing/reopening the app (stored separately from data)
+(function(){
+  const K = "ftrack-rest-end"; let v = null;
+  try { const n = +localStorage.getItem(K); if (n && n > Date.now() && data.program?.live) v = n; else localStorage.removeItem(K); } catch(e){}
+  Object.defineProperty(ui, "restEnd", { configurable: true, enumerable: true,
+    get(){ return v; },
+    set(x){ v = x || null; try { v ? localStorage.setItem(K, String(v)) : localStorage.removeItem(K); } catch(e){} } });
+})();
 
 // ================= views =================
 function render(){

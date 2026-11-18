@@ -1303,6 +1303,20 @@ def step_count_not_reduced_by_cardio(pw, url):
         txt = pg.inner_text("#view")
         assert "12,000" in txt and "+55 XP" in txt, txt[:300]      # (12,000 - 6,000 basketball) / 200 + 25
 
+@test
+def rest_timer_survives_reopen(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        pg.click("button[aria-label='Bench Press set 1']")
+        pg.wait_for_function("document.getElementById('restBar').style.display === 'flex'", timeout=3000)
+        pg.reload(); pg.evaluate("App.tab('lift')")
+        pg.wait_for_function("document.getElementById('restBar') && document.getElementById('restBar').style.display === 'flex'", timeout=3000)
+        assert "REST" in pg.inner_text("#restBar")
+        pg.click("#restBar button")
+        assert pg.evaluate("localStorage.getItem('ftrack-rest-end')") is None
+        pg.reload(); pg.evaluate("App.tab('lift')"); pg.wait_for_timeout(1500)
+        assert pg.evaluate("document.getElementById('restBar').style.display") == "none"
+
 # --- tests above this line ---
 
 def main():
