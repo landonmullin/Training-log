@@ -1317,6 +1317,27 @@ def rest_timer_survives_reopen(pw, url):
         pg.reload(); pg.evaluate("App.tab('lift')"); pg.wait_for_timeout(1500)
         assert pg.evaluate("document.getElementById('restBar').style.display") == "none"
 
+@test
+def exercise_cues_show_every_time(pw, url):
+    with app(pw, url, _prog_seed(programEnabled=True)) as pg:
+        _start_program(pg)
+        bench = pg.locator(".card", has=pg.locator("button[aria-label='Bench Press set 1']"))
+        bench.locator(".cueadd").click()
+        pg.fill("#cueText", "Shoulder blades back & down\nTouch low chest, 2 sec down")
+        pg.click("text=Save cues")
+        assert stored(pg)["exNotes"]["bench press"].startswith("Shoulder blades")
+        assert "Touch low chest" in bench.locator(".cue").inner_text()
+        assert pg.locator(".cue").count() == 1          # only on Bench Press
+        pg.reload(); pg.evaluate("App.tab('lift')")
+        assert "Shoulder blades" in pg.inner_text(".cue")
+        # same cue appears when logging Bench Press freely (name match ignores case)
+        pg.evaluate("App.progAbandon ? 0 : 0; ui.liftMode = 'free'; render(); App.addExercise('bench press')")
+        assert "Shoulder blades" in pg.inner_text(".cue")
+        # clearing the text removes the cue
+        pg.click(".cue"); pg.fill("#cueText", ""); pg.click("text=Save cues")
+        assert "bench press" not in stored(pg).get("exNotes", {})
+        assert pg.locator(".cue").count() == 0 and pg.locator(".cueadd").count() >= 1
+
 # --- tests above this line ---
 
 def main():

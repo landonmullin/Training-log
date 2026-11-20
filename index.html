@@ -198,7 +198,7 @@
 <script>
 "use strict";
 // ================= data =================
-const APP_VERSION = 100;
+const APP_VERSION = 101;
 const DRAFT_KEY = "ftrack-draft-v1";
 const KEY = "ftrack-data-v2";
 const EMPTY = { lifts:[], cardio:[], weights:[], nutrition:[], steps:[], todos:[], shifts:[], events:[], customExercises:[], foods:[], foodLog:[],
@@ -1757,7 +1757,7 @@ const ui = {
   expandedLifts: new Set(),
   confirmKey: null, pendingRestore: null,
   trendView: null,
-  liftMode: null, progView: null, restEnd: null, planDraft: null, pbW: 0, pbOpenEx: null, pfText: "", pfResult: null, celebrate: null,
+  liftMode: null, progView: null, restEnd: null, cueEdit: null, planDraft: null, pbW: 0, pbOpenEx: null, pfText: "", pfResult: null, celebrate: null,
   planEdit: null, planEditDay: null, planShowPast: false, planDow: null,
 };
 
@@ -2475,6 +2475,22 @@ function progCalendarCardHTML(){
 const progSetCount = live => live.items.reduce((n, it) => n + it.sets.length, 0);
 const progDoneCount = live => live.items.reduce((n, it) => n + it.sets.filter(s => s.done).length, 0);
 // ---------- live checklist ----------
+// ---------- form cues: one note per exercise (by name), shown every time you do it ----------
+function exCueKey(name){ return String(name || "").trim().toLowerCase(); }
+function exCue(name){ return (data.exNotes || {})[exCueKey(name)] || ""; }
+function exCueHTML(name){
+  const k = exCueKey(name), txt = exCue(name);
+  const arg = `decodeURIComponent('${encodeURIComponent(k).replace(/'/g, "%27")}')`;
+  if (ui.cueEdit === k) return `<div class="cueedit" style="margin:0 0 10px">
+      <textarea id="cueText" rows="3" placeholder="e.g. shoulder blades back, elbows ~45°, 2 sec down" style="width:100%;box-sizing:border-box;padding:8px;font-size:14px;border-radius:9px">${esc(txt)}</textarea>
+      <div style="display:flex;gap:8px;margin-top:6px"><button class="btn" style="flex:1;padding:8px;margin:0" onclick="App.cueSave()">Save cues</button><button class="btn" style="flex:0 0 auto;padding:8px 14px;margin:0;background:transparent;color:var(--sub);border:1px solid var(--line)" onclick="App.cueCancel()">Cancel</button></div>
+    </div>`;
+  if (!txt) return `<button class="cueadd" onclick="App.cueEdit(${arg})" style="display:block;background:none;border:none;padding:0;margin:0 0 8px;color:var(--sub);font-size:12px;font-family:var(--mono);cursor:pointer">+ add form cues</button>`;
+  return `<div class="cue" onclick="App.cueEdit(${arg})" style="margin:0 0 10px;padding:8px 10px;border-left:3px solid #FFB020;background:rgba(255,176,32,.10);border-radius:6px;cursor:pointer">
+      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;letter-spacing:1px;color:#C98500;font-weight:700;margin-bottom:3px"><span>CUES</span><span style="font-weight:400;letter-spacing:0">edit</span></div>
+      <div style="font-size:14px;line-height:1.35;white-space:pre-wrap">${esc(txt)}</div>
+    </div>`;
+}
 function progLiveHTML(){
   const p = data.program, live = p.live;
   const W = progWorkout(p, live.day);
@@ -2495,6 +2511,7 @@ function progLiveHTML(){
         ${it.main ? `<span style="font-family:var(--mono);font-size:10px;color:var(--push);font-weight:700">MAIN LIFT</span>` : ""}
       </div>
       <div style="font-family:var(--mono);font-size:12px;color:var(--sub);margin:3px 0 8px">${esc(progItemTarget(it))}</div>
+      ${exCueHTML(it.name)}
       ${it.main && !it.bw ? `<div style="font-size:12px;color:var(--sub);margin-bottom:8px">Warm-up: ${progWarmup(+it.sets[0].w || 45).map(x=>`${x.w}×${x.r}`).join(", ")}</div>` : ""}
       ${it.sets.map((s, si) => `<div class="pgset" style="display:grid;grid-template-columns:44px 34px 1fr 14px 1fr;gap:8px;align-items:center;margin-bottom:6px">
         <button class="pgchk" data-done="${s.done ? 1 : 0}" onclick="App.progCheck(${ii},${si})" aria-label="${esc(it.name)} set ${si + 1}"
@@ -3226,6 +3243,7 @@ function renderLift(){
         </div>
       </div>
       ${lastPerfHTML(ex.name)}
+      ${exCueHTML(ex.name)}
       <div class="setgrid">
         <div class="hd">SET</div><div class="hd">WEIGHT (LB)</div><div class="hd">REPS</div><div class="hd">RPE</div><div></div>
         ${ex.sets.map((s,si)=>`
@@ -6315,6 +6333,15 @@ window.App = {
     save();
   },
   progAwake(on){ data.settings.progAwake = !!on; save(); progWakeSync(); },
+  cueEdit(k){ ui.cueEdit = k; render(); const t = $("#cueText"); if (t){ t.focus(); t.setSelectionRange(t.value.length, t.value.length); } },
+  cueSave(){
+    const t = $("#cueText"), k = ui.cueEdit; if (!k) return;
+    const v = (t ? t.value : "").trim();
+    data.exNotes = data.exNotes || {};
+    if (v) data.exNotes[k] = v.slice(0, 600); else delete data.exNotes[k];
+    ui.cueEdit = null; save(); render(); toast(v ? "Cues saved" : "Cues removed");
+  },
+  cueCancel(){ ui.cueEdit = null; render(); },
   progRestSkip(){ ui.restEnd = null; const b = $("#restBar"); if (b) b.style.display = "none"; },
   progAbandon(){
     if (!confirmDel("pg-abandon")) return;
